@@ -12,3 +12,12 @@ for root in ('image', 'tools'):
         ast.parse(path.read_bytes(), filename=str(path))
 PY
 node --test tools/core.test.mjs
+if [ -n "${WORKPARTNER_TEST_IMAGE:-}" ]; then
+  # Use the image's configured runtime user and system trust store, without networking.
+  docker run --rm -i --network none --entrypoint python3 "$WORKPARTNER_TEST_IMAGE" -I - <<'PY'
+import ssl
+from pathlib import Path
+assert Path('/etc/ssl/certs/ca-certificates.crt').stat().st_size > 0
+assert ssl.create_default_context().cert_store_stats()['x509_ca'] > 0
+PY
+fi

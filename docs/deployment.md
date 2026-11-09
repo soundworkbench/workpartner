@@ -18,13 +18,22 @@ The AionUi archive SHA-256 is different from a digest of an unpacked directory l
 
 ## Release checks
 
-Run Linux checks before building an image. Test login, admission, WebSocket routing, logout, file persistence and a model request using your own deployment. Verify that one person's session cannot access another person's container. Tagging `v*` triggers tests, verified downloads, the image build and registry publication. Images built from third-party packages require a separate review of their license notices.
+Run Linux checks before building an image. After building, run `WORKPARTNER_TEST_IMAGE=<image-tag> bash tools/check.sh` to check the certificate bundle and Python's loaded trust roots as the image's runtime user. The Dockerfile also checks both during the build. This offline check does not establish trust in your particular model endpoint: test a real HTTPS model request with certificate verification enabled. Test login, admission, WebSocket routing, logout, file persistence and both engines using your own deployment. Verify that one person's session cannot access another person's container. Tagging `v*` triggers tests, verified downloads, the image build and registry publication. Images built from third-party packages require a separate review of their license notices.
 
 ## Start an isolated preview
 
 An administrator supplies a dedicated HTTPS hostname with its identity callback set to `https://<host>/_wp/callback`, an existing test application secret file, and existing test model keys. This guide does not create or rotate credentials. Use empty preview directories, and keep them separate from any running deployment.
 
 Copy `org/default` to an external organization directory. Edit its `organization.json`: set `publicHost`, `identity.appId`, `model.baseUrl`, `runtime.nextImage` to `workpartner-user:local`, `runtime.hostData` to the absolute host preview data directory, and `runtime.hostSecure` to the absolute host preview secret directory. The default `runtime.nextDirectory` is `/workspaces`; create `<data>/workspaces`, `<data>/users`, `<data>/state`, and `<secrets>/aionui`, and put an empty JSON array in `<data>/users.json`. Give UID 1001 access to its user volumes. Store the existing identity secret at `<secrets>/identity-app.secret`. Place pre-created test model key files in `<secrets>/model-pool/*.key`; the gateway assigns one to each newly admitted test user. Do not use production keys or user lists.
+
+Set `model.defaults.codex` and `model.defaults.claude` to available test models before building. With `ORG_DIR` set to the absolute host organization directory and `PKG` set to the verified build inputs, build the user image with that organization:
+
+```sh
+WORKPARTNER_ORG_DIR="$ORG_DIR" sh image/build.sh workpartner-user:local
+WORKPARTNER_TEST_IMAGE=workpartner-user:local bash tools/check.sh
+```
+
+The image embeds its own organization, engine templates and model catalog; the gateway mount does not replace them. Existing personal engine files and saved browser selections are preserved. Use a fresh test workspace for first-run default acceptance, and verify the model shown in each engine before sending the test message.
 
 With `ORG_DIR`, `DATA_DIR`, and `SECURE_DIR` set to those absolute host paths, start the gateway:
 

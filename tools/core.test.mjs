@@ -8,6 +8,7 @@ import http from 'node:http';
 import { fork, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 import { organizationData } from '../gateway/organization/resolve.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -24,6 +25,34 @@ test('neutral image inputs assemble without a private organization', t => {
   assert.equal(selected.bridge.template, '');
   assert.ok(fs.existsSync(path.join(dir, 'brand/skin.json')));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'image/bin/legacy-instructions.json'))), []);
+});
+
+test('selected model defaults reach both engine templates and the browser catalog', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-defaults-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const orgDir = path.join(dir, 'org');
+  fs.cpSync(path.join(root, 'org/default'), orgDir, { recursive: true });
+  const file = path.join(orgDir, 'organization.json');
+  const org = JSON.parse(fs.readFileSync(file));
+  Object.assign(org.model.defaults, { codex: 'gpt-6.1-sol', claude: 'claude-custom', effort: 'high' });
+  fs.writeFileSync(file, JSON.stringify(org));
+  const context = path.join(dir, 'context');
+  fs.cpSync(path.join(root, 'image'), path.join(context, 'image'), { recursive: true });
+  const built = spawnSync(process.execPath, [path.join(root, 'gateway/organization/materialize-next.mjs'), context],
+    { encoding: 'utf8', env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: orgDir } });
+  assert.equal(built.status, 0, built.stderr);
+  const codex = fs.readFileSync(path.join(context, 'image/home/codex-config.toml'), 'utf8');
+  assert.match(codex, /^model = "gpt-6.1-sol"$/m);
+  assert.match(codex, /^model_reasoning_effort = "high"$/m);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(context, 'image/home/claude-settings.json'))),
+    { model: 'claude-custom', effortLevel: 'high' });
+  const catalog = vm.runInNewContext(fs.readFileSync(path.join(context, 'brand/models.js'), 'utf8') + '\nMODELS', { window: {} });
+  assert.equal(catalog.codex[0].id, 'gpt-6.1-sol');
+  assert.equal(catalog.claude[0].id, 'claude-custom');
+  const runtime = spawnSync(process.execPath, [path.join(context, 'organization/resolve.mjs'), 'next-env'],
+    { encoding: 'utf8', env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: path.join(context, 'organization/selected'), MODEL_BASE_URL: 'https://models.example.test/v1' } });
+  assert.equal(runtime.status, 0, runtime.stderr);
+  assert.match(runtime.stdout, /export ANTHROPIC_MODEL='claude-custom'/);
 });
 
 test('gateway login, session isolation, personal routing, caching and logout', async t => {

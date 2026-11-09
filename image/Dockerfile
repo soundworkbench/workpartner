@@ -10,7 +10,7 @@ USER root
 
 # 中文字体：镜像已有 Noto Sans/Serif CJK；补文泉驿微米黑/正黑，以及 Office 常用西文字体的等宽替代。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 curl fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
+ && apt-get install -y --no-install-recommends ca-certificates python3 curl fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
       fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation2 node-js-yaml python3-yaml \
  && rm -rf /var/lib/apt/lists/*
 COPY image/fonts.conf /etc/fonts/conf.d/60-workpartner-cjk.conf
@@ -63,5 +63,8 @@ ENV PATH=/opt/workpartner/bin:/opt/claude/bin:/opt/playwright/bin:/usr/local/sbi
     WORKPARTNER_ORG_DIR=/opt/workpartner/organization/selected \
     HOME=/data
 USER 1001:1001
+# Verify the runtime user can load system trust roots before accepting the image.
+RUN test -s /etc/ssl/certs/ca-certificates.crt \
+ && python3 -I -c 'import ssl; assert ssl.create_default_context().cert_store_stats()["x509_ca"] > 0'
 WORKDIR /data
 ENTRYPOINT ["/opt/workpartner/bin/start.sh"]

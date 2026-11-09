@@ -24,11 +24,14 @@ flowchart LR
 
    ```sh
    python3 -I tools/download-inputs.py image/third-party.lock.json /tmp/workpartner-inputs
-   PKG=/tmp/workpartner-inputs sh image/build.sh workpartner-user:local
+   WORKPARTNER_ORG_DIR="$ORG_DIR" PKG=/tmp/workpartner-inputs sh image/build.sh workpartner-user:local
+   WORKPARTNER_TEST_IMAGE=workpartner-user:local bash tools/check.sh
    docker build -f gateway/Dockerfile -t workpartner-gateway:local .
    ```
 
 4. 将组织配置和持久数据挂进网关，设置 `WORKPARTNER_ORG_DIR`，仅将网关放在 HTTPS 反向代理之后。每人容器使用私有网络，不映射端口。
+
+`ORG_DIR` 为第 1 步准备的组织目录的绝对路径。每人镜像在构建时写入模型默认值和外观；只更换网关挂载的组织配置不会更新这些镜像输入，详见[组织配置说明](docs/organization.md)。
 
 ## 目录
 

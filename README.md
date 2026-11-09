@@ -24,11 +24,14 @@ Use a Linux host with Docker, Node.js 24, Python 3, outbound HTTPS, a domain wit
 
    ```sh
    python3 -I tools/download-inputs.py image/third-party.lock.json /tmp/workpartner-inputs
-   PKG=/tmp/workpartner-inputs sh image/build.sh workpartner-user:local
+   WORKPARTNER_ORG_DIR="$ORG_DIR" PKG=/tmp/workpartner-inputs sh image/build.sh workpartner-user:local
+   WORKPARTNER_TEST_IMAGE=workpartner-user:local bash tools/check.sh
    docker build -f gateway/Dockerfile -t workpartner-gateway:local .
    ```
 
 4. Mount your organization configuration and persistent data into the gateway, set `WORKPARTNER_ORG_DIR`, and expose only the gateway behind HTTPS. Keep user containers on private networks without published ports.
+
+Set `ORG_DIR` to the absolute path of the organization directory prepared in step 1. The user image embeds its model defaults and appearance at build time. Mounting a different organization in the gateway does not update these image inputs; see [organization configuration](docs/organization.md).
 
 ## Repository map
 
