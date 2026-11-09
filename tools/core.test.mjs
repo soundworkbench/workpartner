@@ -10,8 +10,79 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { organizationData } from '../gateway/organization/resolve.mjs';
+import { materializeAppearance } from '../gateway/organization/materialize-appearance.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+
+function seedModels(ids) {
+  const result = spawnSync('python3', ['-I', '-c', `
+import ast, json, sys
+from pathlib import Path
+source = Path(sys.argv[1])
+tree = ast.parse(source.read_text())
+functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'model_names']
+scope = {}
+exec(compile(ast.Module(functions, []), str(source), 'exec'), scope)
+print(json.dumps(sorted({name for model in json.load(sys.stdin) for name in scope['model_names'](model)})))
+`, path.join(root, 'image/bin/wp-seed.py')], { input: JSON.stringify(ids), encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+async function modelPicker(t, permissions) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-picker-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const org = organizationData({});
+  Object.assign(org.model.defaults, { codex: 'gpt-6.1-sol', claude: 'claude-sonnet-5-5' });
+  materializeAppearance(dir, org);
+  const overlay = fs.readFileSync(path.join(root, 'image/rebrand/overlay/wp-overlay.js'), 'utf8')
+    .replace('  /* __WP_COPY__ */', fs.readFileSync(path.join(dir, 'copy.js'), 'utf8'))
+    .replace('  /* __WP_MODEL_CATALOG__ */', fs.readFileSync(path.join(dir, 'models.js'), 'utf8'));
+  const window = new EventTarget();
+  const fetch = async () => ({ json: async () => ({ data: { 'wp.models': permissions } }) });
+  window.fetch = fetch;
+  window.WpSmoothText = { SmoothText: class {}, protectedLines: () => [], repairStreamingMarkdown: s => s };
+  const context = vm.createContext({ window, fetch, Event,
+    document: { body: {}, documentElement: {}, querySelector: () => null, querySelectorAll: () => [], addEventListener() {} },
+    location: { hash: '#/guid' }, innerWidth: 320, localStorage: { getItem: () => null },
+    MutationObserver: class { observe() {} }, requestAnimationFrame() {},
+    setTimeout() {}, clearTimeout() {}, setInterval() {},
+  });
+  const end = overlay.lastIndexOf('})();');
+  assert.ok(end > 0);
+  vm.runInContext(overlay.slice(0, end) + 'window.picker = { modelsFor, MODELS };' + overlay.slice(end), context);
+  await new Promise(resolve => setImmediate(resolve));
+  return window.picker;
+}
+
+test('prefixed model permissions retain both default models and exclude unavailable models', async t => {
+  for (const [codex, claude] of [
+    ['codex/gpt-6.1-sol', 'claude/claude-sonnet-5-5'],
+    ['group/gpt-6.1-sol', 'group/claude-sonnet-5-5'],
+    ['auto/gpt-6.1-sol', 'auto/claude-sonnet-5-5'],
+    ['mp-codex/gpt-6.1-sol', 'mp-q/claude/claude-sonnet-5-5'],
+    ['provider/gpt-6.1-sol', 'provider/claude-sonnet-5-5'],
+  ]) await t.test(codex, async t => {
+    const picker = await modelPicker(t, seedModels([codex, claude]));
+    picker.MODELS.codex.push({ id: 'gpt-6.1-terra', key: 'gpt-6.1-terra', name: 'GPT-6.1 Terra' });
+    picker.MODELS.claude.push({ id: 'claude-haiku-5-5', key: 'claude-haiku-5-5', name: 'Haiku 5.5' });
+    assert.deepEqual(Array.from(picker.modelsFor('codex'), m => m.id), ['gpt-6.1-sol']);
+    assert.deepEqual(Array.from(picker.modelsFor('claude'), m => m.id), ['claude-sonnet-5-5']);
+    assert.equal(picker.modelsFor('codex', ['default'])[0].value, 'default');
+    assert.equal(picker.modelsFor('claude', ['default'])[0].value, 'default');
+  });
+});
+
+test('empty permission matches restore the available catalog even with a current model', async t => {
+  for (const permissions of [[], ['provider/unknown-model']]) {
+    const picker = await modelPicker(t, permissions);
+    picker.MODELS.codex.push({ id: 'gpt-6.1-terra', key: 'gpt-6.1-terra', name: 'GPT-6.1 Terra' });
+    picker.MODELS.claude.push({ id: 'claude-haiku-5-5', key: 'claude-haiku-5-5', name: 'Haiku 5.5' });
+    assert.deepEqual(Array.from(picker.modelsFor('codex', null, 'gpt-6.1-terra'), m => m.id), ['gpt-6.1-sol', 'gpt-6.1-terra']);
+    assert.deepEqual(Array.from(picker.modelsFor('claude', null, 'claude-haiku-5-5'), m => m.id), ['claude-sonnet-5-5', 'claude-haiku-5-5']);
+    assert.deepEqual(Array.from(picker.modelsFor('codex', ['default'], 'custom-current'), m => m.value), ['custom-current', 'default']);
+  }
+});
 
 test('neutral image inputs assemble without a private organization', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-image-'));

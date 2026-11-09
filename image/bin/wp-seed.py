@@ -14,7 +14,9 @@ FIRST_RUN = '/data/.wp-seed-v2'
 
 def call(method, path, body=None, base=BASE, headers=None):
     req = urllib.request.Request(base + path, method=method, data=None if body is None else json.dumps(body).encode(),
-                                 headers={'Content-Type': 'application/json', **(headers or {})})
+                                 headers={'Content-Type': 'application/json',
+                                          'User-Agent': 'WorkPartner/1 (+https://github.com/soundworkbench/workpartner)',
+                                          **(headers or {})})
     with urllib.request.urlopen(req, timeout=15) as r:
         text = r.read().decode() or 'null'
     data = json.loads(text)
@@ -34,12 +36,12 @@ def bare():
 
 def model_names(model_id):
     """model 多实例入口的模型名带实例前缀（mp-q/claude/claude-opus-5-5、mp-codex/gpt-6.1-sol），
-    路由组和自动路由写成 group/claude-…、auto/claude-…。统一换成网页按钮认的 claude/…、codex/… 名字，原名保留。"""
+    路由组和自动路由写成 group/claude-…、auto/claude-…。保留原名，同时补齐公司目录的 claude/…、codex/… 名字和中性目录的裸名。"""
     parts = model_id.split('/')
     if len(parts) > 1 and parts[0].startswith('mp-'):
         parts = parts[1:]
     base = parts[-1]
-    names = {model_id, '/'.join(parts)}
+    names = {model_id, '/'.join(parts), base}
     if base.startswith('claude-'):
         names.add('claude/' + base)
     elif base.startswith('gpt-'):

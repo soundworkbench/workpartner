@@ -11,6 +11,7 @@ for root in ('image', 'tools'):
     for path in Path(root).rglob('*.py'):
         ast.parse(path.read_bytes(), filename=str(path))
 PY
+python3 -I tools/wp-seed.test.py image/bin/wp-seed.py
 node --test tools/core.test.mjs
 if [ -n "${WORKPARTNER_TEST_IMAGE:-}" ]; then
   # Use the image's configured runtime user and system trust store, without networking.

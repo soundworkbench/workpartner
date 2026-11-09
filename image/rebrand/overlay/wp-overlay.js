@@ -357,12 +357,17 @@
     }).catch(function () {});
   // 菜单里的模型：[{id: 显示和打勾用的模型, value: 切换时发给对话的值, name}]。当前模型始终在列表里。
   function modelsFor(backend, values, current) {
-    var cur = current ? sameModel(backend, current) : null, list = [];
+    var cur = current ? sameModel(backend, current) : null, list = [], available = [], matched = false;
     (MODELS[backend] || []).forEach(function (m) {
       var value = values ? [m.id].concat(m.also || []).filter(function (v) { return values.indexOf(v) >= 0; })[0] : m.id;
       var usable = value && (!keyModels || keyModels.indexOf(m.key) >= 0);
-      if (usable || m.id === cur) list.push({ id: m.id, value: value || m.id, name: m.name });
+      var item = { id: m.id, value: value || m.id, name: m.name };
+      if (value || m.id === cur) available.push(item);
+      if (usable) matched = true;
+      if (usable || m.id === cur) list.push(item);
     });
+    // An unmatched permission list must not erase the engine's available catalog.
+    if (!matched) list = available;
     if (cur && !list.some(function (m) { return m.id === cur; })) list.unshift({ id: cur, value: current, name: current });
     return list;
   }
