@@ -1,0 +1,20 @@
+  var COPY = {
+    'zh-CN': { editResend: '编辑重发', regenerate: '重新生成', files: '文件', filePreview: '文件预览', filesHide: '收起', filesOpen: '打开文件栏', filesClose: '收起文件栏', brand: '工作伙伴', newChat: '新对话', search: '搜索', automation: '自动化', market: '市场', skills: '技能', tools: '工具', skillsEmpty: '暂无技能', toolsEmpty: '暂无工具', marketFailed: '内容加载失败，请重新打开此页签。', recent: '最近对话', messagePlaceholder: '发消息，或描述要做的事；输入 / 选择技能', upload: '上传文件', fileCount: '{count} 个文件', fileCountOne: '{count} 个文件', attachment: '[附件]', missingChat: '对话不存在或已删除', goHome: '回到首页',
+      changeFile: '修改文件', runCommand: '运行命令', readFile: '读取文件', writeFile: '写入文件', searchFiles: '搜索文件', searchWeb: '搜索网页', openWeb: '打开网页',
+      webFailed: '未完成', webCanceled: '已取消', webMore: '查看来源', appearance: '外观', system: '跟随系统', light: '浅色', dark: '深色', language: '语言', settings: '简单设置', logout: '退出登录',
+      model: '模型', effort: '推理强度', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高',
+      expand: '展开侧边栏', collapse: '收起侧边栏', poke: '戳一下工作伙伴', justNow: '刚刚',
+      working: '处理中', workingFor: '处理中，用时 {duration} ···', second: '秒', minute: '分', hour: '小时',
+      pickFailed: '没有切换成功，请稍后再试', loading: '正在读取设置…',
+      loadFailed: '无法读取设置，请刷新页面重试。',
+      saveFailed: '无法保存设置。更改可能只在此页面生效，请重试。' },
+    'en-US': { editResend: 'Edit and resend', regenerate: 'Regenerate', files: 'Files', filePreview: 'File preview', filesHide: 'Hide', filesOpen: 'Open files panel', filesClose: 'Hide files panel', brand: 'WorkPartner', newChat: 'New chat', search: 'Search', automation: 'Automation', market: 'Market', skills: 'Skills', tools: 'Tools', skillsEmpty: 'No skills yet', toolsEmpty: 'No tools yet', marketFailed: 'Could not load content. Reopen this tab to try again.', recent: 'Recent chats', messagePlaceholder: 'Message, or describe what to do; type / to select a skill', upload: 'Upload files', fileCount: '{count} files', fileCountOne: '{count} file', attachment: '[Attachment]', missingChat: 'Conversation not found or deleted', goHome: 'Back to home',
+      changeFile: 'Modify files', runCommand: 'Run command', readFile: 'Read file', writeFile: 'Write file', searchFiles: 'Search files', searchWeb: 'Search the web', openWeb: 'Open webpage',
+      webFailed: 'Failed', webCanceled: 'Canceled', webMore: 'View sources', appearance: 'Appearance', system: 'System', light: 'Light', dark: 'Dark', language: 'Language', settings: 'Simple settings', logout: 'Log out',
+      model: 'Model', effort: 'Reasoning effort', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max',
+      expand: 'Expand sidebar', collapse: 'Collapse sidebar', poke: 'Poke WorkPartner', justNow: 'Just now',
+      working: 'Working', workingFor: 'Working for {duration} ···', second: 's', minute: 'm', hour: 'h',
+      pickFailed: 'Could not switch. Please try again.', loading: 'Loading settings…',
+      loadFailed: 'Could not load settings. Reload the page to try again.',
+      saveFailed: 'Could not save settings. Changes may only apply to this page. Please try again.' }
+  };

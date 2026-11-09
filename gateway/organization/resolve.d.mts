@@ -1,0 +1,38 @@
+/** Non-secret effective configuration of the existing single-organization deployment. */
+export interface Organization {
+  schemaVersion: 1;
+  revision: string;
+  organizationId: string;
+  directory: string;
+  productName: { zh: string; en: string };
+  displayName: string;
+  server: { publicHost: string; publicOrigin: string; legacyHosts: string[]; previewHost: string; projectHost: string };
+  identity: { provider: 'feishu'; admission: 'pilot-group' | 'unrestricted'; appSecretFile: string; appId: string; pilotChatId: string };
+  model: { codexProvider: string; baseUrl: string; keyPrefix: string; keyMode: 'exec' | 'pool'; defaultsFile: string; keyEnvironment: string; baseEnvironment: string; nextBaseUrl: string; defaults: { codex: string; claude: string; opus: string; sonnet: string; haiku: string; effort: string; language: string; claudePrefix: string }; provision: null | { container: string; command: string[]; keyPattern: string; models: string[] } };
+  runtime: {
+    modelContainer: string; nextImage: string; buildImage: string; baseImage: string; nextContainerPrefix: string; nextUserLabel: string;
+    nextDirectory: string; nextModelKeyFile: string; nextMemory: number; nextPidsLimit: number; nextPort: number;
+    packageDirectory: string; gatewayContainer: string; protectedUsers: string[]; rolloutData: string; rolloutSecure: string; rolloutKeyPrefix: string;
+    project: string; image: string; gatewayImage: string; containerPrefix: string; userLabel: string;
+    network: string; uid: number; memory: number; nanoCpus: number; pidsLimit: number;
+    gatewayPort: number; internalPort: number; webPort: number; gatewayOrigin: string; internalOrigin: string;
+    localAddress: string; configDirectory: string; usersFile: string; usersDirectory: string;
+    modelKeyFile: string; sessionKeyFile: string; secureDirectory: string; cookieFile: string;
+    hostData: string; hostSecure: string; hostConfig: string;
+  };
+  appearance: { brandDirectory: string; timezoneFallback: string; themeColor: string; avatarColor: string; gateway: Record<string, string>; copy?: Record<string, unknown> };
+  image: { officialSkillsArchive?: string; homeDirectory: string; instructions: string; legacyInstructions: string; skillTranslations: string; skills: string[] };
+  bridge: { template: string };
+  tools?: { legacyRollout?: string };
+  extensions: { configFiles: string[] };
+}
+/** Read locally shipped data and existing environment overrides; never reads credentials or writes profiles. */
+export function resolveOrganization(environment?: NodeJS.ProcessEnv): Organization;
+/** Return only the pre-existing public desktop fields. */
+export function desktopPublicConfig(environment: NodeJS.ProcessEnv, packaged?: { PUBLIC_HOST?: unknown; MEEGLE_HOST?: unknown }): { PUBLIC_HOST: string; MEEGLE_HOST: string };
+/** Non-secret release data before deployment overrides. */
+export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publicHost?: string; runtime: Omit<Organization["runtime"], "hostData" | "hostSecure" | "hostConfig" | "modelContainer"> & { modelContainer: string | null } };
+/** Read organization data without requiring deployment endpoints. */
+export function organizationData(environment?: NodeJS.ProcessEnv): OrganizationData;
+/** Resolve next image startup variables without reading a credential. */
+export function nextEnvironment(organization: OrganizationData, environment?: NodeJS.ProcessEnv): Record<string, string>;

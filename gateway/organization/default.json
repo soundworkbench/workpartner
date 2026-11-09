@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "revision": "1",
+  "organizationId": "default",
+  "displayName": "WorkPartner",
+  "identity": {
+    "provider": "feishu",
+    "admission": "unrestricted",
+    "appSecretFile": "/secure/identity-app.secret",
+    "appId": "",
+    "pilotChatId": ""
+  },
+  "model": {
+    "codexProvider": "model",
+    "baseUrl": "",
+    "keyPrefix": "model-",
+    "keyMode": "pool",
+    "defaultsFile": "",
+    "keyEnvironment": "MODEL_API_KEY",
+    "baseEnvironment": "MODEL_BASE_URL",
+    "nextBaseUrl": "",
+    "defaults": {
+      "codex": "gpt-5",
+      "claude": "claude-sonnet-4-5",
+      "opus": "claude-opus-4-1",
+      "sonnet": "claude-sonnet-4-5",
+      "haiku": "claude-haiku-4-5",
+      "effort": "medium",
+      "language": "zh-CN",
+      "claudePrefix": "claude"
+    },
+    "provision": null
+  },
+  "runtime": {
+    "project": "workpartner",
+    "image": "workpartner-legacy:latest",
+    "gatewayImage": "workpartner-gateway:latest",
+    "containerPrefix": "workpartner-legacy-",
+    "userLabel": "workpartner.user",
+    "network": "workpartner-net",
+    "uid": 1001,
+    "memory": 2147483648,
+    "nanoCpus": 2000000000,
+    "pidsLimit": 512,
+    "gatewayPort": 3090,
+    "internalPort": 3091,
+    "webPort": 3080,
+    "gatewayOrigin": "http://workpartner-gateway:3090",
+    "internalOrigin": "http://workpartner-gateway:3091",
+    "localAddress": "127.0.0.1:3080",
+    "configDirectory": "/opt/partner-config",
+    "usersFile": "/etc/partner/users.json",
+    "usersDirectory": "/users",
+    "modelKeyFile": "/etc/partner/model.key",
+    "sessionKeyFile": "/secure/gateway-session.key",
+    "secureDirectory": "/secure",
+    "cookieFile": "/state/cookies.json",
+    "nextImage": "workpartner-next:0.4.2",
+    "buildImage": "workpartner-next:0.5.4",
+    "baseImage": "node:24-bookworm-slim",
+    "nextContainerPrefix": "workpartner-next-",
+    "nextUserLabel": "workpartner.next-user",
+    "nextDirectory": "/workspaces",
+    "nextModelKeyFile": "/etc/partner/model.key",
+    "nextMemory": 3221225472,
+    "nextPidsLimit": 1024,
+    "nextPort": 25808,
+    "packageDirectory": "/opt/workpartner/pkg",
+    "gatewayContainer": "workpartner-gateway",
+    "protectedUsers": [],
+    "rolloutData": "/var/lib/workpartner",
+    "rolloutSecure": "/etc/workpartner/secure",
+    "rolloutKeyPrefix": "model-",
+    "modelContainer": ""
+  },
+  "appearance": {
+    "brandDirectory": "appearance",
+    "timezoneFallback": "UTC",
+    "copy": {
+      "footerTitle": "工作伙伴",
+      "footerSubtitle": "让每天的工作更轻松",
+      "taglineEn": "Your AI work partner.",
+      "homeExample": "例如：帮我整理会议纪要，列出下一步行动",
+      "manifestDescription": "工作伙伴",
+      "tableFile": "copy.js",
+      "appearanceName": "柔和",
+      "streamingComment": "/* Shared streaming text algorithm, copied at build time. */",
+      "modelCatalogFile": "models.js"
+    },
+    "gateway": {
+      "mark": "<svg viewBox=\"0 0 64 64\" width=\"72\" height=\"72\" aria-hidden=\"true\"><rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#333\"/><path d=\"m14 22 8 22 10-17 10 17 8-22\" fill=\"none\" stroke=\"white\" stroke-width=\"4\"/></svg>",
+      "accent": "#333",
+      "focus": "#777",
+      "background": "#f5f5f5",
+      "foreground": "#222",
+      "shadow": "#ddd,0 18px 48px -24px rgba(0,0,0,.28)",
+      "divider": "#eee",
+      "muted": "#666"
+    },
+    "themeColor": "#333333",
+    "avatarColor": "#333333"
+  },
+  "extensions": {
+    "configFiles": []
+  },
+  "productName": {
+    "zh": "工作伙伴",
+    "en": "WorkPartner"
+  },
+  "image": {
+    "skillTranslations": "",
+    "homeDirectory": "",
+    "instructions": "",
+    "legacyInstructions": "",
+    "skills": []
+  },
+  "bridge": {
+    "template": ""
+  }
+}

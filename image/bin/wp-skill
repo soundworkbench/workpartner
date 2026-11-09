@@ -1,0 +1,195 @@
+#!/usr/bin/python3
+"""Manage personal skills shared by Claude Code and Codex; run as the container owner."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import tempfile
+import zipfile
+
+import yaml
+
+NAME = re.compile(r"^[a-z0-9-]+$")
+MAX_UPLOAD = 10 * 1024 * 1024
+# A small compressed file must not exhaust the personal volume during extraction.
+MAX_EXPANDED = 100 * 1024 * 1024
+
+
+class SkillError(Exception):
+    def __init__(self, code, message, **extra):
+        self.result = {"error": code, "message": message, **extra}
+
+
+def reject(code, message, **extra):
+    raise SkillError(code, message, **extra)
+
+
+def metadata(source):
+    match = re.match(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", source, re.S)
+    try:
+        meta = yaml.safe_load(match[1] + '\n') if match else None
+    except yaml.YAMLError:
+        meta = None
+    if not isinstance(meta, dict) or not isinstance(meta.get("name"), str) or not NAME.fullmatch(meta["name"]):
+        reject("invalid_name", "技能名称只能包含小写字母、数字和连字符。")
+    return {"name": meta["name"], "description": str(meta.get("description") or "")}
+
+
+class SkillStore:
+    def __init__(self, home=Path('/data'), builtin=Path('/opt/workpartner/skills'),
+                 translations=Path('/opt/workpartner/skills-zh.json'), uploads=Path('/data/.wp-skill-uploads')):
+        self.skills = home / '.claude/skills'
+        self.codex = home / '.codex/skills'
+        self.builtin, self.uploads = builtin, uploads.resolve()
+        self.zh = json.loads(translations.read_text())
+        self.protected = set(self.zh) | {p.name for p in builtin.iterdir() if p.is_dir()}
+
+    def run(self, action, value=None, overwrite=False):
+        self.skills.mkdir(parents=True, exist_ok=True)
+        self.codex.mkdir(parents=True, exist_ok=True)
+        with (self.skills.parent / '.wp-skills.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if action == 'list':
+                return self.list()
+            if action == 'install':
+                return self.install(value, overwrite)
+            return self.delete(value)
+
+    def list(self):
+        rows = []
+        for directory in sorted(self.skills.iterdir()):
+            if not NAME.fullmatch(directory.name) or directory.is_symlink() or not directory.is_dir():
+                continue
+            file = directory / 'SKILL.md'
+            if not file.is_file() or file.is_symlink():
+                continue
+            meta = metadata(file.read_text(encoding='utf-8'))
+            preinstalled = directory.name in self.protected
+            zh = self.zh.get(meta['name'], {}) if preinstalled else {}
+            rows.append({"id": directory.name, **meta, "preinstalled": preinstalled,
+                         "displayName": zh.get('name', meta['name']),
+                         "displayDescription": zh.get('description', meta['description'])})
+        return {"skills": sorted(rows, key=lambda row: (not row['preinstalled'], row['id']))}
+
+    def mutable(self, name):
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            reject('invalid_name', '技能名称只能包含小写字母、数字和连字符。')
+        if name in self.protected:
+            reject('preinstalled', '预装技能不能覆盖或删除。')
+        directory, link = self.skills / name, self.codex / name
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            reject('unsafe_target', '现有技能目录无法安全修改，请联系管理员。')
+        if link.exists() and not link.is_symlink():
+            reject('unsafe_target', '现有 ChatGPT 技能目录需要管理员核对，未作修改。')
+        return directory, link
+
+    def install(self, uploaded, overwrite):
+        source = Path(uploaded).resolve()
+        if not source.is_relative_to(self.uploads) or not source.is_file():
+            reject('invalid_upload', '请选择本人上传的技能文件。')
+        if source.stat().st_size > MAX_UPLOAD:
+            reject('too_large', '技能文件不能超过 10 MB。')
+        with tempfile.TemporaryDirectory(prefix='.wp-skill-', dir=self.skills.parent) as temporary:
+            stage = Path(temporary) / 'new'
+            stage.mkdir()
+            if source.suffix.lower() == '.zip':
+                self.extract(source, stage)
+            elif source.suffix.lower() == '.md':
+                shutil.copyfile(source, stage / 'SKILL.md')
+            else:
+                reject('invalid_upload', '请选择 .zip 或 SKILL.md 文件。')
+            file = stage / 'SKILL.md'
+            if not file.is_file():
+                reject('missing_skill', '技能包根目录或一层子目录中需要有 SKILL.md。')
+            meta = metadata(file.read_text(encoding='utf-8'))
+            name = meta['name']
+            directory, link = self.mutable(name)
+            if directory.exists() and not overwrite:
+                reject('exists', '已有同名技能，是否覆盖？', name=name)
+            backup = Path(temporary) / 'old'
+            staged_link = Path(temporary) / 'link'
+            staged_link.symlink_to(directory)
+            existed = directory.exists()
+            if existed:
+                directory.rename(backup)
+            try:
+                stage.rename(directory)
+                os.replace(staged_link, link)
+            except OSError:
+                if directory.exists():
+                    shutil.rmtree(directory)
+                if existed:
+                    backup.rename(directory)
+                raise
+        return {"name": name}
+
+    def extract(self, source, stage):
+        with zipfile.ZipFile(source) as archive:
+            entries = archive.infolist()
+            files = [entry for entry in entries if not entry.is_dir()]
+            if len(files) > 200:
+                reject('too_many_files', '技能包最多包含 200 个文件。')
+            for entry in entries:
+                name = entry.filename
+                if (not name or '\\' in name or '\x00' in name or PurePosixPath(name).is_absolute()
+                        or '..' in name.split('/') or ':' in name.split('/')[0]):
+                    reject('unsafe_archive', '技能包不能包含上级路径或绝对路径。')
+                mode = entry.external_attr >> 16
+                if stat.S_ISLNK(mode) or stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    reject('unsafe_archive', '技能包不能包含软链接或特殊文件。')
+            candidates = [entry for entry in files if PurePosixPath(entry.filename).name == 'SKILL.md'
+                          and len(PurePosixPath(entry.filename).parts) <= 2]
+            if len(candidates) != 1:
+                reject('missing_skill', '技能包根目录或一层子目录中需要有唯一的 SKILL.md。')
+            root = PurePosixPath(candidates[0].filename).parent
+            if sum(entry.file_size for entry in files) > MAX_EXPANDED:
+                reject('too_large', '技能包解压后过大，请精简后重试。')
+            for entry in files:
+                relative = PurePosixPath(entry.filename)
+                if not relative.is_relative_to(root):
+                    continue  # ZIP tools may add metadata alongside the single skill folder.
+                target = stage / str(relative.relative_to(root))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(entry) as reader, target.open('xb') as writer:
+                    shutil.copyfileobj(reader, writer)
+                # Keep executable scripts usable without restoring special permission bits.
+                target.chmod(0o755 if entry.external_attr >> 16 & 0o111 else 0o644)
+
+    def delete(self, name):
+        directory, link = self.mutable(name)
+        if not directory.is_dir():
+            reject('not_found', '没有找到这个技能，请刷新列表。')
+        # Move both entries out of the engine search paths before removing owned files.
+        with tempfile.TemporaryDirectory(prefix='.wp-skill-', dir=self.skills.parent) as temporary:
+            backup = Path(temporary) / 'old'
+            directory.rename(backup)
+            try:
+                if link.is_symlink():
+                    link.unlink()
+            except OSError:
+                backup.rename(directory)
+                raise
+        return {"name": name}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('action', choices=['list', 'install', 'delete'])
+    parser.add_argument('value', nargs='?')
+    parser.add_argument('--overwrite', action='store_true')
+    args = parser.parse_args()
+    try:
+        result = SkillStore().run(args.action, args.value, args.overwrite)
+    except SkillError as error:
+        result = error.result
+    except (OSError, ValueError, TypeError, RuntimeError, zipfile.BadZipFile, UnicodeError):
+        result = {"error": "invalid_skill", "message": "技能文件无法处理，未确认完成，请检查文件后重试。"}
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    main()

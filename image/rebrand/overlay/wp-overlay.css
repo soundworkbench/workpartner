@@ -1,0 +1,573 @@
+/* 工作伙伴：隐藏不给同事用的入口。选择器由 wp-overlay.js 打上 wp-hide 类。 */
+.wp-hide { display: none !important; }
+/* ChatGPT 图标是黑色花形标志，深色主题下反白 */
+[data-theme="dark"] img.wp-chatgpt { filter: invert(1); }
+
+/* 外观沿用原来 旧版后端 工作伙伴的__WP_APPEARANCE_NAME__皮肤：米白底、浅灰侧栏、炭黑主按钮；深色同样按它的配色。
+   只改 AionUi 与 Arco 的颜色变量和少量版式，明暗跟随本人在 AionUi 里的选择（html[data-theme]）。 */
+html[data-color-scheme] {
+  --wp-header-font-size: 15px;
+  --wp-main: #F2F2ED; --wp-sidebar: #E0E0DC; --wp-card: #FDFDF8; --wp-code: #FAFAF5;
+  --wp-ink: rgba(0, 0, 0, 0.88); --wp-ink-2: rgba(0, 0, 0, 0.56); --wp-ink-3: rgba(0, 0, 0, 0.44); --wp-ink-4: rgba(0, 0, 0, 0.32);
+  --wp-line: rgba(0, 0, 0, 0.08); --wp-focus-line: rgba(107, 107, 103, 0.30);
+  --wp-hover: rgba(0, 0, 0, 0.05); --wp-active: rgba(0, 0, 0, 0.08);
+  --wp-row-selected: hsl(214.3 6% 99%); --wp-row-selected-ink: #292A2C; --wp-sidebar-hover: rgba(0, 0, 0, 0.05);
+  --wp-send: #3C3F43; --wp-send-ink: #FCFCFC; --wp-send-hover: #2E3237;
+  --wp-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  --bg-base: var(--wp-card); --bg-1: var(--wp-main); --bg-2: var(--wp-code); --bg-3: #DADAD5; --bg-4: #C4C4BF; --bg-5: #A8A8A3;
+  --bg-6: #8A8A86; --bg-8: #57575A; --bg-9: #2A2A2C; --bg-10: #151515;
+  --bg-hover: var(--wp-hover); --bg-active: var(--wp-active);
+  --text-primary: var(--wp-ink); --color-text-1: var(--wp-ink); --text-0: var(--wp-ink); --text-secondary: var(--wp-ink-2); --text-disabled: var(--wp-ink-4);
+  --primary: var(--wp-send); --info: var(--wp-send); --brand: var(--wp-send); --brand-light: var(--wp-hover); --brand-hover: rgba(0, 0, 0, 0.10);
+  --border-base: var(--wp-line); --border-light: rgba(0, 0, 0, 0.05); --border-special: var(--wp-line);
+  --message-user-bg: var(--wp-card); --message-tips-bg: rgba(0, 0, 0, 0.035); --workspace-btn-bg: var(--wp-hover);
+  --fill: var(--wp-code); --fill-0: var(--wp-card); --dialog-fill-0: var(--wp-card); --color-guid-agent-bar: var(--wp-hover);
+  --aou-1: #F7F7F2; --aou-2: #EBEBE6; --aou-3: #DADAD5; --aou-4: #C4C4BF; --aou-5: #A8A8A3; --aou-6: #8A8A86; --aou-7: #6B6B67; --aou-8: #4A4A4D; --aou-9: #2E2E31; --aou-10: #151515;
+  --aion-overlay-bg: var(--wp-card); --aion-overlay-text: var(--wp-ink); --aion-overlay-border: var(--wp-line);
+}
+html[data-theme="dark"][data-color-scheme] {
+  --wp-main: #181818; --wp-sidebar: #080808; --wp-card: #1F1F1F; --wp-code: #1D1D1D;
+  --wp-ink: rgba(255, 255, 255, 0.82); --wp-ink-2: rgba(255, 255, 255, 0.55); --wp-ink-3: rgba(255, 255, 255, 0.40); --wp-ink-4: rgba(255, 255, 255, 0.30);
+  --wp-line: rgba(255, 255, 255, 0.10); --wp-focus-line: rgba(193, 193, 193, 0.30);
+  --wp-hover: rgba(255, 255, 255, 0.06); --wp-active: rgba(255, 255, 255, 0.10);
+  --wp-row-selected: hsl(214.3 5.5% 24.9%); --wp-row-selected-ink: #EEEEEE; --wp-sidebar-hover: rgba(255, 255, 255, 0.09);
+  --wp-send: #EEEEEE; --wp-send-ink: #151515; --wp-send-hover: #E2E2E2;
+
+  --bg-3: #2A2A2A; --bg-4: #333333; --bg-5: #3C3C3C; --bg-6: #4A4A4A; --bg-8: #6E6E6E; --bg-9: #A6A6A6; --bg-10: #D9D9D9;
+  --brand-hover: rgba(255, 255, 255, 0.13); --border-light: rgba(255, 255, 255, 0.06); --message-tips-bg: rgba(255, 255, 255, 0.04);
+  --aou-1: #1D1D1D; --aou-2: #262626; --aou-3: #333333; --aou-4: #444444; --aou-5: #5A5A5A; --aou-6: #777777; --aou-7: #999999; --aou-8: #BBBBBB; --aou-9: #DDDDDD; --aou-10: #EEEEEE;
+}
+/* Arco 组件变量定义在 body 上，主色还会被 AionUi 写进 body 的行内样式，所以这里用 !important */
+html body {
+  --color-bg-1: var(--wp-card) !important; --color-bg-2: var(--wp-card) !important; --color-bg-3: var(--wp-code) !important;
+  --color-bg-4: var(--wp-code) !important; --color-bg-5: var(--wp-card) !important; --color-bg-popup: var(--wp-card) !important;
+  --color-text-1: var(--wp-ink) !important; --color-text-2: var(--wp-ink-2) !important; --color-text-3: var(--wp-ink-3) !important; --color-text-4: var(--wp-ink-4) !important;
+  --color-border: var(--wp-line) !important; --color-border-1: var(--wp-line) !important; --color-border-2: var(--wp-line) !important;
+  --color-border-3: var(--wp-line) !important; --color-border-4: var(--wp-focus-line) !important;
+  --color-fill-1: rgba(0, 0, 0, 0.03) !important; --color-fill-2: var(--wp-hover) !important; --color-fill-3: var(--wp-active) !important; --color-fill-4: rgba(0, 0, 0, 0.10) !important;
+  --color-secondary: var(--wp-hover) !important; --color-secondary-hover: var(--wp-active) !important; --color-secondary-active: rgba(0, 0, 0, 0.10) !important;
+  --primary-1: 240, 240, 236 !important; --primary-2: 224, 224, 220 !important; --primary-3: 196, 196, 191 !important; --primary-4: 138, 138, 134 !important;
+  --primary-5: 46, 50, 55 !important; --primary-6: 60, 63, 67 !important; --primary-7: 30, 33, 37 !important;
+  --link-6: 29, 78, 216 !important;
+  --color-tooltip-bg: #3C3F43 !important;
+  font-family: var(--wp-font) !important;
+  color: var(--wp-ink);
+}
+html[data-theme="dark"] body {
+  --color-fill-1: rgba(255, 255, 255, 0.04) !important; --color-fill-4: rgba(255, 255, 255, 0.13) !important;
+  --color-secondary-active: rgba(255, 255, 255, 0.13) !important;
+  --primary-1: 40, 40, 40 !important; --primary-2: 52, 52, 52 !important; --primary-3: 80, 80, 80 !important; --primary-4: 120, 120, 120 !important;
+  --primary-5: 226, 226, 226 !important; --primary-6: 238, 238, 238 !important; --primary-7: 210, 210, 210 !important;
+  --link-6: 147, 197, 253 !important;
+  --color-tooltip-bg: #181818 !important;
+}
+html body button, html body input, html body textarea, html body select { font-family: var(--wp-font) !important; }
+html body .arco-btn-primary:not(.arco-btn-status-danger) { color: var(--wp-send-ink) !important; }
+
+/* 顶部标题栏：与下方连成一体（左段是侧栏色，右段是主区色），不要分隔线；后退、前进不给同事用 */
+html body .app-titlebar {
+  background: linear-gradient(to right, var(--wp-sidebar) 0 var(--wp-sider-w, 260px), var(--wp-main) var(--wp-sider-w, 260px)) !important;
+  border-bottom: 0 !important;
+}
+html body .app-titlebar__button--nav { display: none !important; }
+
+/* 侧栏：品牌、导航与对话标题共用 24px 图标槽和 8px 间距。 */
+html { --wp-sidebar-slot: 24px; --wp-sidebar-gap: 8px; --wp-sidebar-inset: 18px; }
+html body aside.layout-sider {
+  background: var(--wp-sidebar) !important;
+  box-sizing: border-box; border-right: 1px solid var(--wp-line) !important;
+}
+html body aside.layout-sider.collapsed,
+html body aside.layout-sider.arco-layout-sider-collapsed { border-right: 0 !important; }
+html body [data-explorer-column] { border-left: 1px solid var(--wp-line) !important; }
+html body [data-explorer-column][data-collapsed="true"] { border-left: 0 !important; }
+/* 静止时只留 1px 分界，悬停或拖动仍保留原生宽拖动提示。 */
+html body [data-explorer-column] > .cursor-col-resize:not(:hover) > span { opacity: 0; }
+/* 两处边缘共用透明度遮罩，透出各自背景；到达边缘时不遮住首末行。 */
+html { --wp-edge-fade-size: 32px; --wp-edge-fade-solid: #000; --wp-edge-fade-clear: transparent; }
+html body aside.layout-sider [class*="_scrollArea"],
+html body [data-testid="message-list-scroller"] {
+  -webkit-mask-image: linear-gradient(var(--wp-edge-fade-direction, to bottom), var(--wp-edge-fade-solid) calc(100% - var(--wp-edge-fade, 0px)), var(--wp-edge-fade-clear) 100%);
+  mask-image: linear-gradient(var(--wp-edge-fade-direction, to bottom), var(--wp-edge-fade-solid) calc(100% - var(--wp-edge-fade, 0px)), var(--wp-edge-fade-clear) 100%);
+}
+html body [data-testid="message-list-scroller"] { --wp-edge-fade-direction: to top; }
+/* 列表底部已有渐隐，个人菜单上方不再画原生分隔线。 */
+html body aside.layout-sider .sider-footer { border-top: 0 !important; }
+html body aside.layout-sider .sider-section-label,
+html body aside.layout-sider .workspace-collapse > .sticky { background: var(--wp-sidebar) !important; }
+/* 只盖住滚入分组标题下方的行；标题与原生点击区域保持不变。 */
+html body aside.layout-sider .sider-section-label::after,
+html body aside.layout-sider .workspace-collapse > .sticky::after {
+  content: ''; position: absolute; top: 100%; left: 0; right: 0;
+  height: var(--wp-section-fade, 0px); pointer-events: none;
+  background: var(--wp-sidebar);
+  -webkit-mask-image: linear-gradient(to bottom, var(--wp-edge-fade-solid), var(--wp-edge-fade-clear));
+  mask-image: linear-gradient(to bottom, var(--wp-edge-fade-solid), var(--wp-edge-fade-clear));
+}
+html body aside.layout-sider .sider-section-title { font-size: 14px !important; font-weight: 400 !important; color: var(--wp-ink-3) !important; }
+html body .chat-history__item { border-radius: 9999px !important; }
+html body .chat-history__item.pl-34px { padding-left: 10px !important; }
+html body .chat-history__item:hover { background: var(--wp-sidebar-hover) !important; }
+html body .chat-history__item.\!bg-fill-3 { background: var(--wp-row-selected) !important; color: var(--wp-row-selected-ink) !important; }
+html body .chat-history__item-name { font-size: 14px !important; font-weight: 400 !important; line-height: 20px !important; }
+html body [class*="_newChatTrigger"] { border-radius: 9999px !important; font-weight: 400 !important; }
+html body [class*="_newChatTrigger"]:hover { background: var(--wp-sidebar-hover) !important; }
+html body [class*="_newChatTrigger"] > span:first-child { background: transparent !important; border-color: transparent !important; }
+
+/* 主区与右侧文件栏（右上角收起按钮去掉浏览器默认底色） */
+html body .workspace-header__toggle { background: transparent !important; border: 0 !important; }
+html body main.layout-content, html body .layout-content main { background: var(--wp-main) !important; }
+html body header[class*="chat-layout"] { background: var(--wp-main) !important; }
+
+/* 首页标题：动态形象（40px）+ “工作伙伴”，与原来一致 */
+html body [class*="_heroHeader"] { display: flex !important; justify-content: center; align-items: center; }
+html body [class*="_heroHeader"] > :not(.wp-hero) { display: none !important; }
+.wp-hero { display: flex; align-items: center; gap: 12px; min-height: 40px; }
+.wp-hero-mark { display: inline-flex; width: 40px; height: 40px; }
+.wp-hero-name { font-size: 28px; font-weight: 400; line-height: 40px; color: var(--wp-ink); letter-spacing: 0.02em; }
+/* 跟随位移在 face 上；eye 的过渡只负责眨眼。仅缩短新版首页的鼠标跟随。 */
+html body .wp-hero .zp-pet .face { transition: transform .08s cubic-bezier(.3,.7,.4,1); }
+
+/* 输入框：16px 圆角、1px 细线、无描边光晕；发送按钮炭黑（深色下浅灰） */
+html body .sendbox-panel,
+html body [class*="_guidInputInner"] {
+  background: var(--wp-card) !important; border: 0 !important; border-radius: 16px !important;
+  box-shadow: 0 0 0 1px var(--wp-line) !important; transition: box-shadow 150ms;
+}
+html body .sendbox-panel:focus-within,
+html body [class*="_guidInputInner"]:focus-within { box-shadow: 0 0 0 1px var(--wp-focus-line) !important; }
+html body [class*="_guidInputCardWrap"] { border-radius: 16px !important; box-shadow: none !important; background: transparent !important; }
+html body .sendbox-panel textarea, html body [class*="_guidInputInner"] textarea { font-size: 14px !important; line-height: 24px !important; }
+html body .sendbox-panel textarea::placeholder, html body [class*="_guidInputInner"] textarea::placeholder { color: var(--wp-ink-4) !important; }
+html[data-color-scheme] body .send-button-custom.arco-btn.arco-btn-primary,
+html[data-color-scheme] body [class*="_guidInputInner"] .arco-btn.arco-btn-primary {
+  background-color: var(--wp-send) !important; border-color: var(--wp-send) !important; color: var(--wp-send-ink) !important; opacity: 1 !important;
+}
+html[data-color-scheme] body .send-button-custom.arco-btn.arco-btn-primary:not(:disabled):hover,
+html[data-color-scheme] body [class*="_guidInputInner"] .arco-btn.arco-btn-primary:not(:disabled):hover { background-color: var(--wp-send-hover) !important; }
+html[data-color-scheme] body .send-button-custom.arco-btn.arco-btn-primary:disabled,
+html[data-color-scheme] body [class*="_guidInputInner"] .arco-btn.arco-btn-primary:disabled { opacity: 0.4 !important; }
+/* IconPark 箭头的 path 写有固定 stroke，不能只改按钮的 color。 */
+html[data-color-scheme] body .send-button-custom svg path { stroke: currentColor !important; }
+html[data-theme="dark"][data-color-scheme] body .sendbox-stop-button.arco-btn {
+  background: var(--wp-send) !important; border: 0 !important; color: var(--wp-send-ink) !important; animation: none !important;
+}
+html[data-theme="dark"][data-color-scheme] body .sendbox-stop-button.arco-btn .bg-6 { background: currentColor !important; }
+html body .sendbox-panel .arco-btn-secondary, html body [class*="_guidInputInner"] .arco-btn-secondary { background: var(--wp-hover) !important; }
+
+/* 首页只留覆盖层自己的模型选择：AionUi 首页自带的模型、权限按钮（新建对话时都会被覆盖层改写，选了不起作用）桌面上整组不显示；
+   手机“更多”抽屉里的模型、思考强度、权限三行同样不显示 */
+html body [class*="_actionConfigGroup"] { display: none !important; }
+html body [data-testid="mobile-action-sheet-model"], html body [data-testid="mobile-action-sheet-thought-level"],
+html body [data-testid="mobile-action-sheet-permission"], html body [data-testid="mobile-action-sheet-permission"] + [class*="_divider"] { display: none !important; }
+
+/* 新对话的消息骨架（8 条假气泡）只会在新对话里闪一下，不显示 */
+html body [data-testid="message-list-skeleton"] { visibility: hidden; }
+/* 临时等待条沿用原生思考条；没有思考正文可展开。 */
+html body .wp-waiting { pointer-events: none; }
+html body .wp-waiting > div { background: none; border: 0; padding: 0; margin: 0; }
+html body .wp-waiting > div > div:first-child { background: none; padding: 0; gap: 6px; color: var(--wp-ink-2); min-height: 28px; }
+html body .wp-waiting > div > div:first-child > span { color: inherit; font-size: 12px; line-height: 22px; font-variant-numeric: tabular-nums; }
+html body .wp-waiting > div > div:first-child > span:last-child,
+html body .wp-waiting > div > div:last-child:not(:first-child) { display: none; }
+
+/* 发送时只遮消息区；独立的输入框副本从首页连续移到底部。 */
+html body.wp-sidebar-pending aside.layout-sider [class*="_scrollArea"] { opacity: 0 !important; }
+html body.wp-home-sending [class*="_guidLayout"] { visibility: hidden; }
+html body.wp-composer-pending .sendbox-panel { visibility: hidden; }
+html body .wp-transition-composer { box-sizing: border-box; background: var(--wp-card) !important; }
+html body .wp-transition-composer > [class*="_guidInputInner"] { height: 100%; box-sizing: border-box; }
+/* 原生输入区在 z-10 的 flex item 内，遮罩始终位于它下方。 */
+.wp-ghost { position: fixed; z-index: 9; background: var(--wp-main); overflow: hidden; }
+.wp-ghost-msg { display: flex; justify-content: flex-end; padding: 64px 76px 0; box-sizing: border-box; width: 100%; }
+@media (max-width: 767px) {
+  /* Match the message scroller's 20px gutters, 34px action rail and 8px row padding. */
+  .wp-ghost-msg { padding: 26px 62px 0 28px; }
+  .wp-ghost-msg .wp-ghost-bubble { line-height: 19.6px !important; }
+}
+.wp-ghost-bubble {
+  max-width: 80%; background: var(--wp-card); color: var(--wp-ink); border-radius: 16px; padding: 10px 16px; font: 14px/21px var(--wp-font) !important;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow: hidden;
+}
+
+/* 对话：用户消息是右侧的米白气泡，16px 圆角；工具步骤用次级文字色 */
+html body .message-item.justify-end .bg-aou-2 {
+  background: var(--wp-card) !important; color: var(--wp-ink) !important; border-radius: 16px !important; padding: 10px 16px !important;
+}
+html body .tool-group-summary__header { color: var(--wp-ink-3) !important; }
+html body .tool-group-summary__label { font-size: 13px; }
+/* Spin 的行内基线会撑高图标；等待与步骤共用 14px 中性圆环，旋转只作用于 SVG。 */
+html body .tool-group-summary__icon > .i-icon,
+html body .tool-group-summary__icon > .arco-spin,
+html body .tool-group-summary__icon .arco-spin-icon,
+html body .wp-waiting .arco-spin,
+html body .wp-waiting .arco-spin-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; flex: none; line-height: 0;
+}
+html body .tool-group-summary__icon .arco-icon-loading,
+html body .wp-waiting .arco-icon-loading {
+  display: block; width: 14px; height: 14px; font-size: 14px !important;
+  vertical-align: 0; color: var(--wp-ink-3); transform-box: view-box; transform-origin: 50% 50%;
+}
+
+/* 正文列上限 768px（48rem）；沿用原生消息/输入框的共享容器，文件栏展开时按剩余主区居中。 */
+html { --wp-chat-max-width: 768px; }
+html body .chat-surface-container .chat-surface-fluid,
+html body [data-testid="message-list-content"] {
+  width: 100% !important; max-width: var(--wp-chat-max-width) !important;
+  min-width: 0; margin-inline: auto; box-sizing: border-box;
+}
+@media (min-width: 768px) {
+  /* 外层含两侧各 16px 内边距，输入卡片的可见上限仍为 768px。 */
+  html body [class*="_guidLayout"] { width: clamp(var(--app-min-width, 360px), calc(100% - 32px), calc(var(--wp-chat-max-width) + 32px)); }
+  .wp-ghost-msg { width: 100%; max-width: var(--wp-chat-max-width); margin-inline: auto; padding: 70px 8px 0; }
+}
+
+/* 对话标题与品牌共用字号；不改字重、颜色或原生省略布局。 */
+html body header[class*="chat-layout"] { font-size: 14px; }
+html body header.chat-layout-header .text-16px,
+html body header.chat-layout-header .arco-input,
+html body .app-titlebar--mobile-conversation .app-titlebar__brand-text { font-size: var(--wp-header-font-size) !important; }
+html body .header-model-btn, html body .header-model-loading-slot { display: none !important; }
+html body .sider-action-btn { background: transparent !important; }
+
+/* 输入框底部的模型与推理强度选择（与原来的“GPT-6.1 Sol Medium ▾”一致：模型正常色，强度浅一级） */
+.wp-pick-btn {
+  display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 8px; margin-right: 4px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--wp-ink-2); font: 13px/1 var(--wp-font); white-space: nowrap; cursor: pointer;
+}
+.wp-pick-btn:hover { background: var(--wp-hover); color: var(--wp-ink); }
+.wp-pick-btn.wp-busy { opacity: 0.5; pointer-events: none; }
+.wp-pick-btn.wp-pending { opacity: 0.6; }
+.wp-pick-btn.wp-failed { color: #c2410c; }
+.wp-pick-effort { color: var(--wp-ink-4); margin-left: 4px; }
+.wp-pick-caret { flex: none; opacity: 0.7; }
+[class*="_guidInputInner"] [class*="_actionSubmit"] { display: flex; align-items: center; }
+.sendbox-actions { align-items: center; }
+.wp-pick-menu {
+  position: fixed; z-index: 2000; min-width: 200px; padding: 6px; border-radius: 12px; background: var(--wp-card);
+  box-shadow: 0 0 0 1px var(--wp-line), 0 8px 24px rgba(0, 0, 0, 0.12); font: 14px/1.4 var(--wp-font); color: var(--wp-ink);
+  box-sizing: border-box; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto;
+}
+.wp-pick-title { padding: 6px 10px 4px; font-size: 12px; color: var(--wp-ink-3); }
+.wp-pick-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: 8px;
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.wp-pick-item:hover { background: var(--wp-hover); }
+.wp-pick-item:focus-visible, .wp-user:focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: -2px; }
+.wp-pick-item:disabled { opacity: 0.5; cursor: wait; }
+.wp-settings-status { max-width: 240px; padding: 8px 10px; color: var(--wp-ink-2); }
+.wp-pick-check { width: 14px; flex: none; color: var(--wp-ink-2); }
+.wp-pick-sep { height: 1px; margin: 6px 4px; background: var(--wp-line); }
+@media (max-width: 767px) { .wp-pick-item { height: 40px; } }
+
+/* 左侧栏：与原来一致。桌面上不要顶部标题栏，收起按钮在品牌行右侧，收起后左上角有展开按钮；搜索、自动化在新对话下面 */
+@media (min-width: 768px) {
+  html body .app-titlebar:not(.app-titlebar--mobile) { display: none !important; }
+  html.wp-sider-collapsed .wp-sider-open { display: inline-flex; }
+  html.wp-sider-collapsed body header[class*="chat-layout"] { padding-left: 52px !important; }
+  /* 与左右文件栏按钮共用 50px 顶行；触屏抽屉沿用原生移动布局。 */
+  html body:not(:has(.app-titlebar--mobile)) aside.layout-sider header.arco-layout-header {
+    height: 50px !important; min-height: 50px !important; box-sizing: border-box; padding-block: 0 !important;
+  }
+  html body:not(:has(.app-titlebar--mobile)) header[class*="chat-layout"] {
+    height: 50px !important; min-height: 50px !important; box-sizing: border-box; padding-block: 0 !important;
+  }
+  html.wp-automation body:not(:has(.app-titlebar--mobile)) .shrink-0:has(> div > [data-testid="scheduled-tasks-header"]) { padding-top: 8px !important; }
+}
+@media (max-width: 767px) {
+  html body .app-titlebar__button[aria-label="检索会话"] { display: none !important; }
+  html body .app-titlebar__button[aria-label="Search messages"] { display: none !important; }
+  .wp-sider-toggle { display: none !important; }
+}
+.wp-sider-open {
+  display: none; position: fixed; left: 15px; top: 10px; z-index: 50; width: 30px; height: 30px; padding: 0; align-items: center; justify-content: center;
+  border: 0; border-radius: 8px; background: transparent; color: var(--wp-ink-2); cursor: pointer;
+}
+.wp-sider-open:hover, .wp-sider-toggle:hover { background: var(--wp-hover); color: var(--wp-ink); }
+.wp-sider-toggle {
+  display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; margin-left: auto; flex: none;
+  border: 0; border-radius: 8px; background: transparent; color: var(--wp-ink-2); cursor: pointer;
+}
+/* AionUi 在 768–1023px 的触屏设备也使用手机抽屉，保留它的标题栏和侧栏入口。 */
+html body:has(.app-titlebar--mobile) .wp-sider-open,
+html body:has(.app-titlebar--mobile) .wp-sider-toggle { display: none !important; }
+/* 原生 360px 页面下限会把窄手机上的文件入口推到屏外；仅在文件抽屉页面解除。 */
+html:has([data-explorer-mobile-overlay]) { --app-min-width: 0px; }
+
+/* 树标题的每层都允许收缩，省略发生在文件名内而非面板边缘。 */
+html body .workspace-tree .arco-tree-node { display: flex; min-width: 0; }
+html body .workspace-tree .arco-tree-node-indent,
+html body .workspace-tree .arco-tree-node-switcher { flex-shrink: 0; }
+html body .workspace-tree .arco-tree-node-title { flex: 1; min-width: 0; overflow: hidden; }
+html body .workspace-tree .arco-tree-node-title-text { display: block; min-width: 0; }
+html body [data-explorer-column] .pl-12px.pr-8px:has(input),
+html body [data-explorer-mobile-overlay] .pl-12px.pr-8px:has(input) { padding-right: 12px !important; }
+html body aside.layout-sider header.arco-layout-header { position: relative; gap: var(--wp-sidebar-gap) !important; padding: 10px 12px 6px var(--wp-sidebar-inset) !important; }
+html body aside.layout-sider header.arco-layout-header > div:nth-child(2) { font-size: var(--wp-header-font-size) !important; font-weight: 600 !important; letter-spacing: 0.02em; }
+.wp-logo,
+.wp-nav-icon,
+html body [class*="_newChatTrigger"] > span:first-child:has([class*="_newChatIcon"]) {
+  box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
+  width: var(--wp-sidebar-slot); min-width: var(--wp-sidebar-slot); height: var(--wp-sidebar-slot); flex: none;
+}
+/* 收起与展开共用品牌图标的位置，悬停或键盘聚焦时显示收起按钮。 */
+@media (min-width: 768px) {
+  .wp-sider-toggle { position: absolute; left: 15px; top: 10px; margin: 0; opacity: 0; }
+  .layout-sider-header:hover .wp-sider-toggle, .wp-sider-toggle:focus-visible { opacity: 1; }
+  .layout-sider-header:hover .wp-logo, .layout-sider-header:has(.wp-sider-toggle:focus-visible) .wp-logo { opacity: 0; }
+}
+.wp-sider-toggle svg, .wp-sider-open svg, .wp-sider-new svg, .wp-nav-icon svg { display: block; width: 16px; height: 16px; flex: none; }
+.wp-sider-toggle svg, .wp-sider-open svg, .wp-nav svg, .wp-pick-btn svg { fill: none !important; stroke: currentColor !important; color: inherit !important; }
+html body aside.layout-sider [class*="_newChatTrigger"] + div { display: none !important; }        /* 批量选择 */
+html body aside.layout-sider .shrink-0.h-1px { display: none !important; }                       /* 分隔线 */
+html body aside.layout-sider .conversation-search-trigger-full { display: none !important; }   /* 手机侧栏自带的搜索，用上面统一的一行 */
+/* Reserve the compact layout before its toolbar and model data finish mounting. */
+@media (max-width: 767px) { html body .sendbox-panel { box-sizing: border-box; min-height: 80px; } }
+.wp-pick-row { min-height: 32px; flex-shrink: 0; display: flex; justify-content: flex-end; margin: 6px -4px -6px 0; }
+.wp-nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 16px; }
+.wp-nav-row {
+  display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 10px; border-radius: 9999px;
+  color: var(--wp-ink); font-size: 14px; cursor: pointer; user-select: none;
+}
+.wp-nav-row:hover { background: var(--wp-sidebar-hover); }
+.wp-nav-row.wp-active { background: var(--wp-row-selected); color: var(--wp-row-selected-ink); }
+.wp-nav-icon { color: var(--wp-ink-2); }
+/* 与搜索、自动化相同的 16px / 1.3px 线稿；保留原生新建动作及收起态。 */
+html body [class*="_newChatTrigger"] [class*="_newChatIcon"] {
+  display: inline-block; width: 16px; height: 16px; flex: none; color: var(--wp-ink-2); background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 2.5H4A1.5 1.5 0 0 0 2.5 4v8A1.5 1.5 0 0 0 4 13.5h8a1.5 1.5 0 0 0 1.5-1.5V8.5M8 10.5l-2.5.5.5-2.5 6-6a1.4 1.4 0 0 1 2 2l-6 6ZM11 3.5l2 2'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 2.5H4A1.5 1.5 0 0 0 2.5 4v8A1.5 1.5 0 0 0 4 13.5h8a1.5 1.5 0 0 0 1.5-1.5V8.5M8 10.5l-2.5.5.5-2.5 6-6a1.4 1.4 0 0 1 2 2l-6 6ZM11 3.5l2 2'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+html body [class*="_newChatTrigger"] [class*="_newChatIcon"] > svg { display: none; }
+/* 对话行：未读完成标记与时间共用行尾，操作按钮出现时一起让位。 */
+html body .chat-history__item > span.size-22px:first-child { display: none !important; }
+html body .chat-history__item.chat-history__item { padding-left: 42px !important; padding-right: 52px !important; }
+html body .chat-history__item .chat-history__item-name { height: 100%; }
+.wp-time { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--wp-ink-4); pointer-events: none; }
+html body .chat-history__item > .wp-unread { right: 10px; width: 8px; height: 8px; }
+html body .chat-history__item:has(> .wp-unread) > .wp-time { opacity: 0; }
+/* 归档与更多共用 20px 动作位；触屏只留原生菜单动作。 */
+html body .wp-archive-button {
+  width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--wp-ink-2); cursor: pointer;
+}
+html body .wp-archive-button:hover { background: var(--wp-sidebar-hover); color: var(--wp-ink); }
+html body .wp-archive-button:disabled { opacity: .5; cursor: wait; }
+@media (hover: hover) {
+  html body .chat-history__item > .wp-chat-more {
+    display: flex !important; opacity: 0; pointer-events: none; transition: opacity 120ms;
+  }
+  html body .chat-history__item > .wp-chat-more [data-testid^="conversation-row-menu"] { display: flex !important; }
+  html body .chat-history__item:hover > .wp-chat-more,
+  html body .chat-history__item:focus-within > .wp-chat-more { opacity: 1; pointer-events: auto; }
+  html body .chat-history__item > .wp-time,
+  html body .chat-history__item > .wp-unread { display: flex !important; opacity: 1; transition: opacity 120ms; }
+  html body .chat-history__item:has(> .wp-unread) > .wp-time,
+  html body .chat-history__item:hover > .wp-time,
+  html body .chat-history__item:hover > .wp-unread,
+  html body .chat-history__item:focus-within > .wp-time,
+  html body .chat-history__item:focus-within > .wp-unread { opacity: 0; }
+}
+.wp-archive-entry { display: flex; align-items: center; gap: 10px; margin: 8px 10px; padding: 8px 12px; border: 0; border-radius: 20px; background: transparent; color: var(--wp-ink-2); font: inherit; cursor: pointer; flex: none; }
+.wp-archive-entry:hover { background: var(--wp-sidebar-hover); }
+html.wp-sider-collapsed .wp-archive-entry { display: none; }
+.wp-archive-backdrop { box-sizing: border-box; position: fixed; inset: 0; z-index: 1100; background: #0005; display: grid; place-items: center; padding: 20px; }
+.wp-archive-dialog { box-sizing: border-box; width: min(560px, 100%); max-height: 80dvh; overflow: auto; border: 1px solid var(--wp-line); border-radius: 16px; padding: 20px; background: var(--wp-card); color: var(--wp-ink); box-shadow: 0 8px 40px #0002; }
+.wp-archive-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.wp-archive-dialog h2 { font-size: 18px; margin: 0; }
+.wp-archive-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+.wp-archive-dialog button, .wp-archive-restore, .wp-archive-error button { border: 1px solid var(--wp-line); border-radius: 8px; background: var(--wp-card); color: var(--wp-ink); padding: 6px 10px; font: inherit; cursor: pointer; }
+.wp-archive-dialog button:hover, .wp-archive-restore:hover { background: var(--wp-hover); }
+.wp-archive-dialog .wp-archive-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; background: transparent; }
+.wp-archive-dialog button:disabled { opacity: .5; cursor: wait; }
+.wp-archive-restore { position: fixed; top: 60px; right: 20px; z-index: 90; box-shadow: 0 2px 8px #0001; }
+.wp-archive-error { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 1200; max-width: calc(100vw - 40px); padding: 12px 16px; border: 1px solid var(--wp-line); border-radius: 12px; background: var(--wp-card); color: var(--wp-ink); box-shadow: 0 4px 20px #0002; }
+.wp-archive-error button { margin-left: 12px; }
+/* 左下角本人 */
+html body aside.layout-sider .arco-layout-sider-children { display: flex !important; flex-direction: column; }
+html body aside.layout-sider .layout-sider-content { flex: 1 1 auto; min-height: 0; height: auto !important; }
+.wp-user {
+  flex: none; display: flex; align-items: center; gap: 8px; height: 40px; margin: 8px 10px 12px; padding: 0 12px 0 6px;
+  border-radius: 9999px; box-shadow: 0 0 0 1px var(--wp-line); background: var(--wp-card); font-size: 14px; color: var(--wp-ink);
+  border: 0; font-family: var(--wp-font); text-align: left; cursor: pointer;
+}
+.wp-user:hover { background: var(--wp-sidebar-hover); }
+html.wp-sider-collapsed .wp-user { display: none; }
+.wp-avatar { width: 28px; height: 28px; border-radius: 50%; flex: none; object-fit: cover; display: inline-grid; place-items: center; background: __WP_AVATAR_COLOR__; color: #fff; font-size: 11px; }
+.wp-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 文件栏开关与左侧展开按钮成对；原生入口优先，Mac 缺少的入口由覆盖层补齐。 */
+html body .wp-workspace-toggle {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 30px !important; height: 30px !important; padding: 0 !important; border: 0 !important;
+  border-radius: 8px !important; background: transparent !important; box-shadow: none !important;
+  color: var(--wp-ink-2); cursor: pointer;
+}
+html body .wp-workspace-toggle:hover { background: var(--wp-hover) !important; color: var(--wp-ink); }
+html body .wp-workspace-toggle:focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: 2px; }
+html body .workspace-toggle-floating.wp-workspace-toggle,
+html body > .wp-workspace-fallback {
+  position: fixed !important; top: 10px !important; right: 12px !important; transform: none !important; z-index: 101;
+}
+html body [data-explorer-column] > .wp-workspace-toggle {
+  position: absolute; top: 10px !important; right: 12px !important; z-index: 30;
+}
+/* 顶部给关闭按钮留出独立位置，不压住添加文件夹、打开文件夹等原生工具。 */
+html body [data-explorer-column] > .h-full > :first-child,
+html body [data-explorer-mobile-overlay] > .h-full > :first-child {
+  min-height: 50px; box-sizing: border-box; padding-right: 52px !important;
+}
+/* 2.1.47 的第二个页签仅有源代码管理占位，文件默认选中且不持久化页签。 */
+html body [data-explorer-column] > .h-full > :first-child > :first-child > button:nth-child(2),
+html body [data-explorer-mobile-overlay] > .h-full > :first-child > :first-child > button:nth-child(2) { display: none !important; }
+@media (min-width: 768px) {
+  html.wp-workspace-collapsed body header[class*="chat-layout"] { padding-right: 52px !important; }
+}
+html body .wp-workspace-toggle > * { display: none !important; }
+/* 手机原生入口带文字；抽屉和预览各自保留原生关闭操作。 */
+html body .app-titlebar--mobile [data-wp-workspace-trigger] {
+  width: auto !important; min-width: 60px; gap: 5px; padding-inline: 8px !important;
+}
+html body .app-titlebar--mobile [data-wp-workspace-trigger]::after { content: attr(data-wp-label); font-size: 13px; }
+.wp-mobile-preview { position: fixed; inset: 0; z-index: 110; background: var(--wp-main); overflow: hidden; }
+@media (max-width: 767px) {
+  html body [data-explorer-mobile-overlay] { width: 100vw !important; max-width: 100vw; box-sizing: border-box; }
+}
+html body .wp-workspace-toggle::before {
+  content: ""; width: 16px; height: 16px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.2'%3E%3Crect x='2' y='2.5' width='12' height='11' rx='2'/%3E%3Cpath d='M10 2.5v11'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.2'%3E%3Crect x='2' y='2.5' width='12' height='11' rx='2'/%3E%3Cpath d='M10 2.5v11'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+/* 0.5.0：去掉分叉与消息锚点；回到底部放在正文旁的独立空隙。 */
+html body [data-testid="message-fork-button"],
+html body [data-testid="message-anchor-rail"],
+html body [data-testid="message-anchor-preview"] { display: none !important; }
+/* 桌面两侧对称保留按钮宽度，输入框扣除相同的额外留白，两列仍在主区中心；手机只在右侧留出按钮位，正文尽量宽。 */
+@media (min-width: 768px) {
+  html body [data-testid="message-list-scroller"] { padding-inline: 54px !important; }
+  html body .chat-surface-container > .chat-surface-fluid { width: calc(100% - 68px) !important; margin-inline: auto; }
+}
+@media (max-width: 767px) { html body [data-testid="message-list-scroller"] { padding-right: 54px !important; } }
+.wp-scroll-bottom { position: absolute; right: 0; bottom: 4px; z-index: 25; }
+html body .wp-scroll-bottom > div { width: 32px; height: 32px; }
+
+/* 手机与触屏平板的常驻菜单左侧共用时间与未读标记位置。 */
+@media (max-width: 767px), (hover: none) {
+  html body .chat-history__item.chat-history__item { padding-right: 104px !important; }
+  html body .chat-history__item > .wp-time { right: 44px; max-width: 56px; white-space: nowrap; }
+  html body .chat-history__item > .wp-chat-more { right: 8px; width: 24px; }
+  html body .chat-history__item > .wp-unread { right: 44px; }
+}
+
+.wp-missing-chat { display: flex; flex: 1; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--wp-ink); }
+.wp-missing-chat button { padding: 8px 16px; border: 1px solid var(--wp-line); border-radius: 8px; background: var(--wp-send); color: var(--wp-send-ink); cursor: pointer; }
+.wp-missing-chat button:focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: 3px; }
+
+/* 自动化开关：轨道和滑块用不同颜色，开关位置与颜色共同表示状态。 */
+html[data-theme="dark"].wp-automation body .arco-switch { background: #575757 !important; }
+html[data-theme="dark"].wp-automation body .arco-switch.arco-switch-checked { background: #82C7A5 !important; }
+html[data-theme="dark"].wp-automation body .arco-switch .arco-switch-dot { background: #F8F8F8 !important; }
+html[data-theme="dark"].wp-automation body .arco-switch.arco-switch-checked .arco-switch-dot { background: #173B29 !important; }
+
+/* 消息操作占用正文下方的普通一行，触屏保持可见，不覆盖气泡。 */
+.wp-message-actions { flex-wrap: wrap; height: auto; min-height: 32px; }
+.wp-message-action { display: inline-flex; align-items: center; justify-content: center; padding: 6px; min-width: 28px; min-height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.wp-message-action:hover { background: var(--bg-3); color: var(--text-primary); }
+.wp-message-action:focus-visible,
+.wp-message-actions > [role="button"]:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
+/* 整行淡入淡出，复制、重发和时间不再各自决定可见性。保留行高以免正文跳动。 */
+.wp-message-actions > div, .wp-message-actions > span { opacity: 1 !important; pointer-events: inherit; }
+@media (hover: hover) {
+  .wp-message-actions { opacity: 0; pointer-events: none; transition: opacity 120ms; }
+  .message-item:hover .wp-message-actions,
+  .message-item:focus-within .wp-message-actions,
+  .wp-message-actions.wp-message-actions-latest { opacity: 1; pointer-events: auto; }
+}
+@media (hover: none) {
+  html body .chat-history__item > .wp-chat-more,
+  html body .chat-history__item > .wp-chat-more [data-testid^="conversation-row-menu"] { display: flex !important; }
+  html body .wp-archive-button { display: none !important; }
+  .wp-message-actions > span { display: none; }
+  .wp-message-action { min-height: 32px; }
+}
+/* 收起侧栏后，新对话仍能一步到达；与展开按钮共用顶行。 */
+.wp-sider-new { display: none; position: fixed; z-index: 100; top: 10px; left: 51px; width: 30px; height: 30px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--wp-ink-2); cursor: pointer; }
+.wp-sider-new:hover { background: var(--wp-hover); }
+.wp-sider-new:focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: 2px; }
+@media (min-width: 768px) {
+  html.wp-sider-collapsed .wp-sider-new { display: inline-flex; }
+  html.wp-sider-collapsed body header[class*="chat-layout"] { padding-left: 88px !important; }
+}
+/* 手机保留顶栏品牌，首页只显示动态形象，避免同屏重复产品名。 */
+@media (max-width: 767px) { .wp-hero-name { display: none; } }
+/* 同一回答中的过程说明和后续正文各占一段，不影响用户气泡或工具行。 */
+html body .message-item.text.justify-start + .message-item.text.justify-start { margin-top: 24px !important; }
+
+
+/* 市场页使用主区和现有中性色，选中态不加单侧竖线。 */
+.wp-market { flex: 1; min-height: 0; overflow: auto; background: var(--wp-main); color: var(--wp-ink); }
+.wp-market-inner { width: 100%; max-width: 1040px; box-sizing: border-box; margin: 0 auto; padding: 32px 40px; }
+.wp-market h1 { margin: 0 0 24px; font-size: 24px; font-weight: 600; line-height: 1.4; }
+.wp-market-tabs { display: flex; gap: 4px; width: fit-content; padding: 4px; border: 1px solid var(--wp-line); border-radius: 12px; background: var(--wp-hover); }
+.wp-market-tabs button { border: 0; border-radius: 8px; padding: 8px 24px; background: transparent; color: var(--wp-ink-2); cursor: pointer; font-size: 14px; line-height: 20px; }
+.wp-market-tabs button:hover { background: var(--wp-hover); }
+.wp-market-tabs button[aria-selected="true"] { background: var(--wp-card); color: var(--wp-ink); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.wp-market :focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: 3px; }
+.wp-market-content { margin-top: 24px; min-width: 0; overflow-wrap: anywhere; }
+.wp-market-empty { margin: 0; min-height: 240px; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--wp-line); border-radius: 16px; color: var(--wp-ink-3); font-size: 14px; }
+@media (max-width: 767px) {
+  .wp-market-inner { padding: 24px 20px; }
+  .wp-market h1 { font-size: 22px; margin-bottom: 20px; }
+  .wp-market-empty { min-height: 220px; }
+}
+
+/* Personal skills share the market page's native neutral palette. */
+.wp-skills-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:16px;margin-bottom:20px}
+.wp-skills-add,.wp-skills-retry,.wp-skill-delete{font:inherit;cursor:pointer;border-radius:8px;padding:8px 14px;white-space:nowrap}
+.wp-skills-add{border:1px solid var(--text-primary);background:var(--text-primary);color:var(--bg-1);font-size:13px;font-weight:500}
+.wp-skills-retry,.wp-skill-delete{border:1px solid var(--border-base);background:transparent;color:var(--text-secondary);font-size:12px}
+.wp-skills-add:disabled,.wp-skills-retry:disabled,.wp-skill-delete:disabled{opacity:.5;cursor:wait}
+.wp-skills-status{font-size:13px;color:var(--text-secondary);margin:0 0 12px;line-height:1.6}
+.wp-skills-status:empty{display:none}
+.wp-skills-error{color:var(--text-primary)}
+.wp-skills-retry{margin-bottom:16px}
+.wp-skills-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.wp-skill-card{border:1px solid var(--border-base);border-radius:12px;padding:20px;background:var(--bg-1);min-width:0}
+.wp-skill-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.wp-skill-name{margin:0;font-size:15px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;color:var(--text-primary)}
+.wp-skill-badge{font-size:11px;line-height:1.7;color:var(--text-secondary);border-radius:5px;padding:1px 6px;background:var(--bg-2);white-space:nowrap}
+.wp-skill-description{margin:10px 0 0;font-size:13px;line-height:1.7;color:var(--text-secondary);overflow-wrap:anywhere;white-space:pre-line}
+.wp-skill-delete{margin-top:16px}
+@media(max-width:767px){.wp-skills-toolbar{align-items:flex-start;gap:12px}.wp-skills-list{grid-template-columns:minmax(0,1fr)}.wp-skill-card{padding:18px}}
+/* Match the native tool's 14px icon slot; wrapped details align to the first line. */
+.wp-web-tool { color: var(--color-text-2); font-size: 13px; min-width: 0; }
+.wp-web-tool-heading,
+.tool-group-summary__body > .flex > .flex-row:has(> .arco-badge) {
+  display: flex; align-items: flex-start; gap: 6px; line-height: 20px; overflow-wrap: anywhere;
+}
+.wp-web-tool-heading > .arco-badge,
+.tool-group-summary__body > .flex > .flex-row > .arco-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; flex: 0 0 14px; margin-block: 3px; line-height: 0;
+}
+.wp-web-tool-heading > .arco-badge .arco-badge-status-dot,
+.tool-group-summary__body > .flex > .flex-row > .arco-badge .arco-badge-status-dot { display: block; }
+.wp-web-tool-heading > span:not(.arco-badge) { min-width: 0; }
+.wp-web-tool-error { color: var(--color-danger-6); }
+.wp-web-sources { margin: 6px 0 0 20px; padding-left: 16px; }
+.wp-web-sources a { color: var(--color-text-2); text-decoration: underline; overflow-wrap: anywhere; }
+.wp-web-tool button { margin-left: 20px; }
+
+/* Personal authorization follows the existing neutral overlay colors. */
+.wp-auth-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:16px auto;padding:12px 16px;max-width:768px;box-sizing:border-box;border:1px solid var(--border-base);border-radius:12px;background:var(--bg-1);color:var(--text-primary);font-size:13px;line-height:1.6}
+.wp-auth-dialog{position:fixed;inset:0;margin:auto;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;box-sizing:border-box;padding:24px;border:1px solid var(--border-base);border-radius:16px;background:var(--bg-1);color:var(--text-primary);box-shadow:0 16px 48px #0002;font-size:14px;line-height:1.6}
+.wp-auth-dialog::backdrop{background:#0005}.wp-auth-dialog h2{font-size:18px;margin:0 0 12px}.wp-auth-dialog p{margin:8px 0}.wp-auth-hint,.wp-auth-state,.wp-auth-project-status{color:var(--text-secondary)}
+.wp-auth-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0}.wp-auth-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.wp-auth-button{border:1px solid var(--border-base);border-radius:8px;background:var(--bg-2);color:var(--text-primary);padding:6px 12px;font:inherit;cursor:pointer;white-space:nowrap}.wp-auth-button:disabled{opacity:.5;cursor:default}.wp-auth-button:focus-visible{outline:2px solid var(--text-secondary);outline-offset:2px}.wp-auth-project-status{overflow-wrap:anywhere}
+@media(max-width:540px){.wp-auth-banner{align-items:flex-start;flex-direction:column;margin:8px 16px;padding:10px 12px}.wp-auth-banner button{align-self:flex-end}.wp-auth-dialog{padding:20px}.wp-auth-row{align-items:flex-start}}
+
+main:has(> .wp-auth-banner) > [class*="_guidContainer_"]{flex:1;min-height:0;height:auto}

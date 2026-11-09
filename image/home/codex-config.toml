@@ -1,0 +1,17 @@
+model = "__CODEX_MODEL__"
+model_provider = "model"
+model_reasoning_effort = "__EFFORT__"
+approval_policy = "never"
+# 容器里没有 bubblewrap、也不允许用户命名空间，Codex 沙箱起不来；容器本身是边界。
+sandbox_mode = "danger-full-access"
+check_for_update_on_startup = false
+
+[model_providers.model]
+name = "Model gateway"
+base_url = "__MODEL_BASE_URL__"
+env_key = "__MODEL_KEY_ENV__"
+wire_api = "responses"
+supports_standalone_web_search = true
+
+[projects."/data/work"]
+trust_level = "trusted"

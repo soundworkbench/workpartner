@@ -1,0 +1,68 @@
+{
+  "artifacts": [
+    {
+      "destination": "aionui-web",
+      "version": "2.1.47",
+      "url": "https://github.com/iOfficeAI/AionUi/releases/download/v2.1.47-final/aionui-web-2.1.47-linux-x86_64.tar.gz",
+      "format": "tar",
+      "stripComponents": 1,
+      "symlinkReplacements": {
+        "aionui-web/bundled-aioncore/linux-x64/managed-resources/node/node-v24.11.0-linux-x64/bin/npm": "../lib/node_modules/npm/bin/npm-cli.js",
+        "aionui-web/bundled-aioncore/linux-x64/managed-resources/node/node-v24.11.0-linux-x64/bin/npx": "../lib/node_modules/npm/bin/npx-cli.js",
+        "aionui-web/bundled-aioncore/linux-x64/managed-resources/node/node-v24.11.0-linux-x64/bin/corepack": "../lib/node_modules/corepack/dist/corepack.js"
+      },
+      "release": "https://github.com/iOfficeAI/AionUi/releases/tag/v2.1.47-final",
+      "sha256": "3885998998162c8deb0093dce884b4f22a23aaa04b9916c9747b6df094a80362",
+      "bytes": 350698943
+    },
+    {
+      "destination": "cc-connect",
+      "version": "1.5.0",
+      "url": "https://github.com/chenhg5/cc-connect/releases/download/v1.5.0/cc-connect-v1.5.0-linux-amd64.tar.gz",
+      "format": "tar-member",
+      "member": "cc-connect-v1.5.0-linux-amd64",
+      "release": "https://github.com/chenhg5/cc-connect/releases/tag/v1.5.0",
+      "sha256": "72859035a1ee011b710204fc508de711838f919eb2ae6f104f1ddb3e5cd8ca87",
+      "bytes": 16554300
+    },
+    {
+      "destination": "officecli",
+      "version": "1.0.160",
+      "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.160/officecli-linux-x64",
+      "format": "file",
+      "release": "https://github.com/iOfficeAI/OfficeCLI/releases/tag/v1.0.160",
+      "sha256": "baa084b64ec634bd9d41a0592db3ed85f11658b358bab898679537ea7f3e73a9",
+      "bytes": 35517797
+    },
+    {
+      "destination": "codex",
+      "version": "0.167.0",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "format": "tar-member",
+      "member": "codex-x86_64-unknown-linux-musl",
+      "release": "https://github.com/openai/codex/releases/tag/rust-v0.167.0",
+      "sha256": "9d64836106d5b374e90ee4454c7ebcde7ca7106558bd7e41a34b9f26ebda251a",
+      "bytes": 122587028
+    },
+    {
+      "destination": "codex-code-mode-host",
+      "version": "0.167.0",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
+      "format": "tar-member",
+      "member": "codex-code-mode-host-x86_64-unknown-linux-musl",
+      "release": "https://github.com/openai/codex/releases/tag/rust-v0.167.0",
+      "sha256": "b5074d5dd64643b2c073927e494a588eff31c1f5a27f12c1e2c45f9a6cf07dd4",
+      "bytes": 29079293
+    },
+    {
+      "destination": "claude",
+      "version": "2.1.319",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.319.tgz",
+      "format": "tar-member",
+      "member": "package/claude",
+      "release": "https://www.npmjs.com/package/@anthropic-ai/claude-code-linux-x64/v/2.1.319",
+      "sha256": "9b7b53954b8ffb886fafeefe9ef1e0e9e5c15e8aaf2f54d65ba64d0cca795dc7",
+      "bytes": 158448451
+    }
+  ]
+}
