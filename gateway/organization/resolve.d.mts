@@ -10,6 +10,33 @@ export interface Organization {
   identity: { provider: 'feishu'; callbackPath: string; admission: 'pilot-group' | 'unrestricted'; appSecretFile: string; appId: string; pilotChatId: string };
   model: { codexProvider: string; baseUrl: string; keyPrefix: string; keyMode: 'exec' | 'pool'; defaultsFile: string; keyEnvironment: string; baseEnvironment: string; nextBaseUrl: string; catalog?: Record<'codex' | 'claude', { default?: string; id?: string; key?: string; name?: string; also?: string[] }[]>; defaults: { codex: string; claude: string; opus: string; sonnet: string; haiku: string; effort: string; language: string; claudePrefix: string }; provision: null | { container: string; command: string[]; keyPattern: string; models: string[] } };
   runtime: {
+    /** Omitted selects Docker; Kubernetes defaults are applied by the consuming modules. */
+    kind?: 'docker' | 'k8s';
+    migration?: { ownersFile?: string; peerOrigin?: string };
+    k8s?: {
+      namespace?: string; systemNamespace?: string; systemContainer?: string; clusterDomain?: string;
+      storageClass?: string; dataVolumeSize?: string; newUserNodeSelector?: Record<string, string>;
+      memoryRequest?: string; cpuRequest?: string; userPriorityClass?: string;
+      userResources?: Record<string, { memory?: string | number; cpu?: string | number }>;
+      gatewayResources?: { cpu?: string; memory?: string };
+      imageConfigMap?: string; governingService?: string; requiredPolicies?: string[];
+      publishedDirectory?: string; publishedFiles?: string[];
+      apiTimeoutMs?: number; podStartTimeoutMs?: number; terminationGraceSeconds?: number;
+      inspectCacheMs?: number; keepRunningIntervalMs?: number; loadGatewayExtension?: boolean;
+      /** File helper cache and staging lease durations, independent of inspectCacheMs. */
+      cacheMs?: number; leaseTtlMs?: number;
+      /** Prefer the mounted ServiceAccount; never commit a credential-bearing kubeconfig. */
+      inCluster?: boolean | { server?: string; namespaceFile?: string; tokenFile?: string; caFile?: string };
+      kubeconfigJson?: string | Record<string, unknown>;
+      deploy?: {
+        gatewayImage?: string; gatewayNodeSelector?: Record<string, string>;
+        entry?: { mode: 'hostPort'; hostIP: string; hostPort: number }
+          | { mode: 'clusterIP'; clusterIP: string };
+        hostPaths?: { organization?: string; secure?: string; state?: string; usersFile?: string };
+        egressExceptCidrs?: string[]; modelEgressSelector?: Record<string, string>;
+        newUserStorage?: { provisioner?: string; parameters?: Record<string, string> };
+      };
+    };
     modelContainer: string; nextImage: string; buildImage: string; baseImage: string; nextContainerPrefix: string; nextUserLabel: string;
     nextDirectory: string; nextModelKeyFile: string; nextMemory: number; nextPidsLimit: number; nextPort: number;
     packageDirectory: string; gatewayContainer: string; protectedUsers: string[]; rolloutData: string; rolloutSecure: string; rolloutKeyPrefix: string;
