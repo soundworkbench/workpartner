@@ -70,7 +70,7 @@ export function parseArgs(args) {
   o.policyTimeoutMs = Number(o.policyTimeoutMs);
   if (!Number.isSafeInteger(o.policyTimeoutMs) || o.policyTimeoutMs <= 0) throw new Error('Invalid policy timeout');
   o.samplePort = Number(o.samplePort);
-  if (!Number.isInteger(o.samplePort) || o.samplePort < 1024 || o.samplePort > 65535 || [6443, 10250, 18082, 18083, 18084, 25808, 3092].includes(o.samplePort)) throw new Error('Invalid sample port');
+  if (!Number.isInteger(o.samplePort) || o.samplePort < 1024 || o.samplePort > 65535 || [6443, 10250, 18082, 18083, 18084, 18085, 25808, 3092].includes(o.samplePort)) throw new Error('Invalid sample port');
   if (!!o.staticPvNode !== !!o.staticPvDir) throw new Error('Supply both --static-pv-node and --static-pv-dir');
   if (o.staticPvDir && (!/^\/[a-zA-Z0-9_./-]+$/.test(o.staticPvDir) || o.staticPvDir.split('/').includes('..') || o.staticPvDir === '/')) throw new Error('Invalid static PV parent');
   if (o.staticPvNode && ![o.serverNode, o.agentNode].includes(o.staticPvNode)) throw new Error('Static PV node must be one of the two test nodes');

@@ -23,6 +23,9 @@ async function waitForPolicy(c, slugs, check) {
       return true;
     }, c.config.policyTimeoutMs ?? 60000, 200);
   } catch (error) {
+    // The controller has read access to system resources and nodes. Collect before cleanup,
+    // without expanding the gateway ServiceAccount's production permissions.
+    c.evidence = { ...c.evidence, policyTimeout: { slug, pod: `${c.name(slug)}-0` } };
     const last = error.cause;
     const reason = `Policy convergence timed out for Pod ${c.name(slug)}-0 (${slug}); last error: ${last?.reason || last?.message || String(last)}`;
     throw Object.assign(new Error(reason, { cause: error }), { reason });
