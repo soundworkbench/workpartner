@@ -1,3 +1,4 @@
+import { mappedItem, defaultDecision } from './adopt-mappings.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -111,7 +112,9 @@ export function collectInventory() {
         const config = argv[i] === '--config' || argv[i] === '-c' ? argv[i + 1] : argv[i].startsWith('--config=') ? argv[i].slice(9) : null;
         if (config && path.isAbsolute(config) && /\.(?:toml|json|ya?ml|ini|conf)$/i.test(config) && stat(config)?.isFile()) add('bot-config', { path: config });
       }
-      if (argv.length) add('process', { pid: Number(pid), command: hiddenCommand(argv[0]), executable: /^[\w/.-]+$/.test(argv[0]) ? argv[0] : '[redacted]' });
+      if (argv.length) add('process', { pid: Number(pid), command: hiddenCommand(argv[0]), executable: /^[\w/.-]+$/.test(argv[0]) ? argv[0] : '[redacted]',
+        ...(path.basename(argv[0]) === 'claude' ? { interactive: !argv.slice(1).some(arg => arg === '-p' || arg === '--print' || arg.startsWith('--print=')) } : {}),
+      });
     } catch (e) { if (!['ENOENT', 'ESRCH'].includes(e.code)) problem('process-list'); }
   }
   for (const protocol of ['tcp', 'tcp6', 'udp', 'udp6']) {
@@ -197,7 +200,7 @@ export async function saveInventory(files, inventory) {
   await writeReport(files.text, `Inventory ${inventory.slug} ${inventory.inventoryId}\n${inventory.items.map(item => `[${item.kind}] ${item.path || item.source || item.executable || item.name || `${item.protocol}:${item.port}`}\n  id: ${item.id}\n  ${Object.entries(item).filter(([key]) => !['id', 'kind', 'path', 'source'].includes(key)).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('; ')}`).join('\n')}\nIssues: ${inventory.issues.join(', ') || 'none'}\n`);
   await writeReport(files.decisions, `${JSON.stringify({ version: 1, slug: inventory.slug, inventoryId: inventory.inventoryId,
     issues: inventory.issues.map(issue => ({ issue, acknowledged: false, reason: '' })),
-    items: inventory.items.map(item => ({ id: item.id, kind: item.kind, source: item, decision: '', method: '', reason: '', target: {} })) }, null, 2)}\n`);
+    items: inventory.items.map(item => ({ id: item.id, kind: item.kind, source: item, ...defaultDecision(item) })) }, null, 2)}\n`);
 }
 
 export async function readDecisions(files, slug, { allowMissing = false } = {}) {
@@ -319,7 +322,7 @@ export function verificationRows(rows) {
     port: ['protocol', 'port'], process: ['executable'], session: ['tool', 'user', 'name'],
   };
   return rows.map(row => {
-    const item = { ...row.source, ...row.target };
+    const item = { ...mappedItem(row.source), ...row.target };
     if (item.kind === 'cron') item.source = row.target.path || item.source;
     if (item.kind === 'docker-diff') item.path = row.target.path || (item.action === 'copy' ? `/data/.zp-init.d/bin/${item.path.split('/').pop()}` : item.path);
     return { id: row.id, kind: item.kind, ...Object.fromEntries((fields[item.kind] || []).map(key => [key, item[key]])) };

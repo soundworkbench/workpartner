@@ -408,3 +408,60 @@ test('ownership unavailable prevents preparation and keep-running without inspec
   t.after(() => services.close());
   await services.prepareNextFeishu(user);
 });
+
+test('internal adoption prepare accepts only loopback POST for a currently owned next user and refills cached files', async t => {
+  const f = fixture(t); f.write();
+  const organization = structuredClone(resolveOrganization({ PUBLIC_HOST: 'workspace.example.test', MODEL_BASE_URL: 'http://models.example.test/v1' }));
+  organization.runtime.stateDirectory = f.dir;
+  organization.features.feishuAuthorization = true;
+  organization.features.preview = true;
+  organization.server.previewHost = 'preview.example.test';
+  const calls = [];
+  let failed = false;
+  const runtime = {
+    async readFile() { throw Object.assign(new Error(), { code: 'ENOENT' }); },
+    async putFiles(slug, files) { if (failed) throw new Error('fixture-private-value'); calls.push({ slug, files }); },
+  };
+  const services = await createGatewayServices({ organization, runtime, migration: f.migration, SESSION_KEY: 'fixture-key',
+    users: () => [user, { ...other, backend: 'legacy' }], userFor: () => ({}), aionui: {} });
+  t.after(() => services.close());
+  let handle;
+  t.mock.method(http, 'createServer', handler => {
+    handle = handler;
+    return {
+      listen(port, host) { assert.equal(port, organization.runtime.internalPort); assert.equal(host, '0.0.0.0'); },
+      close(callback) { callback(); },
+    };
+  });
+  services.listen();
+  async function request({ method = 'POST', url = '/internal/adopt/prepare/user1', peer = '127.0.0.1' } = {}) {
+    let status, body;
+    await handle({ method, url, socket: { remoteAddress: peer } }, {
+      writeHead(value) { status = value; }, end(value) { body = value; },
+    });
+    assert.equal(body, undefined, 'no upstream errors or secret values in the response');
+    return { status };
+  }
+  assert.equal((await request()).status, 409);
+  f.write({ user1: 'k8s' });
+  assert.equal((await request({ peer: '192.0.2.20' })).status, 403);
+  assert.equal((await request({ method: 'GET' })).status, 405);
+  assert.equal((await request({ url: '/internal/adopt/prepare/../user1' })).status, 400);
+  assert.equal((await request({ url: '/internal/adopt/prepare/missing-user' })).status, 404);
+  assert.equal((await request({ url: '/internal/adopt/prepare/user2' })).status, 404);
+  assert.equal((await request({ url: '/unrelated' })).status, 404);
+  assert.equal(calls.length, 0);
+  f.migration.kind = 'docker';
+  assert.equal((await request()).status, 409);
+  f.migration.kind = 'k8s';
+  assert.equal((await request()).status, 204);
+  assert.deepEqual(calls.flatMap(call => call.files.map(file => file.path)).sort(), ['.wp-feishu-cli.json', '.zp-market-token', '.zp-preview-relay-key']);
+  // A repeated takeover must restore the token/config even inside the normal one-day cache window.
+  assert.equal((await request({ peer: '::ffff:127.0.0.1' })).status, 204);
+  assert.equal(calls.length, 4);
+  failed = true;
+  assert.equal((await request()).status, 503);
+  failed = false;
+  f.write();
+  assert.equal((await request()).status, 409); assert.equal(calls.length, 4);
+});

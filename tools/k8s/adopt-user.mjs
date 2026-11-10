@@ -8,6 +8,8 @@ import { list, matches, publishedLinks, readOwners, requireValue as check, valid
 
 import { inventoryProbe, parseInventoryProbe, inventoryPaths, inventoryDocument, saveInventory, prepareInventoryDirectory, readDecisions, verificationProbe, verificationRows } from './adopt-inventory.mjs';
 
+import { readinessTimeout, waitForReady } from './adopt-wait.mjs';
+
 const commands = new Set(['pv', 'inventory', 'switch', 'rollback', 'verify', 'status']);
 const publishedDefault = '/run/workpartner/published';
 const executeFile = promisify(execFile);
@@ -17,7 +19,7 @@ Commands: pv <slug> --node <node> --data-root <host root>
           inventory <slug> | switch <slug> | rollback <slug> | verify <slug> | status
 Options: --organization <organization.json> --kubeconfig <flattened.json>
          --users <users.json> --host-secure <absolute host key directory>
-         --owners-file <absolute host owners.json> --help
+         --owners-file <absolute host owners.json> --ready-timeout <seconds> --help
 Default: dry-run; no filesystem, Docker, Kubernetes, or exec writes.
 --data-root is the Docker host data root: <root><runtime.nextDirectory>/<slug>;
 old work is <root>/users/<slug>/work. Run on that Docker host with these paths mounted.
@@ -33,7 +35,9 @@ lifecycle tasks for the selected user during switch/rollback. Apply operations t
 an owners-file lock. After an interrupted process, inspect status before removing a stale lock.
 inventory --apply writes <ownersFile>.adopt/<slug>.inventory.json, .inventory.txt
 and .decisions.json (mode 0600). Each inventory resets decisions.
-Complete every decision: carried with method, or dropped with reason; target may
+Known startup metadata and transient/interactive processes default to dropped with reasons.
+Carried paths /opt/partner-next and port 3092 map to /opt/workpartner and 25808;
+explicit targets override these defaults. Complete every remaining decision: carried with method, or dropped with reason; target may
 map a changed path/user/port. switch requires the latest complete table before
 any write, including the lock. Credential files are metadata-only; all process
 and cron command arguments are redacted. inventory requires a running container
@@ -42,6 +46,9 @@ Acknowledge each inventory issue with acknowledged: true and a reason after manu
 verify --apply checks carried items and reports mismatches as ALARM.
 A missing table only warns and skips per-item checks in verify (also for an already
 migrated switch); existing invalid tables still fail, and new switches require a complete table.
+Readiness checks retry every 5 seconds, up to --ready-timeout (default 180 seconds)
+per check, including switch prepare and verification. Failures report attempts and reason.
+switch --apply calls the gateway loopback-only internal POST /internal/adopt/prepare/<slug>.
 verify --apply runs read-only commands inside the workspace and gateway Pod.
 Without --apply, verify only performs passive checks and prints the remaining checks.
 `;
@@ -53,7 +60,7 @@ export function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--apply') options.apply = true;
     else if (arg === '--help') options.help = true;
-    else if (['--node', '--data-root', '--organization', '--kubeconfig', '--users', '--host-secure', '--owners-file'].includes(arg)) {
+    else if (['--node', '--data-root', '--organization', '--kubeconfig', '--users', '--host-secure', '--owners-file', '--ready-timeout'].includes(arg)) {
       const value = argv[i + 1];
       check(typeof value === 'string' && !value.startsWith('--') && (value !== '' || arg === '--host-secure'), `Missing value for ${arg}`);
       check(options[arg.slice(2)] === undefined, `Duplicate option ${arg}`);
@@ -73,6 +80,7 @@ export function parseArgs(argv) {
     if (options[key] === undefined || (key === 'host-secure' && options[key] === '')) continue;
     check(path.isAbsolute(options[key]), `--${key} requires an absolute host path`);
   }
+  readinessTimeout(options['ready-timeout']);
   return { ...options, command, slug };
 }
 
@@ -103,6 +111,9 @@ export async function runAdopt(options, dependencies) {
   const step = async (name, action) => { stage = name; say(`${options.apply ? 'APPLY' : 'DRY-RUN'} ${name}`); return action(); };
   try {
     check(commands.has(options.command), 'Invalid command');
+    const timeoutMs = readinessTimeout(options['ready-timeout']);
+    const readyStep = (name, action) => step(name, () => options.apply
+      ? waitForReady(name, action, { timeoutMs, log: say, now: dependencies.now, sleep: dependencies.sleep }) : action());
     for (const key of ['host-secure', 'owners-file']) {
       if (options[key] === undefined || (key === 'host-secure' && options[key] === '')) continue;
       check(typeof options[key] === 'string' && path.isAbsolute(options[key]), `--${key} requires an absolute host path`);
@@ -213,9 +224,31 @@ export async function runAdopt(options, dependencies) {
       });
     }
 
+    async function gatewayExec(argv, timeout, remaining) {
+      check(k.systemNamespace || client.namespace, 'Missing system namespace');
+      const gateways = await list(client, `/api/v1/namespaces/${k.systemNamespace || client.namespace}/pods?labelSelector=${encodeURIComponent('workpartner/role=gateway')}`);
+      const gateway = gateways.find(pod => pod.status?.phase === 'Running' && !pod.metadata.deletionTimestamp);
+      check(gateway, 'Gateway Pod unavailable');
+      // Deployment Pod names differ from the gateway container name.
+      const gatewayRuntime = await createRuntime({ ...organization, runtime: { ...r, kind: 'k8s', k8s: { ...k, systemContainer: 'gateway' } } }, { client, inspectCacheMs: 0 });
+      return gatewayRuntime.execNamed(gateway.metadata.name, argv, { timeout: Math.min(timeout, remaining()) });
+    }
+
+    async function preparePublished() {
+      recovery = 'Keep Docker stopped. Check gateway internal preparation and rerun switch --apply, or run rollback --apply.';
+      await readyStep('prepare gateway published files', async remaining => {
+        if (!options.apply) return say('DRY-RUN planned gateway exec: internal prepare');
+        const port = r.internalPort ?? 3091;
+        check(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid gateway internal port');
+        const script = 'const http=require("node:http");const [port,slug]=process.argv.slice(1);const q=http.request({host:"127.0.0.1",port,path:"/internal/adopt/prepare/"+encodeURIComponent(slug),method:"POST",timeout:15000},r=>{r.resume();process.exitCode=r.statusCode===204?0:1});q.on("timeout",()=>q.destroy());q.on("error",()=>{process.exitCode=1});q.end();';
+        const result = await gatewayExec(['node', '-e', script, String(port), slug], 20000, remaining);
+        check(result.exitCode === 0, 'Gateway internal prepare failed (check gateway ownership and internal listener)');
+      });
+    }
+
     async function verify() {
       recovery = 'Keep Docker stopped. Repair the failed check and rerun verify --apply, or run rollback --apply.';
-      await step('verify Pod and expected node', async () => {
+      await readyStep('verify Pod and expected node', async () => {
         const volume = await adoptionVolumes();
         const state = await runtime.inspect(slug), pods = await podsFor(slug);
         check(state.running && pods.length === 1 && pods[0].metadata.name === `${name}-0`
@@ -225,32 +258,35 @@ export async function runAdopt(options, dependencies) {
         const node = await client.get(`/api/v1/nodes/${encodeURIComponent(nodeName)}`);
         check(node?.metadata?.name === nodeName
           && node.metadata.labels?.['kubernetes.io/hostname'] === expectedHostname(volume), 'Pod is on the wrong node');
+        if (options.apply) check(pods[0].status?.conditions?.some(condition => condition.type === 'Ready' && condition.status === 'True'), 'Workspace Pod is not Ready');
         report.node = pods[0].spec.nodeName;
         report.address = state.address;
       });
-      await step('verify gateway AionUi status', async () => {
+      await readyStep('verify gateway AionUi status', async remaining => {
         if (!options.apply) return say('DRY-RUN planned gateway exec: GET /api/auth/status');
-        check(k.systemNamespace || client.namespace, 'Missing system namespace');
-        const gateways = await list(client, `/api/v1/namespaces/${k.systemNamespace || client.namespace}/pods?labelSelector=${encodeURIComponent('workpartner/role=gateway')}`);
-        const gateway = gateways.find(pod => pod.status?.phase === 'Running' && !pod.metadata.deletionTimestamp);
-        check(gateway && report.address, 'Gateway Pod or workspace address unavailable');
+        report.address = (await runtime.inspect(slug)).address;
+        check(report.address, 'Workspace address unavailable');
         const script = 'const http=require("node:http");const [host,port]=process.argv.slice(1);const q=http.get({host,port,path:"/api/auth/status",timeout:10000},r=>{r.resume();process.exitCode=r.statusCode===200?0:1});q.on("timeout",()=>q.destroy());q.on("error",()=>{process.exitCode=1});';
-        // Deployment Pod names differ from their container name. Keep this override local
-        // to the gateway probe so other system Pods retain their configured/default target.
-        const gatewayRuntime = await createRuntime({ ...organization, runtime: { ...r, kind: 'k8s', k8s: { ...k, systemContainer: 'gateway' } } }, { client, inspectCacheMs: 0 });
-        const result = await gatewayRuntime.execNamed(gateway.metadata.name, ['node', '-e', script, report.address.host, String(report.address.port)], { timeout: 15000 });
+        const result = await gatewayExec(['node', '-e', script, report.address.host, String(report.address.port)], 15000, remaining);
         check(result.exitCode === 0, 'Gateway cannot reach AionUi status');
       });
-      await step('verify configured cc-connect process', async () => {
+      await readyStep('verify configured cc-connect process', async remaining => {
         if (!options.apply) return say('DRY-RUN planned workspace exec and processes check');
-        const configured = await runtime.exec(slug, ['sh', '-c', 'test -f /data/.cc-connect/config.toml'], { timeout: 10000 });
+        const configured = await runtime.exec(slug, ['sh', '-c', 'test -f /data/.cc-connect/config.toml'], { timeout: Math.min(10000, remaining()) });
         check([0, 1].includes(configured.exitCode), 'Unable to check bridge configuration');
-        if (configured.exitCode === 0) check((await runtime.processes(slug)).some(process => /(^|\/)cc-connect$/.test(process.args.split(/\s+/)[0])), 'Configured cc-connect process missing');
+        if (configured.exitCode === 0) check((await runtime.processes(slug, Math.min(5000, remaining()))).some(process => /(^|\/)cc-connect$/.test(process.args.split(/\s+/)[0])), 'Configured cc-connect process missing');
       });
-      await step('verify preview key link', async () => {
-        if (!options.apply) return say('DRY-RUN planned workspace exec: preview key link and readable target');
-        const result = await runtime.exec(slug, ['sh', '-c', 'test -L /data/.zp-preview-relay-key && test "$(readlink /data/.zp-preview-relay-key)" = "$1/.zp-preview-relay-key" && test -s /data/.zp-preview-relay-key && test -r /data/.zp-preview-relay-key', 'verify', published], { timeout: 10000 });
-        check(result.exitCode === 0, 'Preview key link is invalid');
+      await readyStep('verify published keys and links', async remaining => {
+        if (!options.apply) return say('DRY-RUN planned published Secret keys and workspace links check');
+        const required = [];
+        if (organization.features?.preview !== false && organization.server?.previewHost !== '') required.push('.zp-preview-relay-key');
+        if (organization.features?.feishuAuthorization !== false) required.push('.zp-market-token', '.wp-feishu-cli.json');
+        if (!required.length) return;
+        const secret = await client.get(`${core}/secrets/${name}-published`);
+        check(required.every(key => typeof secret?.data?.[key] === 'string' && Buffer.from(secret.data[key], 'base64').length > 0), 'Published Secret keys are missing or empty');
+        const script = 'dir=$1; shift; for file do test -L "/data/$file" && test "$(readlink "/data/$file")" = "$dir/$file" && test -s "/data/$file" && test -r "/data/$file" || exit 1; done';
+        const result = await runtime.exec(slug, ['sh', '-c', script, 'verify', published, ...required], { timeout: Math.min(10000, remaining()) });
+        check(result.exitCode === 0, 'Published file links are invalid, empty or unreadable');
       });
       await step('verify Docker stopped', async () => check(!dockerActive(await dockerInspect()), 'Docker is still active'));
       await step('verify carried inventory items', async () => {
@@ -266,10 +302,19 @@ export async function runAdopt(options, dependencies) {
         const rows = table.items.filter(item => item.decision === 'carried');
         report.alarms = [];
         if (rows.length) {
-          const result = await runtime.exec(slug, verificationProbe, { timeout: 120000, stdin: JSON.stringify(verificationRows(rows)), strictOutput: true });
-          check(result.exitCode === 0, 'Carried inventory verification probe failed');
-          report.alarms = JSON.parse(result.stdout);
-          check(Array.isArray(report.alarms), 'Invalid carried inventory verification response');
+          try {
+            await waitForReady('verify carried inventory items', async remaining => {
+              const result = await runtime.exec(slug, verificationProbe, { timeout: Math.min(120000, remaining()), stdin: JSON.stringify(verificationRows(rows)), strictOutput: true });
+              check(result.exitCode === 0, 'Carried inventory verification probe failed');
+              const alarms = JSON.parse(result.stdout);
+              check(Array.isArray(alarms), 'Invalid carried inventory verification response');
+              report.alarms = alarms;
+              check(report.alarms.length === 0, 'Carried inventory items missing or mismatched');
+            }, { timeoutMs, log: say, now: dependencies.now, sleep: dependencies.sleep });
+          } catch (error) {
+            for (const alarm of report.alarms) say(`ALARM ${JSON.stringify(alarm)}`);
+            throw error;
+          }
         }
         for (const alarm of report.alarms) say(`ALARM ${JSON.stringify(alarm)}`);
         check(report.alarms.length === 0, 'Carried inventory items missing or mismatched');
@@ -423,6 +468,7 @@ export async function runAdopt(options, dependencies) {
       }
       if (alreadyMigrated) {
         check(container.HostConfig?.RestartPolicy?.Name === 'no', 'Migrated Docker restart policy must remain no');
+        await preparePublished();
         return verify();
       }
       check(pods.length === 0 && !state.running && (state.replicas === 0 || !state.exists), 'Stop existing k8s workload before switching');
@@ -444,6 +490,7 @@ export async function runAdopt(options, dependencies) {
         check(!dockerActive(await dockerInspect()), 'Docker restarted during switch');
         await runtime.start(slug);
       });
+      await preparePublished();
       if (options.apply) await verify();
       else say('DRY-RUN verify after start: Pod/node, gateway status, cc-connect, preview link, Docker stopped');
     }

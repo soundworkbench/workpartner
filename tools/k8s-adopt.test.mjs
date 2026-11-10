@@ -7,6 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { runAdopt, parseArgs, main } from './k8s/adopt-user.mjs';
 import { matches, readOwners, writeOwner } from './k8s/adopt-state.mjs';
 import { inventoryPaths, inventoryDocument, saveInventory, collectInventory, verificationProbe, verificationRows, inventoryProbe } from './k8s/adopt-inventory.mjs';
+import { imageMappings, mappedItem, defaultDecision } from './k8s/adopt-mappings.mjs';
+import { waitForReady } from './k8s/adopt-wait.mjs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { createRuntime } from '../gateway/runtime/index.mjs';
@@ -49,17 +51,19 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
     return table;
   }
   await decide();
+  let clock = 0;
   const events = [], logs = [], snapshots = [];
   const objects = new Map();
   const state = { exists: migrated, running: migrated, replicas: migrated ? 1 : null, annotations: {}, address: { host: '192.0.2.10', port: 25808 } };
   const container = { Name: `/${name}`, State: { Running: !migrated }, HostConfig: { RestartPolicy: { Name: migrated ? 'no' : 'unless-stopped' } },
     Mounts: [{ Destination: '/data', Source: directory, Type: 'bind', RW: true }] };
-  const pod = (slug = 'user1', suffix = '0') => ({ metadata: { name: `workspace-${slug}-${suffix}`, labels: { [label]: slug } }, spec: { nodeName: 'node-a' }, status: { phase: 'Running' } });
+  const pod = (slug = 'user1', suffix = '0') => ({ metadata: { name: `workspace-${slug}-${suffix}`, labels: { [label]: slug } }, spec: { nodeName: 'node-a' }, status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] } });
   let pods = migrated ? [pod()] : [];
   const volume = { metadata: { name: `workspaces-${name}-data` }, spec: {
     local: { path: directory }, claimRef: { name: `${name}-data`, namespace: 'workspaces' },
     nodeAffinity: { required: { nodeSelectorTerms: [{ matchExpressions: [{ key: 'kubernetes.io/hostname', operator: 'In', values: ['fixture-hostname'] }] }] } },
   } };
+  objects.set(`${core}/secrets/${name}-published`, { data: Object.fromEntries(['.zp-preview-relay-key', '.zp-market-token', '.wp-feishu-cli.json'].map(key => [key, Buffer.from(secret).toString('base64')])) });
   objects.set(`${core}/persistentvolumeclaims/${name}-data`, { spec: { volumeName: volume.metadata.name }, status: { phase: 'Bound' } });
   objects.set(`/api/v1/persistentvolumes/${volume.metadata.name}`, volume);
   objects.set('/api/v1/nodes/node-a', { metadata: { name: 'node-a', labels: { 'kubernetes.io/hostname': 'fixture-hostname' } } });
@@ -130,7 +134,15 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
     },
     async execNamed(gateway, argv, _options, targetContainer) {
       assert.equal(targetContainer, 'gateway');
-      await record('gateway status'); assert.equal(gateway, 'gateway-pod'); assert.deepEqual(argv.slice(-2), ['192.0.2.10', '25808']);
+      assert.equal(gateway, 'gateway-pod');
+      if (argv[2].includes('/internal/adopt/prepare/')) {
+        assert.deepEqual(argv.slice(-2), ['3091', 'user1']);
+        assert.equal(await f.owner(), 'k8s');
+        await record('gateway prepare');
+        if (f.onPrepare) await f.onPrepare();
+        return { exitCode: f.prepareHealthy === false ? 1 : 0 };
+      }
+      await record('gateway status'); assert.deepEqual(argv.slice(-2), ['192.0.2.10', '25808']);
       assert.match(argv[2], /\/api\/auth\/status/); return { exitCode: f.gatewayHealthy ? 0 : 1, stderr: secret };
     },
     async exec(slug, argv, options) {
@@ -171,7 +183,8 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
     } else assert.fail(`Unexpected Docker operation ${args[0]}`);
     return { exitCode: 0, stdout: '' };
   };
-  f.dependencies = { organization, users, client, command, modelConfig: 'fixture-model-config',
+  f.dependencies = { organization, users, client, command, now: () => clock,
+    sleep: async ms => { clock += ms; if (f.onPoll) await f.onPoll(clock); }, modelConfig: 'fixture-model-config',
     createRuntime: (org, overrides) => {
       (f.runtimeOrganizations ??= []).push(org);
       assert.equal(org.runtime.kind, 'k8s'); assert.equal(overrides.inspectCacheMs, 0); assert.equal(overrides.client, client);
@@ -1334,11 +1347,13 @@ for (const crontabTool of [true, false]) test(`container probe enumerates cron, 
     ['/var/spool/cron/crontabs/user1', '@hourly /srv/example-service/run\n'],
     ['/var/spool/cron/user1', '@hourly /srv/example-service/run\n'],
     ['/proc/42/cmdline', '/srv/example-service/run\0--token\0hidden-process-secret\0--password=hidden-password\0'],
+    ['/proc/43/cmdline', '/usr/local/bin/claude\0hidden-interactive-prompt\0'],
+    ['/proc/44/cmdline', 'claude\0--print\0hidden-automation-prompt\0'],
     ['/proc/net/tcp', 'header\n0: 00000000:1F90 00000000:0000 0A\n'],
     ['/home/user1/.gitconfig', secret], ['/home/user1/.git-credentials', secret], ['/home/user1/.netrc', secret],
     ['/data/.cc-connect/config.toml', secret], ['/srv/example-service/bot-config.json', secret],
   ]);
-  const directories = new Set(['/etc', '/etc/cron.d', '/var/spool/cron', '/var/spool/cron/crontabs', '/proc', '/proc/net', '/srv', '/srv/example-service', '/opt', '/opt/example', '/root', '/home/user1', '/home/user1/.ssh', '/home/user1/.config', '/home/user1/.config/gh', '/data', '/data/.cc-connect']);
+  const directories = new Set(['/etc', '/etc/cron.d', '/var/spool/cron', '/var/spool/cron/crontabs', '/proc', '/proc/42', '/proc/43', '/proc/44', '/proc/net', '/srv', '/srv/example-service', '/opt', '/opt/example', '/root', '/home/user1', '/home/user1/.ssh', '/home/user1/.config', '/home/user1/.config/gh', '/data', '/data/.cc-connect']);
   const absent = () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); };
   const reads = [];
   const metadata = p => {
@@ -1385,6 +1400,8 @@ for (const crontabTool of [true, false]) test(`container probe enumerates cron, 
   assert.ok(!JSON.stringify(result).includes(secret));
   assert.ok(!JSON.stringify(result).includes('hidden-'));
   assert.ok(reads.includes('/etc/cron.d/example'));
+  assert.equal(defaultDecision(result.items.find(item => item.pid === 43)).decision, 'dropped');
+  assert.equal(defaultDecision(result.items.find(item => item.pid === 44)).decision, '');
   assert.equal(inventoryProbe[0], 'node');
 });
 
@@ -1467,4 +1484,185 @@ test('verification probe compares every cron fingerprint and TCP/UDP listener, c
     process: { getuid: () => 1001, stdout: { write: text => { output += text; } } },
   });
   assert.deepEqual(JSON.parse(output).map(item => item.id), ['cron-missing', 'port-missing', 'not-listening']);
+});
+
+test('readiness CLI accepts bounded positive seconds and rejects invalid timeout values', () => {
+  assert.equal(parseArgs(['verify', 'user1', '--ready-timeout', '15'])["ready-timeout"], '15');
+  for (const value of ['0', '-1', 'NaN', 'Infinity', '', '86401']) {
+    assert.throws(() => parseArgs(['verify', 'user1', '--ready-timeout', value]));
+  }
+});
+
+for (const command of ['verify', 'switch']) test(`${command} retries Pod readiness, gateway, bridge, and carried items until ready`, async t => {
+  const f = await fixture(t, { migrated: command === 'verify' });
+  await f.decide('carried');
+  f.gatewayHealthy = false; f.bridgeRunning = false;
+  f.carriedAlarms = [{ id: 'fixture', alarm: 'carried-item-missing-or-mismatched' }];
+  const pending = () => { f.pods[0].status.conditions[0].status = 'False'; };
+  if (command === 'verify') pending();
+  else f.after = async event => { if (event === 'runtime start') pending(); };
+  f.onPoll = async elapsed => {
+    if (elapsed === 5000) f.pods[0].status.conditions[0].status = 'True';
+    if (elapsed === 10000) f.gatewayHealthy = true;
+    if (elapsed === 15000) f.bridgeRunning = true;
+    if (elapsed === 20000) f.carriedAlarms = [];
+  };
+  const result = await f.run(command);
+  assert.equal(result.exitCode, 0, f.logs.join('\n'));
+  assert.equal(result.verified, true);
+  for (const stage of ['Pod and expected node', 'gateway AionUi status', 'configured cc-connect process', 'carried inventory items']) {
+    assert.ok(f.logs.includes(`READY verify ${stage}: attempt 2`));
+  }
+  assert.ok(!f.logs.some(line => line.startsWith('ALARM')));
+  f.assertSafe();
+});
+
+test('timeout reports attempt count and final safe reason, with default and custom bounds', async t => {
+  for (const [options, attempts] of [[{}, 36], [{ 'ready-timeout': '12' }, 3]]) {
+    const f = await fixture(t, { migrated: true });
+    f.gatewayHealthy = false;
+    const delays = [];
+    f.onPoll = elapsed => delays.push(elapsed);
+    const result = await f.run('verify', true, options);
+    assert.equal(result.failedStage, 'verify gateway AionUi status');
+    assert.equal(f.events.filter(event => event === 'gateway status').length, attempts);
+    assert.match(f.logs.at(-1), new RegExp(`Timed out after ${attempts} attempts .*Gateway cannot reach AionUi status`));
+    assert.equal(delays.at(-1), options['ready-timeout'] ? 12000 : 180000);
+    assert.equal(delays[0], 5000);
+    f.assertSafe();
+  }
+});
+
+test('readiness timeout bounds a stuck attempt and never logs upstream exception values', async () => {
+  const logs = [];
+  await assert.rejects(waitForReady('stuck', () => new Promise(() => {}), { timeoutMs: 10, log: line => logs.push(line) }), /Timed out after 1 attempts.*unavailable or timed out/);
+  let time = 0;
+  await assert.rejects(waitForReady('unsafe', async () => { throw new Error(secret); }, {
+    timeoutMs: 5000, log: line => logs.push(line), now: () => time, sleep: async ms => { time += ms; },
+  }), /Timed out after 1 attempts.*unavailable or timed out/);
+  assert.ok(!logs.join('\n').includes(secret));
+});
+
+for (const migrated of [false, true]) test(`switch prepares published keys and waits for Secret and projected links (migrated: ${migrated})`, async t => {
+  const f = await fixture(t, { migrated });
+  const route = `${core}/secrets/${name}-published`;
+  const populated = f.objects.get(route);
+  f.objects.set(route, { data: {} });
+  f.previewValid = false;
+  let prepared = false;
+  f.onPrepare = async () => { prepared = true; };
+  f.onPoll = async elapsed => {
+    assert.equal(prepared, true);
+    if (elapsed === 5000) f.objects.set(route, populated);
+    if (elapsed === 10000) f.previewValid = true;
+  };
+  const result = await f.run('switch');
+  assert.equal(result.exitCode, 0, f.logs.join('\n'));
+  ordered(f.events, ['gateway prepare', 'gateway status', `get ${route}`, 'preview link']);
+  assert.ok(f.logs.includes('READY verify published keys and links: attempt 3'));
+  assert.equal(f.events.filter(event => event === 'preview link').length, 2);
+  f.assertSafe();
+});
+
+test('prepare failures retry with safe timeout and leave Docker stopped under k8s ownership', async t => {
+  const f = await fixture(t);
+  f.prepareHealthy = false;
+  const result = await f.run('switch', true, { 'ready-timeout': '10' });
+  assert.equal(result.failedStage, 'prepare gateway published files');
+  assert.match(f.logs.at(-1), /Timed out after 2 attempts.*Gateway internal prepare failed/);
+  assert.equal(await f.owner(), 'k8s'); assert.equal(f.container.State.Running, false);
+  assert.ok(!f.events.includes('gateway status'));
+  f.assertSafe();
+});
+
+for (const missing of ['.zp-market-token', '.wp-feishu-cli.json', '.zp-preview-relay-key']) test(`verify requires nonempty published ${missing} and stays read-only`, async t => {
+  const f = await fixture(t, { migrated: true });
+  f.objects.get(`${core}/secrets/${name}-published`).data[missing] = '';
+  const result = await f.run('verify', true, { 'ready-timeout': '5' });
+  assert.equal(result.failedStage, 'verify published keys and links');
+  assert.match(f.logs.at(-1), /Published Secret keys are missing or empty/);
+  assert.ok(!f.events.includes('gateway prepare')); assert.ok(!f.events.includes('preview link'));
+  f.assertSafe();
+});
+
+test('published links are checked for every enabled file and disabled features need no keys', async t => {
+  const f = await fixture(t, { migrated: true });
+  const original = f.dependencies.createRuntime;
+  let checked = false;
+  f.dependencies.createRuntime = async (...args) => {
+    const runtime = await original(...args);
+    const exec = runtime.exec;
+    runtime.exec = async (slug, argv, options) => {
+      if (argv[2].startsWith('dir=$1')) {
+        assert.deepEqual(argv.slice(5), ['.zp-preview-relay-key', '.zp-market-token', '.wp-feishu-cli.json']);
+        assert.match(argv[2], /for file do/); assert.match(argv[2], /test -r/);
+        checked = true;
+      }
+      return exec(slug, argv, options);
+    };
+    return runtime;
+  };
+  assert.equal((await f.run('verify')).exitCode, 0); assert.equal(checked, true);
+  f.organization.features = { preview: false, feishuAuthorization: false };
+  f.objects.delete(`${core}/secrets/${name}-published`);
+  checked = false;
+  assert.equal((await f.run('verify')).exitCode, 0); assert.equal(checked, false);
+});
+
+test('built-in image mappings verify moved directories, executables and listeners without alarms', () => {
+  assert.deepEqual(imageMappings.paths, { '/opt/partner-next': '/opt/workpartner' });
+  assert.deepEqual(imageMappings.ports, { 3092: 25808 });
+  const rows = verificationRows([
+    { id: 'directory', source: { kind: 'directory', path: '/opt/partner-next' }, target: {} },
+    { id: 'file', source: { kind: 'docker-diff', change: 'A', path: '/opt/partner-next/bin/cc-connect' }, target: {} },
+    { id: 'process', source: { kind: 'process', executable: '/opt/partner-next/bin/cc-connect' }, target: {} },
+    { id: 'port', source: { kind: 'port', protocol: 'tcp', port: 3092 }, target: {} },
+  ]);
+  let output = '';
+  const fakeFs = {
+    statSync(p) { assert.ok(['/opt/workpartner', '/opt/workpartner/bin/cc-connect'].includes(p)); return { isDirectory: () => true }; },
+    readdirSync(p) { assert.equal(p, '/proc'); return ['42']; },
+    readFileSync(p) {
+      if (p === 0) return JSON.stringify(rows);
+      if (p === '/proc/42/cmdline') return '/opt/workpartner/bin/cc-connect\0';
+      if (p === '/proc/net/tcp') return 'header\n0: 00000000:64D0 00000000:0000 0A\n';
+      assert.fail('Unexpected read');
+    },
+  };
+  const require = createRequire(import.meta.url);
+  vm.runInNewContext(verificationProbe[2], {
+    require: name => name === 'node:fs' ? fakeFs : require(name),
+    process: { stdout: { write: text => { output += text; } } },
+  });
+  assert.deepEqual(JSON.parse(output), []);
+  assert.equal(mappedItem({ path: '/opt/partner-next-other/bin' }).path, '/opt/partner-next-other/bin');
+  assert.equal(mappedItem({ kind: 'port', port: 8080 }).port, 8080);
+  const overridden = verificationRows([
+    { id: 'path', source: { kind: 'directory', path: '/opt/partner-next' }, target: { path: '/data/service' } },
+    { id: 'exe', source: { kind: 'process', executable: '/opt/partner-next/bin/cc-connect' }, target: { executable: '/data/bin/bridge' } },
+    { id: 'port', source: { kind: 'port', protocol: 'tcp', port: 3092 }, target: { port: 8080 } },
+  ]);
+  assert.equal(overridden[0].path, '/data/service'); assert.equal(overridden[1].executable, '/data/bin/bridge'); assert.equal(overridden[2].port, 8080);
+});
+
+test('inventory pre-classifies only known startup and transient items, keeping unknown items undecided', async t => {
+  const f = await fixture(t);
+  const harmless = [
+    ...['/usr', '/usr/local', '/usr/local/bin', '/root', '/root/.gitconfig'].map(path => ({ kind: 'docker-diff', change: 'C', path })),
+    { kind: 'dotfile', path: '/root/.gitconfig', exists: true },
+    ...['/usr/bin/curl', 'sleep', '/usr/local/bin/claude'].map(executable => ({ kind: 'process', executable, interactive: true })),
+  ];
+  const unknown = [
+    ...['/usr/local/bin/custom-cli', '/root/.ssh', '/root/custom-script', '/usr/share/custom', '/srv/example-service', '/opt/partner-next'].map(path => ({ kind: 'docker-diff', change: 'A', path })),
+    { kind: 'process', executable: '/srv/example-service/run' }, { kind: 'port', port: 8080, protocol: 'tcp' },
+    { kind: 'process', executable: 'claude', interactive: false }, { kind: 'process', executable: 'claude' },
+  ];
+  for (const item of harmless) assert.equal(defaultDecision(item).decision, 'dropped');
+  f.inventoryItems = [...harmless, ...unknown]; f.diff = '';
+  assert.equal((await f.run('inventory')).exitCode, 0);
+  const table = JSON.parse(await fs.readFile(f.files.decisions, 'utf8'));
+  assert.ok(table.items.slice(0, harmless.length).every(item => item.decision === 'dropped' && item.reason.length > 0));
+  assert.ok(table.items.slice(harmless.length).every(item => item.decision === '' && item.reason === ''));
+  assert.equal((await f.run('switch')).failedStage, 'switch preflight: inventory decisions');
+  f.assertSafe();
 });
