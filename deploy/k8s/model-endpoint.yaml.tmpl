@@ -1,0 +1,15 @@
+{
+  "apiVersion": "discovery.k8s.io/v1",
+  "kind": "EndpointSlice",
+  "metadata": {
+    "name": {{modelName}}, "namespace": {{systemNamespace}},
+    "labels": {
+      "app.kubernetes.io/part-of": "workpartner",
+      "kubernetes.io/service-name": {{modelName}},
+      "endpointslice.kubernetes.io/managed-by": "workpartner-render"
+    }
+  },
+  "addressType": "IPv4",
+  "ports": [{"name": "model", "protocol": "TCP", "port": {{modelEndpointPort}}}],
+  "endpoints": [{"addresses": [{{modelEndpointAddress}}], "conditions": {"ready": true}}]
+}

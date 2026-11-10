@@ -34,6 +34,7 @@ export interface Organization {
           | { mode: 'clusterIP'; clusterIP: string };
         hostPaths?: { organization?: string; secure?: string; state?: string; usersFile?: string };
         egressExceptCidrs?: string[]; modelEgressSelector?: Record<string, string>;
+        modelEgressEndpoint?: { address: string; port: number };
         newUserStorage?: { provisioner?: string; parameters?: Record<string, string> };
       };
     };
@@ -59,7 +60,7 @@ export function resolveOrganization(environment?: NodeJS.ProcessEnv): Organizati
 /** Return only the pre-existing public desktop fields. */
 export function desktopPublicConfig(environment: NodeJS.ProcessEnv, packaged?: { PUBLIC_HOST?: unknown; MEEGLE_HOST?: unknown }): { PUBLIC_HOST: string; MEEGLE_HOST: string };
 /** Non-secret release data before deployment overrides. */
-export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publicHost?: string; runtime: Omit<Organization["runtime"], "hostData" | "hostSecure" | "hostConfig" | "modelContainer"> & { modelContainer: string | null } };
+export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publicHost?: string; previewHost?: string; legacyHosts?: string[]; projectHost?: string; runtime: Omit<Organization["runtime"], "hostData" | "hostSecure" | "hostConfig" | "modelContainer"> & { modelContainer: string | null } };
 /** Read organization data without requiring deployment endpoints. */
 export function organizationData(environment?: NodeJS.ProcessEnv): OrganizationData;
 /** Resolve next image startup variables without reading a credential. */

@@ -100,7 +100,15 @@ export function nextEnvironment(data, environment = {}) {
 export function resolveOrganization(environment = process.env) {
   const { directory, ...data } = organizationData(environment);
   const host = hostname(environment.PUBLIC_HOST || data.publicHost, 'PUBLIC_HOST');
-  const projectHost = hostname(environment.MEEGLE_HOST || '', 'MEEGLE_HOST', true);
+  const projectHost = hostname(environment.MEEGLE_HOST || data.projectHost || '', 'MEEGLE_HOST', true);
+  const previewHost = hostname(environment.PREVIEW_HOST || data.previewHost || '', 'PREVIEW_HOST', true);
+  const legacyHosts = environment.OLD_HOSTS
+    ? String(environment.OLD_HOSTS).split(',').map(value => value.trim()).filter(Boolean)
+    : data.legacyHosts ?? [];
+  if (!Array.isArray(legacyHosts) || legacyHosts.some(value => typeof value !== 'string')) {
+    throw new Error('legacyHosts must be an array of hostname strings');
+  }
+  for (const value of legacyHosts) hostname(value, 'OLD_HOSTS');
   const baseUrl = environment.MODEL_BASE_URL || environment.MODEL_BASE_URL || data.model.baseUrl;
   const modelUrl = new URL(baseUrl);
   // HTTPS proxy support belongs to a later phase; retain the existing transport here.
@@ -113,8 +121,8 @@ export function resolveOrganization(environment = process.env) {
     server: {
       publicHost: host,
       publicOrigin: `https://${host}`,
-      legacyHosts: String(environment.OLD_HOSTS || '').split(',').map(value => value.trim()).filter(Boolean),
-      previewHost: environment.PREVIEW_HOST || '',
+      legacyHosts,
+      previewHost,
       projectHost,
     },
     identity: { ...data.identity, appId: environment.FEISHU_APP_ID ?? data.identity.appId, pilotChatId: environment.ADMISSION_GROUP_ID ?? environment.ADMISSION_GROUP_ID ?? data.identity.pilotChatId },

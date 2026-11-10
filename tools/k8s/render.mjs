@@ -9,7 +9,7 @@ import { organizationData } from '../../gateway/organization/resolve.mjs';
 const templateDirectory = new URL('../../deploy/k8s/', import.meta.url);
 const templates = ['namespaces', 'rbac', 'gateway', 'services', 'network-policies', 'storage', 'images'];
 const kinds = ['Namespace', 'ServiceAccount', 'Role', 'RoleBinding', 'PriorityClass',
-  'Deployment', 'Service', 'NetworkPolicy', 'StorageClass', 'ConfigMap'];
+  'Deployment', 'Service', 'EndpointSlice', 'NetworkPolicy', 'StorageClass', 'ConfigMap'];
 const privateCidrs = ['169.254.0.0/16', '10.0.0.0/8', '172.16.0.0/12',
   '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8'];
 const policyNames = ['workpartner-default-deny', 'workpartner-user-egress', 'workpartner-user-ingress'];
@@ -49,7 +49,6 @@ function context(organization) {
     'runtime.k8s.deploy.hostPaths.state': paths.state,
     'runtime.k8s.deploy.hostPaths.usersFile': paths.usersFile,
     'runtime.k8s.deploy.egressExceptCidrs': deploy.egressExceptCidrs,
-    'runtime.k8s.deploy.modelEgressSelector': deploy.modelEgressSelector,
     'runtime.k8s.deploy.newUserStorage.provisioner': storage.provisioner,
     'runtime.gatewayOrigin': runtime.gatewayOrigin,
     'runtime.internalOrigin': runtime.internalOrigin,
@@ -133,12 +132,28 @@ function context(organization) {
   check('runtime.k8s.imageConfigMap', dnsName(imageConfigMap));
   check('runtime.k8s.governingService', serviceName(governingService));
   check('runtime.k8s.deploy.gatewayNodeSelector', selector(gatewayNodeSelector));
-  check('runtime.k8s.deploy.modelEgressSelector', selector(deploy.modelEgressSelector));
-  check('runtime.k8s.deploy.modelEgressSelector (must include workpartner/role: model-egress)',
-    deploy.modelEgressSelector?.['workpartner/role'] === 'model-egress');
-  if (selector(deploy.modelEgressSelector)) {
-    check('runtime.k8s.deploy.modelEgressSelector (must not select gateway Pods)',
-      !Object.entries(deploy.modelEgressSelector).every(([key, value]) => gatewayLabels[key] === value));
+  const hasModelSelector = deploy.modelEgressSelector !== undefined;
+  const hasModelEndpoint = deploy.modelEgressEndpoint !== undefined;
+  const modelEndpoint = deploy.modelEgressEndpoint;
+  const modelChoice = 'runtime.k8s.deploy.modelEgressSelector or runtime.k8s.deploy.modelEgressEndpoint (exactly one required)';
+  if (!hasModelSelector && !hasModelEndpoint) missing.push(modelChoice);
+  check(modelChoice, !(hasModelSelector && hasModelEndpoint));
+  if (hasModelSelector) {
+    check('runtime.k8s.deploy.modelEgressSelector', selector(deploy.modelEgressSelector));
+    check('runtime.k8s.deploy.modelEgressSelector (must include workpartner/role: model-egress)',
+      deploy.modelEgressSelector?.['workpartner/role'] === 'model-egress');
+    if (selector(deploy.modelEgressSelector)) {
+      check('runtime.k8s.deploy.modelEgressSelector (must not select gateway Pods)',
+        !Object.entries(deploy.modelEgressSelector).every(([key, value]) => gatewayLabels[key] === value));
+    }
+  }
+  if (hasModelEndpoint) {
+    check('runtime.k8s.deploy.modelEgressEndpoint (expected an address/port object)',
+      modelEndpoint !== null && typeof modelEndpoint === 'object' && !Array.isArray(modelEndpoint));
+    check('runtime.k8s.deploy.modelEgressEndpoint.address (expected IPv4, excluding unspecified, loopback and link-local)',
+      isIP(modelEndpoint?.address) === 4 && modelEndpoint.address !== '0.0.0.0'
+      && !modelEndpoint.address.startsWith('127.') && !modelEndpoint.address.startsWith('169.254.'));
+    check('runtime.k8s.deploy.modelEgressEndpoint.port', port(modelEndpoint?.port));
   }
   const resources = k8s.gatewayResources;
   check('runtime.k8s.gatewayResources (expected a cpu/memory object)',
@@ -215,6 +230,21 @@ function context(organization) {
     secureDirectory: runtime.secureDirectory, stateDirectory: runtime.stateDirectory, usersFile: runtime.usersFile,
     nextPort: runtime.nextPort, modelName: model.name, modelPort: model.port,
     modelEgressSelector: deploy.modelEgressSelector,
+    modelEndpoint,
+    modelServiceSpec: {
+      type: 'ClusterIP',
+      ...(!hasModelEndpoint ? { selector: deploy.modelEgressSelector } : {}),
+      ports: [{ name: 'model', protocol: 'TCP', port: model.port, targetPort: modelEndpoint?.port ?? model.port }],
+    },
+    modelEgressRule: {
+      to: hasModelEndpoint ? [{ ipBlock: { cidr: `${modelEndpoint.address}/32` } }] : [{
+        namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': systemNamespace } },
+        podSelector: { matchLabels: deploy.modelEgressSelector },
+      }],
+      ports: [{ protocol: 'TCP', port: modelEndpoint?.port ?? model.port }],
+    },
+    modelEndpointAddress: modelEndpoint?.address,
+    modelEndpointPort: modelEndpoint?.port,
     egressExceptCidrs: [...new Set([...privateCidrs, ...deploy.egressExceptCidrs])],
     storageClass: k8s.storageClass, storageProvisioner: storage.provisioner, storageParameters: storage.parameters ?? {},
   };
@@ -228,7 +258,8 @@ export function renderManifests(organization, { only } = {}) {
     throw new Error(`--only must contain Kubernetes kinds: ${kinds.join(', ')}`);
   }
   const values = context(organization);
-  const files = values.entryMode === 'clusterIP' ? [...templates, 'gateway-entry'] : templates;
+  const files = [...templates, values.modelEndpoint ? 'model-endpoint' : 'model-ingress',
+    ...(values.entryMode === 'clusterIP' ? ['gateway-entry'] : [])];
   const objects = files.flatMap(name => {
     const template = readFileSync(new URL(`${name}.yaml.tmpl`, templateDirectory), 'utf8');
     const rendered = template.replace(/\{\{([a-zA-Z]+)\}\}/g, (_, key) => {
@@ -252,7 +283,8 @@ All deployment configuration is validated before output, including when using --
 Required: runtime.kind=k8s; runtime.k8s.namespace, systemNamespace, storageClass;
 runtime.k8s.deploy.gatewayImage, hostPaths.{organization,secure,state,usersFile},
 egressExceptCidrs (all node public IPv4 /32 addresses; an explicit [] is allowed),
-modelEgressSelector (must include workpartner/role: model-egress and exclude gateway Pods),
+exactly one of modelEgressSelector (must include workpartner/role: model-egress and exclude gateway Pods)
+or modelEgressEndpoint {address:<IPv4>,port:<1-65535>},
 newUserStorage.{provisioner,parameters?}.
 Storage parameters are a string map, passed through to the provisioner.
 systemNamespace defaults to the mounted ServiceAccount namespace when available.
@@ -261,6 +293,8 @@ entry is {mode:"hostPort",hostIP:"127.0.0.1",hostPort:<port>} or
 the gateway's same-name headless Service for preview source validation.
 Gateway origins must share a short Service hostname and match their configured ports.
 The model Service uses model.baseUrl; model.nextBaseUrl must match its hostname and port if set.
+modelEgressEndpoint creates a selector-less Service and an IPv4 EndpointSlice, with precise
+TCP egress to address/32 at the endpoint port. Unspecified, loopback and link-local addresses are rejected.
 Mounts: organization -> /organization (read-only); secure/state/usersFile -> runtime paths.
 sessionKeyFile, cookieFile, identity.appSecretFile and migration.ownersFile (when migration
 is configured) must be below runtime.secureDirectory or runtime.stateDirectory.

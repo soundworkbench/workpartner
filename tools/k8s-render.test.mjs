@@ -673,3 +673,118 @@ test('gateway resource overrides retain equal requests and limits and default om
     assert.throws(() => renderManifests(org), /runtime.k8s.gatewayResources/);
   }
 });
+
+function endpointFixture(address = '192.0.2.10', port = 4100) {
+  const org = fixture();
+  delete org.runtime.k8s.deploy.modelEgressSelector;
+  org.runtime.k8s.deploy.modelEgressEndpoint = { address, port };
+  org.model.nextBaseUrl = org.model.baseUrl;
+  return org;
+}
+
+test('fixed model endpoint renders a selector-less Service, matching EndpointSlice and precise TCP egress', () => {
+  const org = endpointFixture();
+  const before = structuredClone(org);
+  const objects = renderManifests(org).objects;
+  assert.deepEqual(org, before);
+  assert.deepEqual(renderManifests(org).objects, objects);
+  const service = find(objects, 'Service', 'model-egress');
+  assert.equal(service.metadata.namespace, 'fixture-system');
+  assert.ok(!Object.hasOwn(service.spec, 'selector'));
+  assert.deepEqual(service.spec, {
+    type: 'ClusterIP', ports: [{ name: 'model', protocol: 'TCP', port: 4000, targetPort: 4100 }],
+  });
+  const slice = find(objects, 'EndpointSlice');
+  assert.equal(slice.apiVersion, 'discovery.k8s.io/v1');
+  assert.equal(slice.metadata.namespace, service.metadata.namespace);
+  assert.equal(slice.metadata.labels['kubernetes.io/service-name'], service.metadata.name);
+  assert.equal(slice.metadata.labels['endpointslice.kubernetes.io/managed-by'], 'workpartner-render');
+  assert.equal(slice.addressType, 'IPv4');
+  assert.deepEqual(slice.ports, [{ name: 'model', protocol: 'TCP', port: 4100 }]);
+  assert.deepEqual(slice.endpoints, [{ addresses: ['192.0.2.10'], conditions: { ready: true } }]);
+  const policy = find(objects, 'NetworkPolicy', 'workpartner-user-egress');
+  assert.equal(policy.metadata.namespace, 'fixture-users');
+  assert.deepEqual(policy.spec.egress[2], {
+    to: [{ ipBlock: { cidr: '192.0.2.10/32' } }], ports: [{ protocol: 'TCP', port: 4100 }],
+  });
+  const original = find(renderManifests(fixture()).objects, 'NetworkPolicy', 'workpartner-user-egress');
+  assert.deepEqual(policy.spec.egress.filter((_, i) => i !== 2), original.spec.egress.filter((_, i) => i !== 2));
+  assert.ok(!objects.some(object => object.metadata.name === 'workpartner-model-ingress'));
+  assert.deepEqual(renderManifests(org, { only: 'endpointslice' }).objects, [slice]);
+  assert.deepEqual(renderManifests(fixture(), { only: 'EndpointSlice' }).objects, []);
+});
+
+test('fixed model endpoint permits only its TCP port inside an otherwise excluded private range', () => {
+  const baseline = find(renderManifests(fixture()).objects, 'NetworkPolicy', 'workpartner-user-egress').spec.egress;
+  // Derive representative addresses from policy ranges rather than deployment addresses.
+  for (const cidr of baseline[3].to[0].ipBlock.except.filter(value => /^(10\.|172\.|192\.168\.|100\.)/.test(value))) {
+    const address = cidr.split('/')[0].replace(/0$/, '1');
+    const policy = find(renderManifests(endpointFixture(address)).objects, 'NetworkPolicy', 'workpartner-user-egress');
+    const expected = structuredClone(baseline);
+    expected[2] = { to: [{ ipBlock: { cidr: `${address}/32` } }], ports: [{ protocol: 'TCP', port: 4100 }] };
+    assert.deepEqual(policy.spec.egress, expected);
+    assert.ok(policy.spec.egress[3].to[0].ipBlock.except.includes(cidr));
+  }
+});
+
+test('model egress requires exactly one selector or endpoint, including with --only', () => {
+  const both = endpointFixture();
+  both.runtime.k8s.deploy.modelEgressSelector = modelLabels;
+  const neither = fixture();
+  delete neither.runtime.k8s.deploy.modelEgressSelector;
+  for (const [org, prefix] of [[both, 'Invalid'], [neither, 'Missing required']]) {
+    assert.throws(() => renderManifests(org, { only: 'Namespace' }), error => {
+      assert.match(error.message, new RegExp(`${prefix} configuration:`));
+      assert.match(error.message, /modelEgressSelector.*modelEgressEndpoint.*exactly one required/);
+      return true;
+    });
+  }
+});
+
+test('fixed model endpoint rejects invalid addresses, shapes and ports before rendering', () => {
+  for (const address of [undefined, null, 123, {}, '', 'example.com', '192.0.2.1:4100', 'http://192.0.2.1',
+    '192.0.2.1/32', '192.0.2.256', '192.000.2.1', ' 192.0.2.1', '::1', '::ffff:192.0.2.1',
+    '0.0.0.0', '127.0.0.1', '127.255.255.255', '169.254.0.1', '169.254.169.254', '169.254.255.255']) {
+    assert.throws(() => renderManifests(endpointFixture(address === undefined ? '' : address)), /Invalid configuration:.*modelEgressEndpoint.address/);
+  }
+  for (const port of [null, '4100', 0, -1, 65536, 1.5]) {
+    assert.throws(() => renderManifests(endpointFixture('192.0.2.10', port)), /Invalid configuration:.*modelEgressEndpoint.port/);
+  }
+  for (const endpoint of [null, [], '192.0.2.10:4100', {}, { address: '192.0.2.10' }, { port: 4100 }]) {
+    const org = endpointFixture();
+    org.runtime.k8s.deploy.modelEgressEndpoint = endpoint;
+    assert.throws(() => renderManifests(org), /Invalid configuration:.*modelEgressEndpoint/);
+  }
+  for (const port of [1, 65535]) assert.doesNotThrow(() => renderManifests(endpointFixture('192.0.2.10', port)));
+});
+
+test('fixed model endpoint retains baseUrl/nextBaseUrl hostname and port validation', () => {
+  for (const url of ['http://other-model:4000/v1', 'http://model-egress:4001/v1']) {
+    const org = endpointFixture();
+    org.model.nextBaseUrl = url;
+    assert.throws(() => renderManifests(org), /model.baseUrl and model.nextBaseUrl \(hostnames and ports must match\)/);
+  }
+});
+
+test('organization-only deployment resolves all hosts and CLI writes its EndpointSlice', async t => {
+  const directory = temporary(t);
+  const org = endpointFixture();
+  Object.assign(org, { previewHost: 'preview.example.com', legacyHosts: ['old.example.com'], projectHost: 'project.example.com' });
+  fs.writeFileSync(path.join(directory, 'organization.json'), JSON.stringify(org));
+  const result = cli(['--org', directory]);
+  assert.equal(result.status, 0, result.stderr);
+  const objects = documents(result.stdout);
+  const pod = find(objects, 'Deployment').spec.template.spec;
+  assert.deepEqual(pod.containers[0].env, [{ name: 'WORKPARTNER_ORG_DIR', value: '/organization' }]);
+  assert.ok(pod.containers[0].volumeMounts.some(mount => mount.mountPath === '/organization' && mount.readOnly));
+  const { resolveOrganization } = await import('../gateway/organization/resolve.mjs');
+  const server = resolveOrganization({ WORKPARTNER_ORG_DIR: directory }).server;
+  assert.equal(server.previewHost, org.previewHost);
+  assert.deepEqual(server.legacyHosts, org.legacyHosts);
+  assert.equal(server.projectHost, org.projectHost);
+  const output = path.join(directory, 'output');
+  const filtered = cli(['--org', directory, '--only', 'EndpointSlice', '--output', output]);
+  assert.equal(filtered.status, 0, filtered.stderr);
+  assert.deepEqual(fs.readdirSync(output), ['endpointslice_fixture-system_model-egress.yaml']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, fs.readdirSync(output)[0]), 'utf8')), find(objects, 'EndpointSlice'));
+});

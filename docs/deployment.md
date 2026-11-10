@@ -10,6 +10,21 @@ In Docker mode, the gateway needs Docker access to create each person's containe
 
 User containers persist `/data`, including the work directory. Their ports remain private. Allow access only from the gateway and to the configured model endpoint. Back up persistent user data and gateway state before changing images. Rebuilding the image does not replace the organization's configuration.
 
+## Gateway hostname fields
+
+These fields belong at the top level of `organization.json`. Nonempty environment variables override JSON; omitted or empty variables fall back to JSON. Hostnames use the existing validation: optional port, no scheme, path or credentials.
+
+| JSON field | Environment override | Default and purpose |
+| --- | --- | --- |
+| `publicHost` | `PUBLIC_HOST` | Required public entry and login callback host, for example `workspace.example.com`. |
+| `previewHost` | `PREVIEW_HOST` | Empty string; preview host, for example `preview.example.com`. Also requires `features.preview`. |
+| `legacyHosts` | `OLD_HOSTS` | `[]`; array of hostname strings, for example `["old.example.com"]`. The environment override is comma-separated and trims whitespace. Each hostname is validated. |
+| `projectHost` | `MEEGLE_HOST` | Empty string; project service host, for example `project.example.com`. |
+
+With these fields in the mounted organization JSON, the rendered Kubernetes Deployment needs only `WORKPARTNER_ORG_DIR`; no manual hostname environment additions are required.
+
+For Kubernetes model egress, set exactly one of `runtime.k8s.deploy.modelEgressSelector` (model Pods) or `runtime.k8s.deploy.modelEgressEndpoint` (fixed IPv4/port, for example `{"address":"192.0.2.10","port":4100}`). The latter renders a selector-less Service, an EndpointSlice and a precise TCP egress allowance; see the [configuration table and example](kubernetes.md#部署渲染配置). Model URLs continue to use the Service hostname and port.
+
 ## Build inputs
 
 `image/third-party.lock.json` contains an `artifacts` array. Every entry supplies `version`, a public `https` URL, the SHA-256 of the downloaded bytes, `destination`, and `format` (`file`, `tar`, or `tar-member`). Required destinations are `aionui-web`, `cc-connect`, `officecli`, `codex`, `codex-code-mode-host`, `claude`, `lark-skills.tar.gz`, and `meegle-skills.tar.gz`. The downloader fetches every input, including `cc-connect`, from its public URL and verifies its locked digest. Downloads are checked before extraction and the completed package directory appears only after all inputs pass. `image/build.sh` verifies the bridge again in `PKG` before creating a context or invoking Docker; missing or mismatched bytes stop the build.
@@ -67,6 +82,6 @@ Official skills use the same upstream commits as the private bundle and verified
 
 ## Gateway feature selection
 
-`features.feishuAuthorization` controls personal authorization and CLI identity preparation. `FEISHU_USER_AUTH_ENABLED=0` stops new authorizations and token issuance while retaining revocation and status for an already configured integration. The internal token listener uses `runtime.internalPort`; never publish it on the host. `runtime.stateDirectory` selects its persistent authorization state. `features.feishuOnboarding`, `features.marketSkills`, `features.autoTitle` and `features.preview` select the remaining gateway capabilities. Preview also needs a separate `PREVIEW_HOST` and the user-image relay on its reserved internal port. The gateway writes the personal relay key before starting a workspace. The image starts the relay only when that key exists, resolves the gateway address from `runtime.gatewayOrigin`, and exits for the container runtime to restart if the relay fails.
+`features.feishuAuthorization` controls personal authorization and CLI identity preparation. `FEISHU_USER_AUTH_ENABLED=0` stops new authorizations and token issuance while retaining revocation and status for an already configured integration. The internal token listener uses `runtime.internalPort`; never publish it on the host. `runtime.stateDirectory` selects its persistent authorization state. `features.feishuOnboarding`, `features.marketSkills`, `features.autoTitle` and `features.preview` select the remaining gateway capabilities. Preview also needs a separate `previewHost` (or `PREVIEW_HOST`) and the user-image relay on its reserved internal port. The gateway writes the personal relay key before starting a workspace. The image starts the relay only when that key exists, resolves the gateway address from `runtime.gatewayOrigin`, and exits for the container runtime to restart if the relay fails.
 
-`extensions.gatewayModule` optionally names a trusted local module relative to the organization directory. The public default leaves it empty and has no legacy backend or desktop implementation. When extension loading is enabled, a configured but missing or broken extension is a startup error. Kubernetes skips extensions by default (`runtime.k8s.loadGatewayExtension` defaults to false); legacy users continue through the Docker peer. Keep extension code outside the public snapshot.
+`extensions.gatewayModule` optionally names a trusted local module relative to the organization directory. The public default leaves it empty and has no legacy backend or desktop implementation. When extension loading is enabled, a configured but missing or broken extension is a startup error. Kubernetes skips extensions by default (`runtime.k8s.loadGatewayExtension` defaults to false); legacy users continue through the Docker peer. Set this flag to true when organization-provided routes are needed; the extension must not depend on Docker transport. Keep extension code outside the public snapshot.

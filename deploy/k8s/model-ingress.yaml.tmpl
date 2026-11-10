@@ -1,0 +1,22 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {"name": "workpartner-model-ingress", "namespace": {{systemNamespace}}, "labels": {{partOf}}},
+  "spec": {
+    "podSelector": {"matchLabels": {{modelEgressSelector}}},
+    "policyTypes": ["Ingress"],
+    "ingress": [{
+      "from": [
+        {
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{namespace}}}},
+          "podSelector": {"matchLabels": {{userLabels}}}
+        },
+        {
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{systemNamespace}}}},
+          "podSelector": {"matchLabels": {{gatewayLabels}}}
+        }
+      ],
+      "ports": [{"protocol": "TCP", "port": {{modelPort}}}]
+    }]
+  }
+}
