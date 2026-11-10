@@ -1,8 +1,13 @@
 import os from 'node:os';
-import { createDockerRuntime } from './docker.mjs';
+import { createRequire } from 'node:module';
+import { createK8sRuntime } from './k8s.mjs';
+
+// Keep the runtime factory synchronous while loading Docker only when selected (Node 24 require(ESM)).
+const require = createRequire(import.meta.url);
 
 /** Select the configured runtime at startup; omitted kind preserves Docker deployments.
  * Runtime methods are asynchronous; inspect returns normalized state and address returns {host, port} or null.
+ * Kubernetes inspect also includes StatefulSet replicas (null when absent) and annotations ({} when absent).
  * create(user, {modelConfig}) uses the configured image and limits; exec/execNamed return {exitCode, stdout, stderr, logs}.
  * logs preserves stdout/stderr frame order; createTimeout and timeout control exec creation and start separately.
  * Incomplete output frames are ignored unless strictOutput is true or maxOutputBytes is supplied.
@@ -14,7 +19,15 @@ import { createDockerRuntime } from './docker.mjs';
 export function createRuntime(organization, overrides = {}) {
   const { runtime: r, model = {} } = organization;
   const kind = r.kind === undefined ? 'docker' : r.kind;
+  if (kind === 'k8s') return createK8sRuntime({
+    ...r.k8s, image: r.nextImage, containerPrefix: r.nextContainerPrefix, userLabel: r.nextUserLabel,
+    modelKeyFile: r.nextModelKeyFile, port: r.nextPort, uid: r.uid,
+    secureDir: r.secureDirectory, keyPrefix: model.keyPrefix,
+    modelBaseUrl: model.baseUrl ? new URL(model.baseUrl).href : undefined, modelBaseEnvironment: model.baseEnvironment,
+    memory: r.nextMemory, nanoCpus: r.nanoCpus, ...overrides,
+  });
   if (kind !== 'docker') throw new Error(`Unsupported runtime kind: ${kind}`);
+  const { createDockerRuntime } = require('./docker.mjs');
   return createDockerRuntime({
     self: os.hostname(), modelContainer: r.modelContainer, modelBaseUrl: model.baseUrl ? new URL(model.baseUrl).href : undefined, modelBaseEnvironment: model.baseEnvironment,
     image: r.nextImage, containerPrefix: r.nextContainerPrefix, userLabel: r.nextUserLabel,
@@ -29,6 +42,14 @@ export function createRuntime(organization, overrides = {}) {
 
 /** Legacy containers only support operations independent of next-runtime image, mounts and networks. */
 export function createLegacyRuntime(organization, overrides = {}) {
+  if (organization.runtime.kind === 'k8s') {
+    const unavailable = async () => {
+      const error = new Error('LegacyRuntimeUnavailable');
+      error.name = error.code = 'LegacyRuntimeUnavailable';
+      throw error;
+    };
+    return Object.fromEntries(['putFiles', 'readFile', 'removeFiles', 'exec', 'stop', 'remove', 'address'].map(name => [name, unavailable]));
+  }
   const runtime = createRuntime(organization, {
     ...overrides, containerPrefix: organization.runtime.containerPrefix, dataDir: organization.runtime.usersDirectory,
   });
