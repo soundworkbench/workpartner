@@ -6,6 +6,9 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { runAdopt, parseArgs, main } from './k8s/adopt-user.mjs';
 import { matches, readOwners, writeOwner } from './k8s/adopt-state.mjs';
+import { inventoryPaths, inventoryDocument, saveInventory, collectInventory, verificationProbe, verificationRows, inventoryProbe } from './k8s/adopt-inventory.mjs';
+import vm from 'node:vm';
+import { createRequire } from 'node:module';
 import { createRuntime } from '../gateway/runtime/index.mjs';
 
 const core = '/api/v1/namespaces/workspaces';
@@ -30,6 +33,22 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
     migration: { ownersFile }, k8s: { namespace: 'workspaces', systemNamespace: 'system', storageClass: 'local', dataVolumeSize: '20Gi' },
   } };
   const users = [{ slug: 'user1', backend: 'aionui' }, { slug: 'user2', backend: 'legacy' }];
+  const files = inventoryPaths(ownersFile, 'user1');
+  const inventoryItems = [
+    { kind: 'directory', path: '/srv/example-service', name: 'example-service', sizeKiB: 24, uid: 1001, gid: 1001, owner: 'user1' },
+    { kind: 'cron', source: 'crontab:user1', user: 'user1', fingerprint: 'first', entry: '*/5 * * * * /srv/example-service/run [arguments redacted]' },
+    { kind: 'cron', source: '/etc/cron.d/example', user: 'user1', fingerprint: 'second', entry: '0 * * * * /srv/example-service/refresh [arguments redacted]' },
+    { kind: 'dotfile', user: 'user1', path: '/home/user1/.gitconfig', exists: true, size: 64 },
+    { kind: 'port', protocol: 'tcp', port: 8080 },
+  ];
+  await saveInventory(files, inventoryDocument('user1', inventoryItems));
+  async function decide(decision = 'dropped') {
+    const table = JSON.parse(await fs.readFile(files.decisions, 'utf8'));
+    for (const row of table.items) Object.assign(row, { decision, method: 'Restored through init hook', reason: 'Retired example workload' });
+    await fs.writeFile(files.decisions, JSON.stringify(table));
+    return table;
+  }
+  await decide();
   const events = [], logs = [], snapshots = [];
   const objects = new Map();
   const state = { exists: migrated, running: migrated, replicas: migrated ? 1 : null, annotations: {}, address: { host: '192.0.2.10', port: 25808 } };
@@ -49,7 +68,7 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
     await fs.mkdir(old, { recursive: true });
     container.Mounts.push({ Destination: '/data/old-work', Source: old, Type: 'bind', RW: false });
   }
-  const f = { root, directory, ownersFile, organization, users, events, logs, snapshots, objects, state, container, volume, pod,
+  const f = { root, directory, ownersFile, files, inventoryItems, decide, organization, users, events, logs, snapshots, objects, state, container, volume, pod,
     get pods() { return pods; }, set pods(value) { pods = value; },
     fail: null, after: null, image: 'sha256:fixture', bridgeConfigured: true, bridgeRunning: true, gatewayHealthy: true, previewValid: true,
     diff: 'A /usr/local/bin/custom-cli\nC /usr/local/bin/readme\nD /usr/local/bin/removed\nC /etc/settings\n',
@@ -114,8 +133,9 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
       await record('gateway status'); assert.equal(gateway, 'gateway-pod'); assert.deepEqual(argv.slice(-2), ['192.0.2.10', '25808']);
       assert.match(argv[2], /\/api\/auth\/status/); return { exitCode: f.gatewayHealthy ? 0 : 1, stderr: secret };
     },
-    async exec(slug, argv) {
+    async exec(slug, argv, options) {
       assert.equal(slug, 'user1');
+      if (argv[0] === 'node') { f.verification = { argv, options }; await record('verify carried'); return { exitCode: 0, stdout: JSON.stringify(f.carriedAlarms || []) }; }
       if (argv[2] === 'test -f /data/.cc-connect/config.toml') { await record('bridge config'); return { exitCode: f.bridgeConfigured ? 0 : 1 }; }
       await record('preview link'); assert.match(argv[2], /test -L/); assert.match(argv[2], /test -s/);
       return { exitCode: f.previewValid ? 0 : 1, stderr: secret };
@@ -131,6 +151,7 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
     if (args[0] === 'inspect') { await record('docker inspect'); return { exitCode: 0, stdout: JSON.stringify([container]) }; }
     if (args[0] === 'diff') { await record('docker diff'); return { exitCode: 0, stdout: f.diff }; }
     if (args[0] === 'exec') {
+      if (args[8] === 'node') { assert.deepEqual(args.slice(1, 8), ['--user', '0:0', '--env', 'NODE_OPTIONS=', '--env', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin', name]); await record('inventory probe'); return { exitCode: 0, stdout: JSON.stringify({ items: f.inventoryItems, issues: f.inventoryIssues || [] }) }; }
       assert.equal(args[2], '1001:1001');
       const copy = args.includes('-ec');
       await record(copy ? 'inventory copy' : 'inventory executable');
@@ -197,7 +218,7 @@ test('switch follows PVC, image, Docker disable/stop, atomic ownership, isolatio
   assert.notEqual((await fs.stat(f.ownersFile)).ino, inode);
   assert.equal((await fs.stat(f.ownersFile)).mode & 0o777, 0o640);
   assert.equal((await readOwners(f.ownersFile)).users.user2, 'docker');
-  assert.deepEqual((await fs.readdir(f.root)).sort(), ['owners.json', 'secure', 'workspaces']);
+  assert.deepEqual((await fs.readdir(f.root)).sort(), ['owners.json', 'owners.json.adopt', 'secure', 'workspaces']);
   f.assertSafe();
 });
 
@@ -676,7 +697,7 @@ for (const command of ['switch', 'pv', 'inventory', 'rollback', 'verify', 'statu
     assert.equal(await fs.readFile(f.ownersFile, 'utf8'), before);
     assert.equal((await fs.stat(f.ownersFile)).ino, inode);
     assert.equal(f.container.State.Running, true);
-    assert.deepEqual((await fs.readdir(f.root)).sort(), ['owners.json', 'secure', 'workspaces']);
+    assert.deepEqual((await fs.readdir(f.root)).sort(), ['owners.json', 'owners.json.adopt', 'secure', 'workspaces']);
   });
 }
 
@@ -866,7 +887,7 @@ for (const broken of [false, true]) {
     await fs.symlink(target, path.join(bin, 'custom-cli'));
     const command = f.dependencies.command;
     f.dependencies.command = async (program, args) => {
-      if (args[0] !== 'exec') return command(program, args);
+      if (args[0] !== 'exec' || args[8] === 'node') return command(program, args);
       assert.equal(args[5], '-c', 'symlink must not reach install');
       try {
         return { exitCode: 0, stdout: execFileSync('sh', [...args.slice(5, -1), path.join(bin, 'custom-cli')], { encoding: 'utf8' }) };
@@ -939,3 +960,441 @@ for (const conflict of ['storageClassName', 'local path', 'claimRef', 'node affi
     assert.match(f.logs.at(-1), /conflicts.*NEXT:/);
   });
 }
+
+test('inventory persists services, multiple cron entries and credential metadata with blank decisions', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.run('inventory')).exitCode, 0);
+  const inventory = JSON.parse(await fs.readFile(f.files.inventory, 'utf8'));
+  assert.ok(inventory.items.some(item => item.path === '/srv/example-service' && item.owner === 'user1'));
+  assert.equal(inventory.items.filter(item => item.kind === 'cron').length, 2);
+  assert.ok(inventory.items.some(item => item.path?.endsWith('/.gitconfig') && item.exists && item.size === 64));
+  const table = JSON.parse(await fs.readFile(f.files.decisions, 'utf8'));
+  assert.equal(table.inventoryId, inventory.inventoryId);
+  assert.equal(table.items.length, inventory.items.length);
+  assert.ok(table.items.every(item => item.decision === ''));
+  for (const file of [f.files.inventory, f.files.text, f.files.decisions]) {
+    assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    assert.ok(!(await fs.readFile(file, 'utf8')).includes(secret));
+  }
+  assert.match(await fs.readFile(f.files.text, 'utf8'), /\[directory\] \/srv\/example-service/);
+  await f.decide();
+  assert.equal((await f.run('inventory')).exitCode, 0);
+  const next = JSON.parse(await fs.readFile(f.files.decisions, 'utf8'));
+  assert.notEqual(next.inventoryId, table.inventoryId);
+  assert.ok(next.items.every(item => item.decision === ''));
+});
+
+for (const invalid of ['missing', 'stale-time', 'stale-id', 'blank', 'no-method', 'no-reason', 'missing-row', 'duplicate-row', 'incomplete-scan', 'malformed']) {
+  test(`switch rejects ${invalid} decisions before any write, including operation lock`, async t => {
+    const f = await fixture(t);
+    const table = JSON.parse(await fs.readFile(f.files.decisions, 'utf8'));
+    if (invalid === 'stale-id') table.inventoryId = 'previous';
+    if (invalid === 'blank') table.items[0].decision = '';
+    if (invalid === 'no-method') Object.assign(table.items[0], { decision: 'carried', method: '  ' });
+    if (invalid === 'no-reason') table.items[0].reason = '';
+    if (invalid === 'missing-row') table.items.pop();
+    if (invalid === 'duplicate-row') table.items[1] = table.items[0];
+    await fs.writeFile(f.files.decisions, invalid === 'malformed' ? '{' : JSON.stringify(table));
+    if (invalid === 'missing') await fs.unlink(f.files.decisions);
+    if (invalid === 'stale-time') await fs.utimes(f.files.decisions, 1, 1);
+    if (invalid === 'incomplete-scan') {
+      const inventory = JSON.parse(await fs.readFile(f.files.inventory, 'utf8'));
+      inventory.issues = ['user-crontab'];
+      await fs.writeFile(f.files.inventory, JSON.stringify(inventory));
+      await fs.writeFile(f.files.decisions, JSON.stringify(table));
+    }
+    const before = await fs.readFile(f.ownersFile, 'utf8');
+    const open = fs.open;
+    t.mock.method(fs, 'open', async (file, flags, ...args) => {
+      assert.equal(flags, 'r', 'must not create even the operation lock');
+      return open(file, flags, ...args);
+    });
+    for (const method of ['writeFile', 'mkdir', 'rm', 'rename', 'unlink']) {
+      t.mock.method(fs, method, () => assert.fail(`Unexpected filesystem write: ${method}`));
+    }
+    for (const apply of [false, true]) {
+      const result = await f.run('switch', apply);
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.failedStage, 'switch preflight: inventory decisions');
+      assert.match(f.logs.at(-1), /Complete the latest inventory decision table/);
+    }
+    assert.equal(f.container.State.Running, true);
+    assert.equal(f.container.HostConfig.RestartPolicy.Name, 'unless-stopped');
+    assert.deepEqual(f.events, []);
+    assert.deepEqual(f.snapshots, []);
+    assert.equal(await fs.readFile(f.ownersFile, 'utf8'), before);
+    t.mock.restoreAll();
+  });
+}
+
+test('switch rechecks decisions under lock before lifecycle mutations', async t => {
+  const f = await fixture(t);
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (filename, flags, ...args) => {
+    const handle = await open(filename, flags, ...args);
+    if (filename.endsWith('.adopt.lock')) await fs.unlink(f.files.decisions);
+    return handle;
+  });
+  const result = await f.run('switch');
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.failedStage, 'switch preflight: inventory decisions');
+  assert.equal(f.container.State.Running, true);
+  assert.deepEqual(f.snapshots, []);
+});
+
+test('incomplete inventory reports issues and invalidates prior approval', async t => {
+  const f = await fixture(t);
+  f.inventoryIssues = ['user-crontab'];
+  assert.equal((await f.run('inventory')).exitCode, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.files.inventory, 'utf8')).issues, f.inventoryIssues);
+  await f.decide();
+  assert.equal((await f.run('switch')).exitCode, 1);
+  assert.equal(f.container.State.Running, true);
+});
+
+test('verify reports all carried items missing in the Pod and exits nonzero', async t => {
+  const f = await fixture(t, { migrated: true });
+  const table = await f.decide('carried');
+  f.carriedAlarms = table.items.map(item => ({ id: item.id, kind: item.kind, alarm: 'carried-item-missing-or-mismatched' }));
+  const result = await f.run('verify');
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.alarms, f.carriedAlarms);
+  assert.equal(f.logs.filter(line => line.startsWith('ALARM ')).length, table.items.length);
+  assert.equal(result.verified, undefined);
+  assert.deepEqual(f.snapshots, []);
+});
+
+for (const command of ['verify', 'switch']) for (const apply of [false, true]) for (const keepInventory of [false, true]) {
+  test(`migrated ${command} without inventory warns and completes remaining checks (apply: ${apply}, keep report: ${keepInventory})`, async t => {
+    const f = await fixture(t, { migrated: true });
+    if (keepInventory) await fs.unlink(f.files.decisions);
+    else await fs.rm(f.files.directory, { recursive: true });
+    const result = await f.run(command, apply);
+    assert.equal(result.exitCode, 0, f.logs.join('\n'));
+    assert.equal(result.verified, apply);
+    assert.equal(result.inventoryVerified, false);
+    assert.equal(result.failedStage, undefined);
+    assert.equal(result.alarms.length, 1);
+    assert.equal(result.alarms[0].alarm, 'missing-pre-migration-inventory');
+    assert.match(result.alarms[0].message, /no pre-migration inventory.*Manually check cron, \/srv and \/opt services, processes, listening ports, tmux\/screen sessions, credential dotfiles, bot configs and container-layer patches/);
+    assert.equal(f.logs.filter(line => line.startsWith('ALARM ')).length, 1);
+    assert.ok(f.events.includes('inspect user1'));
+    assert.ok(f.events.includes('docker inspect'));
+    for (const event of ['gateway status', 'bridge config', 'processes', 'preview link']) assert.equal(f.events.includes(event), apply);
+    assert.ok(!f.events.includes('verify carried'));
+    assert.deepEqual(f.snapshots, []);
+    assert.equal(await f.owner(), 'k8s');
+  });
+}
+
+for (const command of ['verify', 'switch']) {
+  for (const invalid of ['malformed', 'stale-time', 'stale-id', 'blank', 'missing-inventory', 'dangling-link']) {
+    test(`migrated ${command} still rejects existing ${invalid} table`, async t => {
+      const f = await fixture(t, { migrated: true });
+      const table = await f.decide();
+      if (invalid === 'stale-id') table.inventoryId = 'previous';
+      if (invalid === 'blank') table.items[0].decision = '';
+      await fs.writeFile(f.files.decisions, invalid === 'malformed' ? '{' : JSON.stringify(table));
+      if (invalid === 'stale-time') await fs.utimes(f.files.decisions, 1, 1);
+      if (invalid === 'missing-inventory') await fs.unlink(f.files.inventory);
+      if (invalid === 'dangling-link') {
+        await fs.unlink(f.files.decisions);
+        await fs.symlink(path.join(f.root, 'absent'), f.files.decisions);
+      }
+      for (const apply of [false, true]) {
+        const result = await f.run(command, apply);
+        assert.equal(result.exitCode, 1);
+        assert.equal(result.failedStage, command === 'verify' ? 'verify carried inventory items' : 'switch preflight: inventory decisions');
+        assert.ok(!result.alarms?.some(alarm => alarm.alarm === 'missing-pre-migration-inventory'));
+      }
+      assert.deepEqual(f.snapshots, []);
+    });
+  }
+}
+
+test('missing table does not hide passive verification failures', async t => {
+  const f = await fixture(t, { migrated: true });
+  await fs.unlink(f.files.decisions);
+  f.container.State.Running = true;
+  for (const apply of [false, true]) {
+    const result = await f.run('verify', apply);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failedStage, 'verify Docker stopped');
+  }
+});
+
+for (const state of ['stopped-pod', 'duplicate']) {
+  test(`k8s ownership with ${state} still requires a table before switch writes`, async t => {
+    const f = await fixture(t, { migrated: true });
+    await fs.unlink(f.files.decisions);
+    if (state === 'stopped-pod') { f.state.running = false; f.state.replicas = 0; f.pods = []; }
+    else f.container.State.Running = true;
+    const open = fs.open;
+    t.mock.method(fs, 'open', (filename, ...args) => {
+      assert.ok(!filename.endsWith('.adopt.lock'));
+      return open(filename, ...args);
+    });
+    const result = await f.run('switch');
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failedStage, 'switch preflight: inventory decisions');
+    assert.deepEqual(f.snapshots, []);
+  });
+}
+
+for (const invalid of ['unacknowledged', 'no-reason', 'missing', 'duplicate', 'unknown', 'valid']) {
+  test(`inventory issue acknowledgment ${invalid} ${invalid === 'valid' ? 'allows' : 'blocks'} switch`, async t => {
+    const f = await fixture(t);
+    const issues = ['user-crontab', 'directory-size'];
+    await saveInventory(f.files, inventoryDocument('user1', f.inventoryItems, issues));
+    const table = await f.decide();
+    assert.deepEqual(table.issues, issues.map(issue => ({ issue, acknowledged: false, reason: '' })));
+    table.issues.forEach(row => Object.assign(row, { acknowledged: true, reason: 'Manually checked the affected service' }));
+    if (invalid === 'unacknowledged') table.issues[1].acknowledged = false;
+    if (invalid === 'no-reason') table.issues[1].reason = '  ';
+    if (invalid === 'missing') table.issues.pop();
+    if (invalid === 'duplicate') table.issues[1] = table.issues[0];
+    if (invalid === 'unknown') table.issues[1].issue = 'other';
+    await fs.writeFile(f.files.decisions, JSON.stringify(table));
+    const result = await f.run('switch');
+    assert.equal(result.exitCode, invalid === 'valid' ? 0 : 1, f.logs.join('\n'));
+    if (invalid === 'valid') {
+      assert.ok(f.events.includes('runtime start'));
+      assert.equal(result.inventoryVerified, true);
+      await saveInventory(f.files, inventoryDocument('user1', f.inventoryItems, issues));
+      const reset = JSON.parse(await fs.readFile(f.files.decisions, 'utf8'));
+      assert.deepEqual(reset.issues, issues.map(issue => ({ issue, acknowledged: false, reason: '' })));
+      assert.ok(reset.items.every(item => item.decision === ''));
+    } else {
+      assert.equal(result.failedStage, 'switch preflight: inventory decisions');
+      assert.deepEqual(f.events, []);
+      assert.deepEqual(f.snapshots, []);
+    }
+  });
+}
+
+test('verification uses a fixed script and only required fields on stdin', async t => {
+  const f = await fixture(t, { migrated: true });
+  const table = await f.decide('carried');
+  for (const row of table.items) Object.assign(row, { method: secret, reason: secret, note: secret });
+  await fs.writeFile(f.files.decisions, JSON.stringify(table));
+  assert.equal((await f.run('verify')).exitCode, 0);
+  assert.deepEqual(f.verification.argv, verificationProbe);
+  assert.equal(f.verification.argv.length, 3);
+  assert.equal(f.verification.options.strictOutput, true);
+  assert.ok(!JSON.stringify(f.verification).includes(secret));
+  const rows = JSON.parse(f.verification.options.stdin);
+  assert.deepEqual(rows.map(row => Object.keys(row).sort()), [
+    ['id', 'kind', 'path'], ['fingerprint', 'id', 'kind', 'source', 'user'],
+    ['fingerprint', 'id', 'kind', 'source', 'user'], ['exists', 'id', 'kind', 'path'], ['id', 'kind', 'port', 'protocol'],
+  ]);
+});
+
+test('inventory publication tightens existing modes and replaces symlinks without touching their targets', async t => {
+  const f = await fixture(t);
+  await fs.chmod(f.files.directory, 0o755);
+  const target = path.join(f.root, 'unrelated');
+  await fs.writeFile(target, secret, { mode: 0o644 });
+  for (const file of [f.files.inventory, f.files.text, f.files.decisions]) {
+    await fs.unlink(file);
+    await fs.symlink(target, file);
+  }
+  await saveInventory(f.files, inventoryDocument('user1', f.inventoryItems));
+  assert.equal((await fs.stat(f.files.directory)).mode & 0o777, 0o700);
+  assert.equal(await fs.readFile(target, 'utf8'), secret);
+  assert.equal((await fs.stat(target)).mode & 0o777, 0o644);
+  for (const file of [f.files.inventory, f.files.text, f.files.decisions]) {
+    assert.ok((await fs.lstat(file)).isFile());
+    assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    await fs.chmod(file, 0o666);
+  }
+  await saveInventory(f.files, inventoryDocument('user1', f.inventoryItems));
+  for (const file of [f.files.inventory, f.files.text, f.files.decisions]) assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  assert.equal((await fs.readdir(f.files.directory)).length, 3);
+});
+
+test('inventory rejects a symlinked report directory before invalidating decisions or probing Docker', async t => {
+  const f = await fixture(t);
+  const directory = path.join(f.root, 'unrelated');
+  await fs.rename(f.files.directory, directory);
+  const before = await fs.readFile(path.join(directory, 'user1.decisions.json'), 'utf8');
+  await fs.symlink(directory, f.files.directory);
+  assert.equal((await f.run('inventory')).exitCode, 1);
+  assert.equal(await fs.readFile(path.join(directory, 'user1.decisions.json'), 'utf8'), before);
+  assert.ok(!f.events.includes('inventory probe'));
+});
+
+test('interrupted report publication keeps the previous file intact and removes temporary files', async t => {
+  const f = await fixture(t);
+  const before = await fs.readFile(f.files.inventory, 'utf8');
+  t.mock.method(fs, 'rename', async () => { throw new Error('simulated publication failure'); });
+  await assert.rejects(saveInventory(f.files, inventoryDocument('user1', f.inventoryItems)));
+  assert.equal(await fs.readFile(f.files.inventory, 'utf8'), before);
+  assert.equal((await fs.readdir(f.files.directory)).length, 3);
+});
+
+test('verification probe checks mapped directories and dotfiles using metadata only (isolated Node context)', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'adopt-verify-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'service'));
+  await fs.writeFile(path.join(root, '.gitconfig'), secret);
+  const rows = [
+    { id: 'directory', source: { kind: 'directory', path: '/srv/example-service' }, target: { path: path.join(root, 'service') } },
+    { id: 'dotfile', source: { kind: 'dotfile', path: path.join(root, '.gitconfig'), exists: true }, target: {} },
+    { id: 'missing', source: { kind: 'dotfile', path: path.join(root, '.netrc'), exists: true }, target: {} },
+    { id: 'credential-target', source: { kind: 'cron', source: '/etc/cron.d/example', fingerprint: 'unused' }, target: { path: path.join(root, '.gitconfig') } },
+  ];
+  const argv = verificationProbe;
+  const stdin = JSON.stringify(verificationRows(rows));
+  let output = '';
+  const require = createRequire(import.meta.url);
+  vm.runInNewContext(argv[2], {
+    require: name => name === 'node:fs' ? { ...require(name), readFileSync(p) { if (p === 0) return stdin; assert.fail('Credential contents must never be read'); } } : require(name),
+    process: { stdout: { write: text => { output += text; } } },
+  });
+  assert.deepEqual(JSON.parse(output).map(item => item.id), ['missing', 'credential-target']);
+  assert.ok(!output.includes(secret));
+});
+
+for (const crontabTool of [true, false]) test(`container probe enumerates cron, services, sessions and bots without opening credentials/configs (crontab tool: ${crontabTool})`, async () => {
+  const { createHash } = await import('node:crypto');
+  const files = new Map([
+    ['/etc/passwd', 'root:x:0:0::/root:/bin/sh\nuser1:x:1001:1001::/home/user1:/bin/sh\n'],
+    ['/etc/crontab', '0 0 * * * root /srv/example-service/daily --token hidden-cron-secret\n'],
+    ['/etc/cron.d/example', '*/5 * * * * user1 /srv/example-service/run\n0 * * * * user1 /srv/example-service/refresh\n'],
+    ['/var/spool/cron/crontabs/user1', '@hourly /srv/example-service/run\n'],
+    ['/var/spool/cron/user1', '@hourly /srv/example-service/run\n'],
+    ['/proc/42/cmdline', '/srv/example-service/run\0--token\0hidden-process-secret\0--password=hidden-password\0'],
+    ['/proc/net/tcp', 'header\n0: 00000000:1F90 00000000:0000 0A\n'],
+    ['/home/user1/.gitconfig', secret], ['/home/user1/.git-credentials', secret], ['/home/user1/.netrc', secret],
+    ['/data/.cc-connect/config.toml', secret], ['/srv/example-service/bot-config.json', secret],
+  ]);
+  const directories = new Set(['/etc', '/etc/cron.d', '/var/spool/cron', '/var/spool/cron/crontabs', '/proc', '/proc/net', '/srv', '/srv/example-service', '/opt', '/opt/example', '/root', '/home/user1', '/home/user1/.ssh', '/home/user1/.config', '/home/user1/.config/gh', '/data', '/data/.cc-connect']);
+  const absent = () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); };
+  const reads = [];
+  const metadata = p => {
+    if (!files.has(p) && !directories.has(p) && ![...(crontabTool ? ['/usr/bin/crontab'] : []), '/usr/bin/tmux', '/usr/bin/screen'].includes(p)) return absent();
+    return { size: files.get(p)?.length || 0, uid: 1001, gid: 1001, isFile: () => !directories.has(p), isDirectory: () => directories.has(p), isSymbolicLink: () => false };
+  };
+  const fakeFs = {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 1 }, openSync: p => p, closeSync() {}, lstatSync: metadata,
+    readFileSync(p) {
+      reads.push(p);
+      assert.ok(!/\.gitconfig|\.git-credentials|\.netrc|\.ssh|config\.toml|bot-config|\/gh/.test(p), `credential/config opened: ${p}`);
+      return files.get(p) ?? absent();
+    },
+    readdirSync(p) {
+      if (!directories.has(p)) return absent();
+      return [...new Set([...directories, ...files.keys()].filter(child => child !== p && path.posix.dirname(child) === p).map(child => path.posix.basename(child)))];
+    },
+  };
+  const commands = [];
+  const child = { execFileSync(exe, args, options) {
+    commands.push([exe, args]);
+    if (exe === 'du') { assert.equal(options.timeout, 60000); return '24\tservice\n'; }
+    if (exe === 'crontab') return `@daily /srv/example-service/run --token hidden-cron-secret\n`;
+    const tool = exe === 'runuser' ? args[3] : exe;
+    if (tool === 'tmux') return 'example-session\n';
+    if (tool === 'screen') return '  10.example-screen (Detached)\n';
+    assert.fail('Unexpected probe command');
+  } };
+  const value = vm.runInNewContext(`(${collectInventory.toString()})()`, {
+    require: name => ({ 'node:fs': fakeFs, 'node:path': path, 'node:child_process': child, 'node:crypto': { createHash } })[name],
+    process: { env: { PATH: '/usr/bin' }, getuid: () => 0, pid: 99 },
+  });
+  const result = JSON.parse(JSON.stringify(value));
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.items.filter(item => item.kind === 'cron').length, crontabTool ? 5 : 4);
+  assert.deepEqual(reads.filter(p => p.startsWith('/var/spool/cron')), crontabTool ? [] : ['/var/spool/cron/crontabs/user1']);
+  assert.ok(result.items.some(item => item.kind === 'directory' && item.path === '/srv/example-service' && item.sizeKiB === 24));
+  assert.ok(result.items.some(item => item.kind === 'dotfile' && item.path === '/home/user1/.gitconfig' && item.exists));
+  assert.ok(result.items.some(item => item.kind === 'port' && item.port === 8080));
+  assert.equal(result.items.filter(item => item.kind === 'session').length, 4);
+  assert.equal(result.items.filter(item => item.kind === 'bot-config').length, 2);
+  assert.equal(commands.some(([exe, args]) => exe === 'crontab' && args[1] === 'root'), crontabTool);
+  assert.equal(commands.some(([exe, args]) => exe === 'crontab' && args[1] === 'user1'), crontabTool);
+  assert.ok(!JSON.stringify(result).includes(secret));
+  assert.ok(!JSON.stringify(result).includes('hidden-'));
+  assert.ok(reads.includes('/etc/cron.d/example'));
+  assert.equal(inventoryProbe[0], 'node');
+});
+
+test('container config walk is bounded and excludes old-work, virtual filesystems and system homes', () => {
+  const require = createRequire(import.meta.url);
+  const directories = new Set(['/data', '/data/a', '/data/a/b', '/data/a/b/c', '/data/a/b/c/d',
+    '/data/old-work', '/data/old-work/bots', '/proc', '/sys', '/dev', '/root', '/usr/sbin', '/home/user1']);
+  const files = new Set(['/data/a/b/c/bot-config.json', '/data/a/b/c/d/bot-config.json',
+    '/data/old-work/bots/config.json', '/usr/sbin/bot-config.json', '/root/bot-config.json', '/home/user1/bot-config.json']);
+  const listed = [], inspected = [];
+  const absent = () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); };
+  const fakeFs = {
+    lstatSync(p) {
+      inspected.push(p);
+      if (!directories.has(p) && !files.has(p)) return absent();
+      return { uid: 1001, size: 0, isDirectory: () => directories.has(p), isFile: () => files.has(p), isSymbolicLink: () => false };
+    },
+    readdirSync(p) {
+      listed.push(p);
+      if (!directories.has(p)) return absent();
+      return [...directories, ...files].filter(child => child !== p && path.posix.dirname(child) === p).map(child => path.posix.basename(child));
+    },
+    readFileSync(p) {
+      if (p === '/etc/passwd') return [
+        'root:x:0:0::/root:/bin/sh', 'daemon:x:1:1::/usr/sbin:/bin/false', 'absent:x:2:2::/missing:/bin/false',
+        'user1:x:1001:1001::/home/user1:/bin/sh', 'user2:x:1002:1002::/home/user2:/bin/sh',
+        'procuser:x:1003:1003::/proc:/bin/sh', 'sysuser:x:1004:1004::/sys:/bin/sh', 'devuser:x:1005:1005::/dev:/bin/sh',
+      ].join('\n');
+      return absent();
+    },
+  };
+  const value = vm.runInNewContext(`(${collectInventory.toString()})()`, {
+    require: name => name === 'node:fs' ? fakeFs : name === 'node:child_process'
+      ? { execFileSync() { assert.fail('No commands expected'); } } : require(name),
+    process: { env: { PATH: '/usr/bin' }, getuid: () => 0, pid: 99 },
+  });
+  const result = JSON.parse(JSON.stringify(value));
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.items.filter(item => item.kind === 'bot-config').map(item => item.path),
+    ['/data/a/b/c/bot-config.json', '/home/user1/bot-config.json']);
+  for (const p of ['/data/a/b/c/d', '/data/old-work', '/root', '/usr/sbin', '/sys', '/dev']) assert.ok(!listed.includes(p), p);
+  assert.equal(listed.filter(p => p === '/proc').length, 1, 'only the explicit process scan may list /proc');
+  assert.ok(!inspected.includes('/data/a/b/c/d/bot-config.json'));
+  assert.ok(!result.items.some(item => item.kind === 'dotfile' && item.user === 'absent'));
+  for (const user of ['root', 'daemon', 'user1', 'user2']) assert.equal(result.items.filter(item => item.kind === 'dotfile' && item.user === user).length, user === 'user1' ? 10 : 5);
+});
+
+test('verification probe compares every cron fingerprint and TCP/UDP listener, collecting all mismatches', async () => {
+  const { createHash } = await import('node:crypto');
+  const hash = value => createHash('sha256').update(value).digest('hex');
+  const cron = '@hourly /srv/example-service/run';
+  const rows = [
+    { id: 'cron-present', source: { kind: 'cron', source: 'crontab:user1', user: 'user1', fingerprint: hash(cron) }, target: {} },
+    { id: 'spool-present', source: { kind: 'cron', source: '/var/spool/cron/crontabs/user1', user: 'user1', fingerprint: hash(cron) }, target: {} },
+    { id: 'cron-missing', source: { kind: 'cron', source: '/etc/cron.d/example', fingerprint: hash('0 0 * * * root /srv/example-service/other') }, target: {} },
+    { id: 'tcp-present', source: { kind: 'port', protocol: 'tcp', port: 8080 }, target: {} },
+    { id: 'udp-mapped', source: { kind: 'port', protocol: 'udp', port: 9000 }, target: { port: 8081 } },
+    { id: 'port-missing', source: { kind: 'port', protocol: 'tcp', port: 8082 }, target: {} },
+    { id: 'not-listening', source: { kind: 'port', protocol: 'tcp', port: 8083 }, target: {} },
+  ];
+  const fakeFs = {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 1 }, openSync: p => p, closeSync() {}, fstatSync: () => ({ isFile: () => true }),
+    readFileSync: p => {
+      if (p === 0) return stdin;
+      if (p === '/etc/passwd') return 'user1:x:1001:1001::/home/user1:/bin/sh\n';
+      if (p === '/var/spool/cron/crontabs/user1') return `${cron}\n`;
+      if (p === '/etc/cron.d/example') return '# example\n0 0 * * * root /srv/example-service/run\n';
+      if (p === '/proc/net/tcp') return 'header\n0: 00000000:1F90 00000000:0000 0A\n1: 00000000:1F93 00000000:0000 01\n';
+      if (p === '/proc/net/udp') return 'header\n0: 00000000:1F91 00000000:0000 07\n';
+      assert.fail('Unexpected content read');
+    },
+  };
+  const argv = verificationProbe;
+  const stdin = JSON.stringify(verificationRows(rows));
+  let output = '';
+  vm.runInNewContext(argv[2], {
+    require: name => ({ 'node:fs': fakeFs, 'node:crypto': { createHash }, 'node:child_process': { execFileSync(exe, args) {
+      assert.equal(exe, 'crontab'); assert.deepEqual([...args], ['-l']); return `${cron}\n`;
+    } } })[name],
+    process: { getuid: () => 1001, stdout: { write: text => { output += text; } } },
+  });
+  assert.deepEqual(JSON.parse(output).map(item => item.id), ['cron-missing', 'port-missing', 'not-listening']);
+});

@@ -6,6 +6,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { list, matches, publishedLinks, readOwners, requireValue as check, validSlug, withLock, writeOwner } from './adopt-state.mjs';
 
+import { inventoryProbe, parseInventoryProbe, inventoryPaths, inventoryDocument, saveInventory, prepareInventoryDirectory, readDecisions, verificationProbe, verificationRows } from './adopt-inventory.mjs';
+
 const commands = new Set(['pv', 'inventory', 'switch', 'rollback', 'verify', 'status']);
 const publishedDefault = '/run/workpartner/published';
 const executeFile = promisify(execFile);
@@ -29,6 +31,17 @@ with its host path. Both gateways must see replacements of this same file.
 Run with both gateways using the same owners file; quiesce user requests and in-flight
 lifecycle tasks for the selected user during switch/rollback. Apply operations take
 an owners-file lock. After an interrupted process, inspect status before removing a stale lock.
+inventory --apply writes <ownersFile>.adopt/<slug>.inventory.json, .inventory.txt
+and .decisions.json (mode 0600). Each inventory resets decisions.
+Complete every decision: carried with method, or dropped with reason; target may
+map a changed path/user/port. switch requires the latest complete table before
+any write, including the lock. Credential files are metadata-only; all process
+and cron command arguments are redacted. inventory requires a running container
+and uses a read-only root Node probe for all users; dry-run only plans this probe.
+Acknowledge each inventory issue with acknowledged: true and a reason after manual review.
+verify --apply checks carried items and reports mismatches as ALARM.
+A missing table only warns and skips per-item checks in verify (also for an already
+migrated switch); existing invalid tables still fail, and new switches require a complete table.
 verify --apply runs read-only commands inside the workspace and gateway Pod.
 Without --apply, verify only performs passive checks and prints the remaining checks.
 `;
@@ -178,6 +191,18 @@ export async function runAdopt(options, dependencies) {
       }
     };
 
+    const files = inventoryPaths(r.migration.ownersFile, slug);
+    async function decisionPreflight() {
+      recovery = 'Complete the latest inventory decision table before switch; run inventory --apply if needed.';
+      return step('switch preflight: inventory decisions', async () => {
+        const table = await readDecisions(files, slug, { allowMissing: ownerFor(slug) === 'k8s' });
+        if (!table && (!(await runtime.inspect(slug)).running || dockerActive(await dockerInspect()))) {
+          return readDecisions(files, slug);
+        }
+        return table;
+      });
+    }
+
     async function verify() {
       recovery = 'Keep Docker stopped. Repair the failed check and rerun verify --apply, or run rollback --apply.';
       await step('verify Pod and expected node', async () => {
@@ -214,8 +239,30 @@ export async function runAdopt(options, dependencies) {
         check(result.exitCode === 0, 'Preview key link is invalid');
       });
       await step('verify Docker stopped', async () => check(!dockerActive(await dockerInspect()), 'Docker is still active'));
+      await step('verify carried inventory items', async () => {
+        const table = await readDecisions(files, slug, { allowMissing: true });
+        if (!table) {
+          report.inventoryVerified = false;
+          report.alarms = [{ slug, alarm: 'missing-pre-migration-inventory',
+            message: 'This user has no pre-migration inventory decision table; per-item checks skipped. Manually check cron, /srv and /opt services, processes, listening ports, tmux/screen sessions, credential dotfiles, bot configs and container-layer patches.' }];
+          say(`ALARM ${JSON.stringify(report.alarms[0])}`);
+          return;
+        }
+        if (!options.apply) return say('DRY-RUN planned per-item carried inventory checks');
+        const rows = table.items.filter(item => item.decision === 'carried');
+        report.alarms = [];
+        if (rows.length) {
+          const result = await runtime.exec(slug, verificationProbe, { timeout: 120000, stdin: JSON.stringify(verificationRows(rows)), strictOutput: true });
+          check(result.exitCode === 0, 'Carried inventory verification probe failed');
+          report.alarms = JSON.parse(result.stdout);
+          check(Array.isArray(report.alarms), 'Invalid carried inventory verification response');
+        }
+        for (const alarm of report.alarms) say(`ALARM ${JSON.stringify(alarm)}`);
+        check(report.alarms.length === 0, 'Carried inventory items missing or mismatched');
+        report.inventoryVerified = true;
+      });
       report.verified = !!options.apply;
-      say(options.apply ? 'Verified' : 'DRY-RUN passive checks passed; run verify --apply to complete verification');
+      say(options.apply ? (report.inventoryVerified === false ? 'Runtime checks passed; missing pre-migration inventory requires manual review' : 'Verified') : 'DRY-RUN passive checks passed; run verify --apply to complete verification');
     }
 
     async function pv() {
@@ -272,6 +319,15 @@ export async function runAdopt(options, dependencies) {
       const container = await dockerInspect();
       check(container, 'Docker container missing');
       report.inventory = [];
+      let collected;
+      if (options.apply) {
+        check(container.State.Running, 'Inventory requires a running Docker container');
+        // Invalidate a previous approval even when this new attempt later fails.
+        await prepareInventoryDirectory(files);
+        await fs.rm(files.decisions, { force: true });
+        collected = await step('inventory all users and services', async () => parseInventoryProbe(
+          await command('docker', ['exec', '--user', '0:0', '--env', 'NODE_OPTIONS=', '--env', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin', name, ...inventoryProbe])));
+      } else say('DRY-RUN planned read-only all-user inventory probe and report/decision files');
       const diff = await step('inventory docker diff', () => docker(['diff', name]));
       for (const line of diff.split('\n').filter(Boolean)) {
         const match = /^([ACD]) (\/[^\r\n]*)$/.exec(line);
@@ -298,9 +354,19 @@ export async function runAdopt(options, dependencies) {
           'inventory', filename, path.posix.basename(filename),
         ]));
       }
+      if (collected) {
+        report.inventoryReport = inventoryDocument(slug, [
+          ...collected.items, ...report.inventory.map(item => ({ kind: 'docker-diff', ...item })),
+        ], collected.issues);
+        await saveInventory(files, report.inventoryReport);
+        report.inventoryFiles = files;
+        say(`INVENTORY files ${JSON.stringify(files)}`);
+        check(collected.issues.length === 0, 'Inventory incomplete; resolve probe issues and rerun inventory --apply, or acknowledge each issue with a reason in the decision table');
+      }
     }
 
     async function switchUser() {
+      const decisions = await decisionPreflight();
       recovery = 'Docker ownership is unchanged. Correct preflight checks and rerun switch.';
       const volume = await step('switch preflight: bound PVC and registered image', async () => {
         const data = await boundVolume();
@@ -321,6 +387,9 @@ export async function runAdopt(options, dependencies) {
       const container = await dockerInspect();
       check(container && path.resolve(dataMount(container)) === path.resolve(volume.spec.local.path), 'Docker and PV must use the same data directory');
       const pods = await podsFor(slug), state = await runtime.inspect(slug);
+      const alreadyMigrated = ownerFor(slug) === 'k8s' && state.running && !dockerActive(container);
+      // Recheck the exception against the state used for this switch, before any mutation.
+      if (!decisions && !alreadyMigrated) await step('switch preflight: inventory decisions', () => readDecisions(files, slug));
       if (pods.length && dockerActive(container)) {
         recovery = 'Duplicate instances detected. Stop the new Pod and confirm StatefulSet replicas=0 and no Pods; rerun switch to restore Docker ownership.';
         await pause(true);
@@ -335,7 +404,7 @@ export async function runAdopt(options, dependencies) {
         stage = 'duplicate instances detected';
         throw new Error('Duplicate instances detected');
       }
-      if (ownerFor(slug) === 'k8s' && state.running && !dockerActive(container)) {
+      if (alreadyMigrated) {
         check(container.HostConfig?.RestartPolicy?.Name === 'no', 'Migrated Docker restart policy must remain no');
         return verify();
       }
@@ -419,6 +488,7 @@ export async function runAdopt(options, dependencies) {
       stage = options.command;
       await { pv, inventory, switch: switchUser, rollback, verify, status }[options.command]();
     };
+    if (options.command === 'switch') await decisionPreflight();
     stage = 'acquire operation lock';
     recovery = 'If another adoption is active, wait for it. For a stale owners-file .adopt.lock, inspect status before removing the lock and retrying.';
     if (options.apply && !['status', 'verify'].includes(options.command)) await withLock(r.migration.ownersFile, async () => {
