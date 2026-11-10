@@ -48,10 +48,14 @@ if ! instructions_error=$(python3 -I /opt/workpartner/bin/wp-sync-instructions.p
   printf '警告：%s；继续启动，下次启动重试。\n' "$instructions_error" >&2
 fi
 
+. /opt/workpartner/bin/wp-init-hooks.sh
+wp_init_hooks
+
 cd /data/work
 trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
 AIONUI_PORT=${AIONUI_PORT:-25808}
 /opt/aionui/aionui-web start --static-dir /opt/aionui/static-wp --remote --port "$AIONUI_PORT" --no-open --data-dir /data/aionui-data &
+service_pids=("$!")
 
 # 每次启动校正助手（只开 ChatGPT 和 Claude，ChatGPT 排第一；没有 Claude 权限就只开 ChatGPT），第一次还写中文和默认助手。
 # 失败不影响启动，下次启动重试。
@@ -61,11 +65,13 @@ python3 -I /opt/workpartner/bin/wp-seed.py "http://127.0.0.1:$AIONUI_PORT"
 # 消息桥：本人扫码建好机器人（生成 config.toml）之后才启动；没有就只跑网页版。
 if [ -f /data/.cc-connect/config.toml ]; then
   /opt/workpartner/bin/cc-connect --config /data/.cc-connect/config.toml &
+  service_pids+=("$!")
 fi
 # 网关启用预览时先写入个人 relay key；独立启动且没有 key 时只运行对话入口。
 if [ -f /data/.zp-preview-relay-key ]; then
   node /opt/workpartner/preview/workspace.mjs "$PARTNER_GATEWAY_ORIGIN" &
+  service_pids+=("$!")
 fi
-# 任一进程退出就退出整个容器，由 Docker 的重启策略整体拉起。
-wait -n
+# Restart when a service exits, ignoring adopted detached exec processes.
+wait -n "${service_pids[@]}"
 exit $?
