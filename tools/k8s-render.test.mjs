@@ -682,6 +682,75 @@ function endpointFixture(address = '192.0.2.10', port = 4100) {
   return org;
 }
 
+test('RFC1918 endpoint warnings cover exact range boundaries without changing manifests or writing stdio', t => {
+  const baseline = renderManifests(endpointFixture('192.0.2.99'));
+  assert.deepEqual(baseline.warnings, []);
+  const writes = [];
+  const stderr = t.mock.method(process.stderr, 'write', chunk => { writes.push(chunk); return true; });
+  const stdout = t.mock.method(process.stdout, 'write', chunk => { writes.push(chunk); return true; });
+  try {
+    // Network boundaries, not deployment addresses. Include neighbors and shared address space.
+    for (const [octets, warn] of [
+      [[9, 255, 255, 255], false], [[10, 0, 0, 0], true],
+      [[10, 255, 255, 255], true], [[11, 0, 0, 0], false],
+      [[172, 15, 255, 255], false], [[172, 16, 0, 0], true],
+      [[172, 31, 255, 255], true], [[172, 32, 0, 0], false],
+      [[192, 167, 255, 255], false], [[192, 168, 0, 0], true],
+      [[192, 168, 255, 255], true], [[192, 169, 0, 0], false],
+      [[100, 64, 0, 0], false], [[100, 127, 255, 255], false],
+      [[192, 0, 2, 10], false],
+    ]) {
+      const address = octets.join('.');
+      const org = endpointFixture(address);
+      const before = structuredClone(org);
+      const result = renderManifests(org);
+      assert.equal(result.warnings.length, warn ? 1 : 0, address);
+      if (warn) {
+        assert.match(result.warnings[0], /modelEgressEndpoint.address.*RFC1918.*external endpoint.*every node/);
+        assert.match(result.warnings[0], /Docker bridge.*relay Pod.*modelEgressSelector/);
+        assert.match(result.warnings[0], /docs\/kubernetes.md#model-egress-routing/);
+      }
+      assert.deepEqual(result.objects, JSON.parse(JSON.stringify(baseline.objects).replaceAll('192.0.2.99', address)));
+      assert.deepEqual(renderManifests(org), result);
+      assert.deepEqual(renderManifests(org, { only: 'Namespace' }).warnings, result.warnings);
+      assert.deepEqual(org, before);
+    }
+    assert.deepEqual(renderManifests(fixture()).warnings, []);
+    assert.deepEqual(renderManifests(endpointFixture()).warnings, []);
+  } finally {
+    stderr.mock.restore();
+    stdout.mock.restore();
+  }
+  assert.deepEqual(writes, []);
+});
+
+test('RFC1918 endpoint CLI warning goes only to stderr for stdout and file output', t => {
+  const directory = temporary(t);
+  fs.writeFileSync(path.join(directory, 'organization.json'), JSON.stringify(endpointFixture('192.0.2.99')));
+  const baseline = cli(['--org', directory]);
+  assert.equal(baseline.status, 0, baseline.stderr);
+  assert.equal(baseline.stderr, '');
+  for (const octets of [[10, 0, 0, 1], [172, 16, 0, 1], [192, 168, 0, 1]]) {
+    const address = octets.join('.');
+    const org = endpointFixture(address);
+    const { objects, warnings } = renderManifests(org);
+    fs.writeFileSync(path.join(directory, 'organization.json'), JSON.stringify(org));
+    const result = cli(['--org', directory]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, `Warning: ${warnings[0]}\n`);
+    assert.equal(result.stdout, baseline.stdout.replaceAll('192.0.2.99', address));
+    const output = path.join(directory, `output-${octets[0]}`);
+    const filtered = cli(['--org', directory, '--only', 'EndpointSlice', '--output', output]);
+    assert.equal(filtered.status, 0, filtered.stderr);
+    assert.equal(filtered.stderr, result.stderr);
+    assert.equal(filtered.stdout, '');
+    const files = fs.readdirSync(output);
+    assert.equal(files.length, 1);
+    assert.equal(fs.readFileSync(path.join(output, files[0]), 'utf8'),
+      JSON.stringify(find(objects, 'EndpointSlice'), null, 2) + '\n');
+  }
+});
+
 test('fixed model endpoint renders a selector-less Service, matching EndpointSlice and precise TCP egress', () => {
   const org = endpointFixture();
   const before = structuredClone(org);
