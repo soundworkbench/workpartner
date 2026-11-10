@@ -11,8 +11,8 @@ async function checkMatrix(c, source, targets, rows) {
   for (const target of targets) {
     const result = await c.from(source, target);
     rows.push({ source, ...target, expectedOpen: target.open, ...result });
-    c.evidence = { rows };
-    assert.equal(result.open, target.open, `${source}: ${target.label}`);
+    c.evidence = { ...c.evidence, rows };
+    assert.equal(result.open, target.open, `${source}: ${target.label} (${result.reason ?? 'no reason'})`);
   }
 }
 async function waitForPolicy(c, slugs, check) {
@@ -212,6 +212,23 @@ export const scenarios = [
   } },
   { id: 'S10', title: 'Two-node network matrix', async run(c) {
     const rows = [], gateway = new URL(c.org.runtime.gatewayOrigin), model = new URL(c.org.model.baseUrl);
+    const nameResolution = [];
+    c.evidence = { rows, nameResolution };
+    const short = gateway.hostname.split('.')[0];
+    const { systemNamespace, clusterDomain = 'cluster.local' } = c.org.runtime.k8s;
+    const fqdn = `${short}.${systemNamespace}.svc.${clusterDomain}.`;
+    // Capture both nodes before convergence, retaining evidence on success and failure.
+    for (const source of ['node-server', 'node-agent']) {
+      const entry = { source, lookups: [] };
+      nameResolution.push(entry);
+      for (const target of [{ kind: 'resolv' }, ...[gateway.hostname, model.hostname, short, fqdn].map(host => ({ kind: 'lookup', host }))]) {
+        let result;
+        try { result = await c.from(source, target); }
+        catch (error) { result = { status: 'unavailable', error: error.code || error.name }; }
+        if (target.kind === 'resolv') entry.resolv = result;
+        else entry.lookups.push({ host: target.host, ...result });
+      }
+    }
     const allowedTargets = [
       { host: gateway.hostname, port: c.org.runtime.gatewayPort, open: true, label: 'gateway HTTP' },
       { host: gateway.hostname, port: c.org.runtime.internalPort, open: true, label: 'gateway internal' },
@@ -223,7 +240,8 @@ export const scenarios = [
       assert.deepEqual([...new Set(dns)], [c.config.gatewayIp]);
       // Retry only allowed traffic; denials remain single-shot matrix assertions.
       for (const target of [...allowedTargets, ...externalTargets]) {
-        assert.equal((await c.from(slug, target)).open, true, `${slug}: ${target.label}`);
+        const result = await c.from(slug, target);
+        assert.equal(result.open, true, `${slug}: ${target.label} (${result.reason ?? 'no reason'})`);
       }
     });
     for (const slug of ['node-server', 'node-agent']) {
@@ -262,7 +280,7 @@ export const scenarios = [
       finally { await c.ready(slug); }
       rows.push({ source: `${slug}/job`, deniedTargets: jobTargets.length });
     }
-    return { rows, external: c.config.externalProbe ? 'PASS' : 'SKIP: no --external-probe' };
+    return { rows, nameResolution, external: c.config.externalProbe ? 'PASS' : 'SKIP: no --external-probe' };
   } },
   { id: 'S11', title: 'Relay authenticates gateway source address', async run(c) {
     const results = [];

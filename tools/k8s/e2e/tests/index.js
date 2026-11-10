@@ -3,3 +3,5 @@ void import('./ci-adapters.test.mjs');
 void import('./listener-ready.test.mjs');
 void import('./policy-ready.test.mjs');
 void import('./diagnostics.test.mjs');
+void import('./probe.test.mjs');
+void import('./organization.test.mjs');

@@ -1,7 +1,8 @@
 import net from 'node:net';
 import http from 'node:http';
-import { lookup } from 'node:dns/promises';
-import { readFileSync } from 'node:fs';
+import dns from 'node:dns/promises';
+import fs, { readFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
 export function tcp({ host, port, timeout = 1500 }) {
@@ -23,7 +24,14 @@ export function request({ host, port, path = '/', headers = {}, timeout = 3000 }
   });
 }
 export async function probe(spec) {
-  if (spec.kind === 'dns') return (await lookup(spec.host, { all: true })).map(item => item.address);
+  if (spec.kind === 'dns') return (await dns.lookup(spec.host, { all: true })).map(item => item.address);
+  if (spec.kind === 'lookup') {
+    const start = performance.now();
+    try { return { addresses: await dns.lookup(spec.host, { all: true }), ms: performance.now() - start }; }
+    catch (error) { return { error: error.code, ms: performance.now() - start }; }
+  }
+  if (spec.kind === 'resolv') return fs.readFileSync('/etc/resolv.conf', 'utf8').split('\n')
+    .filter(line => /^\s*(search|options)\s/.test(line));
   if (spec.kind === 'http') return request(spec);
   if (spec.kind === 'route') {
     const route = readFileSync('/proc/net/route', 'utf8').split('\n').slice(1).map(line => line.trim().split(/\s+/)).find(parts => parts[1] === '00000000');
