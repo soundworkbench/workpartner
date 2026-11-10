@@ -208,7 +208,7 @@ bash tools/k8s/distribute-image.sh --unpin "$OLD_IMAGE" \
 
 ## 单用户接管与回滚（K7）
 
-在原 Docker 宿主执行，能够读取原数据、钥匙和共享归属文件，并使用有 PV/节点权限的管理员 JSON kubeconfig。只支持已存在的 AionUi 用户。不搬数据，不删旧容器。每条命令默认 dry-run，**没有 `--dry-run` 参数**；省略 --apply 不做文件、Docker、Kubernetes 或 exec 写操作，但仍连接 Docker/集群读取状态。
+在原 Docker 宿主执行，能够读取原数据、钥匙和共享归属文件，并使用有 PV/节点权限的管理员 JSON kubeconfig。只支持已存在的 AionUi 用户。不自动搬迁服务或凭据，不删旧容器。每条命令默认 dry-run，**没有 `--dry-run` 参数**；省略 --apply 不做文件、Docker、Kubernetes 或 exec 写操作，但仍连接 Docker/集群读取状态。
 
 推荐用 WORKPARTNER_ORG_DIR 加载并合并完整配置，公共参数保存为 Bash 数组：
 
@@ -223,6 +223,7 @@ slug=fixture-user
 "${adopt[@]}" pv "$slug" --node "$ORIGINAL_NODE" --data-root "$DATA_ROOT" "${common[@]}" --apply
 "${adopt[@]}" inventory "$slug" "${common[@]}"
 "${adopt[@]}" inventory "$slug" "${common[@]}" --apply
+# 编辑 "$HOST_OWNERS_FILE.adopt/$slug.decisions.json"，完成全部决策和迁移说明
 "${adopt[@]}" switch "$slug" "${common[@]}"
 # 进入该用户维护窗口，暂停请求并等待在途生命周期任务完成，再执行：
 "${adopt[@]}" switch "$slug" "${common[@]}" --apply
@@ -235,13 +236,44 @@ slug=fixture-user
 | 阶段 | 实际动作 | 失败处理 |
 | --- | --- | --- |
 | `pv` | 核对 Docker `/data` 的可写 bind mount 与 `<data-root><nextDirectory>/<slug>` 一致，节点存在；若 `<data-root>/users/<slug>/work` 存在，还核对旧只读 mount。创建 Retain 静态 local PV/PVC，空 storageClass，预绑定到原节点和原目录。 | 已有卷须与计划一致；冲突时核对 claim、路径、节点，不删数据或重绑别人的卷。部分创建可在修复后重复 pv；等待 PVC Bound 再 switch。 |
-| `inventory` | docker diff；--apply 时仅从运行容器把 `/usr/local/bin` 下新增/修改且本人可读的普通可执行文件复制到 `/data/.zp-init.d/bin`，UID 为 runtime.uid。符号链接只报告目标，其他修改仅报告。 | 检查报告、手动转写支持的补丁，再重跑。需要 root 才能还原或涉及身份分流且不能用 PATH 覆盖的补丁按规格停止迁移。不会自动转换所有补丁。 |
-| `switch` 预检 | Bound local PVC/PV、精确节点、可选 oldwork 同节点、镜像登记、钥匙、Docker/PV 同数据目录、无旧 k8s Pod。 | 修复预检再试，不能绕过检查；核实 status，镜像登记之外还须确认节点已导入。 |
+| `inventory` | 全用户 cron、服务目录、进程、端口、会话、凭据文件元数据及机器人配置路径，写 JSON/文本和逐项对照表；docker diff；--apply 时仅从运行容器把 `/usr/local/bin` 下新增/修改且本人可读的普通可执行文件复制到 `/data/.zp-init.d/bin`，UID 为 runtime.uid。符号链接只报告目标，其他修改仅报告。 | 检查报告、手动转写支持的补丁，再重跑。需要 root 才能还原或涉及身份分流且不能用 PATH 覆盖的补丁按规格停止迁移。不会自动转换所有补丁。 |
+| `switch` 预检 | 在创建锁和任何写操作前确认最新完整对照表，拿锁后再核对；Bound local PVC/PV、精确节点、可选 oldwork 同节点、镜像登记、钥匙、Docker/PV 同数据目录、无旧 k8s Pod。 | 修复预检再试，不能绕过检查；核实 status，镜像登记之外还须确认节点已导入。 |
 | `switch` 停 Docker | 先 `restart=no`，再 stop 并复查确已停止。 | 不启动 Pod；修复 Docker 操作后重跑。 |
 | `switch` 切换/预热 | 原子 owner→k8s，ensureIsolation、create、清除 paused、start；启动前再次核对归属和 Docker 已停。 | 保持 Docker 停止且 restart=no，修复后重跑 switch，或执行 rollback --apply。不存在独立 prewarm 子命令。 |
-| `verify` | 仅一个 Running Pod、预期 local PV 节点；从网关访问 `/api/auth/status`；有配置则 cc-connect 存在；预览钥匙链接正确、非空可读；Docker 不活跃。switch --apply 自动执行它。 | 保持 Docker 停止，修复后重跑 verify --apply，或回滚。verify 无 --apply 仅被动检查并列出待 exec 项，不能称为完整验证。 |
+| `verify` | 仅一个 Running Pod、预期 local PV 节点；从网关访问 `/api/auth/status`；有配置则 cc-connect 存在；预览钥匙链接正确、非空可读；Docker 不活跃；逐项核对 carried 项，缺失、不匹配或无法读取均 ALARM 并非零退出；缺少对照表时仅报警并跳过逐项核对，其余检查照常执行。switch --apply 自动执行它。 | 保持 Docker 停止，修复后重跑 verify --apply，或回滚。verify 无 --apply 仅被动检查并列出待 exec 项，不能称为完整验证。 |
 
-如果检测到 Docker 与 Pod 并存，switch 会先 paused、停新的 Pod、确认副本 0 且无 Pod，再恢复 Docker 归属，并以失败退出要求检查。若清理不成功，不能继续切换。status 报警或疑似两份机器人时先停新实例，确认唯一实例后再报告处理。
+`inventory --apply` 要求旧容器运行中且有 Node，使用只读 root 探针盘点所有用户；清空 NODE_OPTIONS，并固定 PATH 为 `/usr/sbin:/usr/bin:/sbin:/bin`。原有可执行文件复制仍以 runtime.uid 执行。默认 dry-run 仅打印 docker diff 和后续探针/文件计划，不生成可用于 switch 的对照表。报告放在宿主 `<ownersFile>.adopt/`（目录模式 0700），按用户代号命名：
+
+- `<slug>.inventory.json`：带 `inventoryId`、时间、稳定条目 ID、采集异常的机器可读报告。
+- `<slug>.inventory.txt`：逐项可读报告。
+- `<slug>.decisions.json`：人工编辑的对照表；新生成时所有 `decision` 为空，文件模式均为 0600。目录及报告每次写入都显式收紧为 0700/0600；报告经独占创建的临时文件加 rename 发布，不跟随已存在的报告符号链接，报告目录本身为符号链接时拒绝。
+
+盘点包括每个 `/etc/passwd` 用户的 crontab、`/etc/crontab` 和 `/etc/cron.d`；有 crontab 工具时不再读取用户 spool，无工具时只读 `/var/spool/cron`（含 crontabs 子目录），同一用户只保留一份来源，verify 也只按该来源核对。每条任务和环境设置单独列项。`/srv`、`/opt` 一级目录记录名称、du KiB 大小（单次超时 60 秒）、UID/GID 和属主；监听端口记录 TCP/UDP、IPv4/IPv6 协议与端口。tmux/screen 通过各用户默认会话端点查询；自定义 socket 的会话需人工补查。
+
+进程与 cron 只展示可识别的可执行文件和脱敏标记，**所有命令参数值均隐藏**；cron 原文只存整行 SHA-256 指纹（去除首尾空白），另保留时间规则和脱敏说明，不输出原命令或环境变量值。仅 UID≥1000 或家目录真实存在的 passwd 用户参与点文件盘点；这些用户的家目录、运行时 HOME 和 `/data` 的 `.gitconfig`、`.git-credentials`、`.config/gh`、`.ssh`、`.netrc` 只记存在性和 lstat 字节数（目录为目录项自身大小，非递归容量），不打开内容。机器人配置只记路径：扫描 `/data`、`/srv`、`/opt` 和 UID≥1000 用户家目录中常见 `.cc-connect`、`.openclaw`、`.aionui`、bot/robot 目录及配置文件名，也收集进程 `--config`/`-c` 指向的现存配置路径；根目录深度为 0，最多检查到第 4 层；系统家目录不作为扫描根，跳过 `/data/old-work`、`/proc`、`/sys`、`/dev`，不跟随符号链接，不遍历凭据目录、依赖目录或缓存。跳过范围和更深目录中的配置须人工补查。任意自定义命名无法仅凭路径可靠识别，需结合 docker diff 和服务目录人工补查。采集失败会记录 issues，inventory 仍以非零码退出；未确认的 issue 阻止 switch。可修复后重盘点，或人工核对后在对照表的 `issues` 数组中逐条设置 `acknowledged: true` 并填写非空 `reason`；不得删项、重复确认或用其他 issue 替代。例如：
+
+```json
+{ "issue": "directory-size", "acknowledged": true, "reason": "已人工核对服务目录和迁移内容，容量统计超时不影响核对结论" }
+```
+
+每一项都须填写 `decision: "carried"` 并在 `method` 写明恢复方式，或 `decision: "dropped"` 并在 `reason` 写明放弃原因，包括不存在的点文件、进程、会话和 docker diff 条目。不可删除行来跳过核对。例如服务目录条目保留生成的 `id/kind/source`，将其余字段改为：
+
+```json
+{
+  "decision": "carried",
+  "method": "通过 init hook 将服务恢复到 /data/services/example-service 并启动",
+  "reason": "",
+  "target": { "path": "/data/services/example-service" }
+}
+```
+
+`target` 为空时按原位置检查；可用 `path` 映射目录、点文件、配置文件和 cron 文件，用 `user` 映射用户 crontab，用 `port/protocol` 映射监听，用 `executable` 或 `name` 映射进程或会话。cron 文件目标仅接受标准 cron 路径且拒绝末级符号链接；任务文本有意改变时需人工审查并填写新条目的 `fingerprint`（SHA-256，去除该行首尾空白），不可把原始含密钥命令写入表。verify 使用固定脚本，通过 stdin 仅传入 id、kind 和核对所需字段，不传原报告、迁移说明或 reason。verify 使用 Pod 的运行用户读取目标；权限不足同样报警，须修复权限或迁移到该用户可管理的位置。目录、点文件和配置仅核对存在性/类型，不验证文件内容、凭据有效性或服务业务行为；cron 核对条目摘要，端口核对监听，进程/会话核对可执行文件/名称。复制的可执行文件默认检查 `/data/.zp-init.d/bin/<文件名>`。
+
+每次 `inventory --apply` 开始都会作废旧决策，采集报告写入后生成新批次并清空决策和 issue 确认。重新盘点后必须重新填写；switch 同时检查批次 ID、文件修改时间、全部条目和说明。从 Docker 切到 k8s 的正常路径，缺表、旧表、空决策或有未确认的采集 issue 时，在创建锁、停 Docker、修改归属及 Kubernetes 写操作前拒绝。报告和表是本地私有运维产物，不应提交公开仓库。
+
+对已经迁移但迁移前没有对照表的用户，verify（dry-run 和 --apply）会单独输出一条 ALARM，跳过逐项核对，其余被动检查及 --apply 的运行时检查照常执行；其余检查通过时退出码为 0，结果 `inventoryVerified: false`。报警要求人工核对 cron、`/srv`/`/opt` 服务、进程、监听端口、tmux/screen 会话、凭据点文件、机器人配置和容器层补丁。归属为 k8s、工作负载运行且 Docker 不活跃时，switch 的幂等验证路径同样允许缺表。已有但损坏、过期或未标完的对照表仍失败；已有表但报告丢失、悬空符号链接也不视作缺表。
+
+如果检测到 Docker 与 Pod 并存，且对照表预检已通过，switch 会先 paused、停新的 Pod、确认副本 0 且无 Pod，再恢复 Docker 归属，并以失败退出要求检查。若清理不成功，不能继续切换。status 报警或疑似两份机器人时先停新实例，确认唯一实例后再报告处理。
 
 回滚仍在该用户维护窗口执行：
 
