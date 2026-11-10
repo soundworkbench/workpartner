@@ -1,6 +1,6 @@
 // 桌面与容器共用网关签发的 zpd 身份；每次请求仍核对开通名单。
 import crypto from "node:crypto";
-import fs from "node:fs";
+import { writeContainerTokenFile } from "./runtime/docker.mjs";
 
 /** 签发有效期 180 天的 zpd 令牌。
  * @param key 网关签名密钥。
@@ -33,22 +33,9 @@ export function tokenUser(req, key, users, now = Date.now()) {
     ? users.find((user) => user.unionId === value.u) ?? null : null;
 }
 
-/** 原子写入容器数据卷的身份文件，权限 600。
- * @param key 网关签名密钥。
- * @param user 目标用户。
- * @param root 用户数据根目录。
- * @param uid 容器用户 UID/GID；null 只用于非特权测试。
- */
+/** Keep synchronous root/uid calls compatible; runtime calls return a Promise. */
 export function writeContainerToken(key, user, root = "/users", uid = 1001) {
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(user.slug)) throw new Error("用户代号无效");
-  const dir = `${root}/${user.slug}`;
-  fs.mkdirSync(dir, { recursive: true });
-  if (uid !== null) fs.chownSync(dir, uid, uid);
-  const file = `${dir}/.zp-market-token`;
-  const temp = `${file}.${crypto.randomBytes(12).toString("hex")}`;
-  try {
-    fs.writeFileSync(temp, issueToken(key, user) + "\n", { flag: "wx", mode: 0o600 });
-    if (uid !== null) fs.chownSync(temp, uid, uid);
-    fs.renameSync(temp, file);
-  } finally { fs.rmSync(temp, { force: true }); }
+  if (typeof root === 'string') return writeContainerTokenFile(issueToken(key, user) + "\n", user.slug, root, uid);
+  return root.putFiles(user.slug, [{ path: '.zp-market-token', content: issueToken(key, user) + "\n", mode: 0o600 }], { directoryMode: 0o777 });
 }

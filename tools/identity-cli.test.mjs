@@ -32,6 +32,7 @@ test('gateway-prepared identity reaches the image CLI through its default settin
   const { once } = await import('node:events');
   const http = await import('node:http');
   const { createNextFeishuPreparation } = await import('../feishu/next.mjs');
+  const { createRuntime } = await import('../gateway/runtime/index.mjs');
   const { runCli } = await import(wrapper);
   const root = mkdtempSync(join(tmpdir(), 'wp-gateway-cli-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -55,7 +56,7 @@ test "$LARKSUITE_CLI_USER_ACCESS_TOKEN" = fixture-access
   t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   const organization = { runtime: { uid: null, nextDirectory: root, internalOrigin: `http://127.0.0.1:${server.address().port}` },
     server: { publicOrigin: 'https://workspace.example.test', projectHost: 'project.example.test' } };
-  createNextFeishuPreparation({ organization, tokenFor: () => 'fixture-signed-identity' })({ backend: 'aionui', slug: 'user1', unionId: 'fixture-union' });
+  await createNextFeishuPreparation({ organization, runtime: createRuntime(organization), tokenFor: () => 'fixture-signed-identity' })({ backend: 'aionui', slug: 'user1', unionId: 'fixture-union' });
   const dockerfile = readFileSync(new URL('../image/Dockerfile', import.meta.url), 'utf8');
   const filename = dockerfile.match(/WORKPARTNER_IDENTITY_CONFIG=\/data\/([^\s]+)/)[1];
   const configFile = join(root, 'user1', filename);

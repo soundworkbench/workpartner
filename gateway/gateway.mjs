@@ -8,7 +8,8 @@ import http from "node:http";
 import net from "node:net";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import os from "node:os";
+import { createRuntime } from "./runtime/index.mjs";
+import { docker } from "./runtime/docker.mjs";
 import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } from "./onboard.mjs";
 import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
@@ -24,38 +25,19 @@ const MODEL_KEY_PREFIX = organization.model.keyPrefix;
 const USERS_FILE = organization.runtime.usersFile;
 const users = readUsers;
 
-function docker(method, path, body, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ socketPath: "/var/run/docker.sock", method, path, ...(timeoutMs ? { timeout: timeoutMs } : {}),
-      headers: body ? { "Content-Type": "application/json" } : {} }, (res) => {
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
-    });
-    req.on("error", reject);
-    if (timeoutMs) req.on("timeout", () => req.destroy(new Error("超时")));
-    req.end(body ? JSON.stringify(body) : undefined);
-  });
-}
-
-
-// 新版容器：数据在宿主 <PARTNER_DATA>/workspaces/<slug>（网关内 /next），AionUi 口令在 /secure/aionui（只网关读）。
+const runtime = createRuntime(organization);
+const legacyRuntime = createRuntime(organization, {
+  containerPrefix: organization.runtime.containerPrefix, dataDir: organization.runtime.usersDirectory,
+});
 const aionui = createAionui({
-  docker, self: os.hostname(), modelContainer: organization.runtime.modelContainer, modelBaseUrl: MODEL.href, modelBaseEnvironment: organization.model.baseEnvironment,
-  modelConfig: () => nextModelConfig(organizationData()),
-  image: organization.runtime.nextImage, containerPrefix: organization.runtime.nextContainerPrefix,
-  userLabel: organization.runtime.nextUserLabel, modelKeyFile: organization.runtime.nextModelKeyFile, port: organization.runtime.nextPort, uid: organization.runtime.uid,
-  dataDir: organization.runtime.nextDirectory, hostData: `${organization.runtime.hostData}${organization.runtime.nextDirectory}`,
-  usersDir: organization.runtime.usersDirectory, hostUsers: `${organization.runtime.hostData}/users`,
-  secretDir: `${organization.runtime.secureDirectory}/aionui`, secureDir: organization.runtime.secureDirectory,
-  hostSecure: organization.runtime.hostSecure, keyPrefix: MODEL_KEY_PREFIX,
-  memory: organization.runtime.nextMemory, nanoCpus: organization.runtime.nanoCpus, pidsLimit: organization.runtime.nextPidsLimit,
+  runtime, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
+  secretDir: `${organization.runtime.secureDirectory}/aionui`,
 });
 const marketSkills = createMarketSkills({
-  authenticate: req => userFor(req).user, docker, uid: organization.runtime.uid, containerPrefix: organization.runtime.nextContainerPrefix, dataDir: organization.runtime.nextDirectory, origin: `https://${PUBLIC_HOST}`,
+  authenticate: req => userFor(req).user, runtime, uid: organization.runtime.uid, origin: `https://${PUBLIC_HOST}`,
 });
 const feishuOnboarding = createFeishuOnboarding({
-  authenticate: req => userFor(req).user, docker, uid: organization.runtime.uid, containerPrefix: organization.runtime.nextContainerPrefix,
+  authenticate: req => userFor(req).user, runtime, uid: organization.runtime.uid,
   origin: `https://${PUBLIC_HOST}`, restarted: slug => aionui.forget(slug),
 });
 
@@ -74,9 +56,9 @@ function issueSession(who) {
 }
 
 const legacy = await gatewayExtension(organization, {
-  routePrefix: "/_wp", organization, docker, SESSION_KEY, users, userFor, cookieOf, page, redirect: (...args) => redirect(...args), MODEL, MODEL_KEY_PREFIX, PUBLIC_HOST,
+  routePrefix: "/_wp", organization, docker, runtime: legacyRuntime, personalRuntime: runtime, SESSION_KEY, users, userFor, cookieOf, page, redirect: (...args) => redirect(...args), MODEL, MODEL_KEY_PREFIX, PUBLIC_HOST,
 });
-const services = createGatewayServices({ organization, docker, SESSION_KEY, users, userFor, cookieOf, aionui, legacy });
+const services = await createGatewayServices({ organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
@@ -103,16 +85,19 @@ async function resolve(req) {
   const { who, user } = userFor(req);
   if (!user) return { deny: who };
   if (user.backend === "aionui") {
-    try { prepareNextFeishu?.(user); }
+    try { await prepareNextFeishu?.(user); }
     catch (error) { console.error(`[feishu] ${user.slug}: CLI configuration unavailable (${error.code || error.name}); routing to personal container continues`); }
     const up = await aionui.upstream(user);
     if (!up) return { user, backend: "aionui" };
     const cookie = await aionui.session(user.slug, up);
-    return { user, up, cookie, backend: "aionui", port: up.port, headers: aionuiHeaders, responseHeaders: aionuiResponseHeaders,
+    return { user, up, cookie, backend: "aionui", port: up.address.port, headers: aionuiHeaders, responseHeaders: aionuiResponseHeaders,
       etag: (req) => aionuiEtag(up.imageId, req),
       relogin: () => aionui.session(user.slug, up, true), lost: () => aionui.forget(user.slug) };
   }
-  return legacy?.resolve ? legacy.resolve(req, user) : { missing: user };
+  if (!legacy?.resolve) return { missing: user };
+  const result = await legacy.resolve(req, user);
+  if (result.up) result.up = { ...result.up, address: await legacyRuntime.address(user.slug, result.port, result.up) };
+  return result;
 }
 
 function proxy(req, res, r, body, retried) {
@@ -125,7 +110,7 @@ function proxy(req, res, r, body, retried) {
   const titleCreate = r.backend === "aionui" && req.method === "POST" && /^\/api\/conversations(?:\?|$)/.test(req.url);
   const headers = r.headers(req, r.cookie);
   if (titleCreate) headers["accept-encoding"] = "identity";
-  const up = http.request({ host: r.up.ip, port: r.port, path: req.url, method: req.method,
+  const up = http.request({ ...r.up.address, path: req.url, method: req.method,
     headers }, async (ur) => {
     if (ur.statusCode === 401 && !retried) {
       ur.resume();
@@ -199,7 +184,7 @@ async function login(req, res, url, host) {
       return redirect(res, "/_wp/pilot", session);
     }
     legacy?.clear?.(slugFor(who.unionId)); // 同一人删掉重开时，旧空间的登录凭证不能沿用
-    provision(docker, who).catch((e) => console.log("开通失败", who.name, e.message));
+    provision(runtime, who).catch((e) => console.log("开通失败", who.name, e.message));
   }
   return redirect(res, decodeURIComponent(next || "/"), session);
 }
@@ -300,7 +285,7 @@ server.on("upgrade", async (req, socket, head) => {
     if (legacy?.upgrade?.(req, socket, head)) return;
     const r = await resolve(req);
     if (!r.cookie) return socket.destroy();
-    const up = net.connect(r.port, r.up.ip, () => {
+    const up = net.connect(r.up.address.port, r.up.address.host, () => {
       up.write(upgradeHead(req, r.headers(req, r.cookie)));
       if (head?.length) up.write(head);
       up.pipe(socket);

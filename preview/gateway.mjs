@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import { previewPort, previewPath, RELAY_PORT, editorHeaders, editorSetCookies } from "./policy.mjs";
+import { previewPort, previewPath, editorHeaders, editorSetCookies } from "./policy.mjs";
 import { proxyHttp, proxyUpgrade } from "./transport.mjs";
 import { installPreviewClient } from "./client.mjs";
 import { previewDownloadBody } from "./downloads.mjs";
@@ -16,23 +15,17 @@ const hmac = (key, text) => crypto.createHmac("sha256", key).update(text).digest
 export const relayKey = (key, slug) => hmac(key, `preview-relay-v1:${slug}`);
 
 /** Atomically write a stable, per-container relay key into its existing private data volume. */
-export function writeRelayKey(key, user, root = "/users", uid = 1001) {
+export async function writeRelayKey(key, user, runtime) {
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(user.slug)) throw new Error("Invalid workspace slug");
-  const dir = `${root}/${user.slug}`;
-  fs.mkdirSync(dir, { recursive: true });
-  const file = `${dir}/.zp-preview-relay-key`;
+  const file = '.zp-preview-relay-key';
   const value = relayKey(key, user.slug) + "\n";
-  if (fs.existsSync(file) && fs.readFileSync(file, "utf8") === value) return;
-  const temp = `${file}.${crypto.randomBytes(12).toString("hex")}`;
-  try {
-    fs.writeFileSync(temp, value, { flag: "wx", mode: 0o600 });
-    if (uid !== null) fs.chownSync(temp, uid, uid);
-    fs.renameSync(temp, file);
-  } finally { fs.rmSync(temp, { force: true }); }
+  try { if (await runtime.readFile(user.slug, file) === value) return; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await runtime.putFiles(user.slug, [{ path: file, content: value, mode: 0o600 }], { directoryMode: 0o777, chown: false });
 }
 
 /** Separate preview origin, browser-bound single-use grants, streaming HTTP and WebSocket routing. */
-export function createPreview({ publicHost, previewHost = "", key, users, sessionUser, upstream, relayPort = RELAY_PORT, now = Date.now }) {
+export function createPreview({ publicHost, previewHost = "", key, users, sessionUser, upstream, now = Date.now }) {
   if (previewHost && (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(previewHost) || previewHost === publicHost
     || publicHost.endsWith(`.${previewHost}`))) {
     throw new Error("PREVIEW_HOST must be a separate sibling domain, without a scheme, port or wildcard");
@@ -145,8 +138,8 @@ export function createPreview({ publicHost, previewHost = "", key, users, sessio
         return true;
       }
       const up = await upstream(r.user.slug);
-      if (!up.ip) { reject(res, 503, "工作区暂时不可用。"); return true; }
-      proxyHttp(req, res, { host: up.ip, port: relayPort }, relayHeaders(req, r), replyHeaders(r, r.value),
+      if (!up.address) { reject(res, 503, "工作区暂时不可用。"); return true; }
+      proxyHttp(req, res, up.address, relayHeaders(req, r), replyHeaders(r, r.value),
         req.method === "GET" ? previewDownloadBody : undefined);
       return true;
     }
@@ -195,8 +188,8 @@ export function createPreview({ publicHost, previewHost = "", key, users, sessio
     if (!r || !allowedOrigin(req, r) || req.method !== "GET"
       || String(req.headers.upgrade).toLowerCase() !== "websocket") return socket.destroy();
     const up = await upstream(r.user.slug);
-    if (!up.ip) return socket.destroy();
-    proxyUpgrade(req, socket, head, { host: up.ip, port: relayPort }, relayHeaders(req, r), replyHeaders(r, r.value));
+    if (!up.address) return socket.destroy();
+    proxyUpgrade(req, socket, head, up.address, relayHeaders(req, r), replyHeaders(r, r.value));
   };
   return { handle, upgrade, isPreviewHost };
 }

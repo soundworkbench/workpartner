@@ -7,15 +7,16 @@ import { issueToken, tokenUser } from './market-auth.mjs';
 import { createNextFeishuPreparation } from '../feishu/next.mjs';
 import { createSettingsHandler } from '../feishu/settings.mjs';
 import { createContainerProject } from '../feishu/container-project.mjs';
+import { RELAY_PORT } from '../preview/policy.mjs';
 import { createPreview, writeRelayKey } from '../preview/gateway.mjs';
 
 /** Initialize organization-selected services with the gateway's identity and personal container resolver. */
-export function createGatewayServices({ organization, docker, SESSION_KEY, users, userFor, cookieOf, aionui, legacy }) {
+export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy }) {
   const { features, runtime, server } = organization;
   const authenticate = req => tokenUser(req, SESSION_KEY, users());
   const enabled = () => features.feishuAuthorization && process.env.FEISHU_USER_AUTH_ENABLED !== '0';
   const prepareNextFeishu = features.feishuAuthorization ? createNextFeishuPreparation({
-    organization, tokenFor: user => issueToken(SESSION_KEY, user),
+    organization, runtime: personalRuntime, tokenFor: user => issueToken(SESSION_KEY, user),
   }) : undefined;
   const feishu = features.feishuAuthorization ? createFeishu({
     callbackPath: organization.identity.callbackPath,
@@ -27,15 +28,17 @@ export function createGatewayServices({ organization, docker, SESSION_KEY, users
   const feishuSettings = feishu && createSettingsHandler({
     appearanceStyle: organization.appearance.authorizationStyle,
     basePath: '/_wp/feishu/', origin: server.publicOrigin, identify: req => userFor(req).user,
-    status: user => { prepareNextFeishu(user); return feishu.status(user.unionId); },
+    status: async user => { await prepareNextFeishu(user); return feishu.status(user.unionId); },
     disconnect: user => feishu.disconnect(user.unionId), connectUrl: `${server.publicOrigin}/_wp/feishu/connect`,
-    project: createContainerProject({ containerPrefix: runtime.containerPrefix, nextContainerPrefix: runtime.nextContainerPrefix, uid: runtime.uid }),
+    project: createContainerProject({ runtime: personalRuntime, legacyRuntime, uid: runtime.uid }),
   });
   const preview = features.preview && server.previewHost ? createPreview({
     publicHost: server.publicHost, previewHost: server.previewHost, key: SESSION_KEY, users,
     upstream: async slug => {
       const user = users().find(user => user.slug === slug);
-      return user?.backend === 'aionui' ? await aionui.upstream(user) || {} : await legacy?.upstream?.(slug) || {};
+      const up = user?.backend === 'aionui' ? await aionui.upstream(user) : await legacy?.upstream?.(slug);
+      if (!up) return {};
+      return { address: await (user?.backend === 'aionui' ? personalRuntime : legacyRuntime).address(slug, RELAY_PORT, up) };
     },
     sessionUser: req => {
       const { user } = userFor(req);
@@ -44,12 +47,12 @@ export function createGatewayServices({ organization, docker, SESSION_KEY, users
       return { user, expires: JSON.parse(Buffer.from(data, 'base64url').toString()).e };
     },
   }) : undefined;
-  function prepare(user) {
-    if (user.backend === 'aionui' && prepareNextFeishu) prepareNextFeishu(user);
-    if (preview && (user.backend === 'aionui' || legacy)) writeRelayKey(SESSION_KEY, user, user.backend === 'aionui' ? runtime.nextDirectory : runtime.usersDirectory, runtime.uid);
+  async function prepare(user) {
+    if (user.backend === 'aionui' && prepareNextFeishu) await prepareNextFeishu(user);
+    if (preview && (user.backend === 'aionui' || legacy)) await writeRelayKey(SESSION_KEY, user, user.backend === 'aionui' ? personalRuntime : legacyRuntime);
   }
   for (const user of users()) {
-    try { prepare(user); }
+    try { await prepare(user); }
     catch (error) { console.error(`[identity] ${user.slug}: personal setup unavailable (${error.code || error.name}); gateway startup continues`); }
   }
   let internal, timer;

@@ -3,45 +3,22 @@ const PREFIX = '/_wp/aionui/feishu';
 const SCRIPT = '/opt/workpartner/bin/feishu-onboard.py';
 const STATES = new Set(['unconnected', 'preparing', 'waiting', 'connected', 'needs_restart', 'restarting', 'restart_failed', 'needs_identity', 'expired', 'failed']);
 
-function dockerOutput(value) {
-  const buffer = Buffer.from(value);
-  let output = '';
-  for (let offset = 0; offset + 8 <= buffer.length;) {
-    const size = buffer.readUInt32BE(offset + 4);
-    output += buffer.subarray(offset + 8, offset + 8 + size).toString();
-    offset += 8 + size;
-  }
-  return output;
-}
-
-/** Container-only worker transport. The caller supplies server-generated arguments.
- * @param docker Docker HTTP adapter
- * @param uid Container owner's numeric uid
- * @returns Worker executor; raw command output is never logged or returned on failure.
- */
-export function feishuExecutor(docker, uid, containerPrefix = 'workpartner-next-') {
+/** Execute the fixed worker as the personal container owner. */
+export function feishuExecutor(runtime, uid) {
   return async (user, action, detached = false) => {
     const args = action === 'start' ? [action, `partner-${user.slug}`] : [action];
-    const created = await docker('POST', `/containers/${containerPrefix}${user.slug}/exec`, {
-      User: String(uid), AttachStdout: !detached, AttachStderr: !detached,
-      Cmd: ['python3', SCRIPT, ...args],
-    }, 10000);
-    if (created.status !== 201) throw new Error('worker unavailable');
-    const { Id } = JSON.parse(created.body);
-    const started = await docker('POST', `/exec/${encodeURIComponent(Id)}/start`, { Detach: detached, Tty: false }, 10000);
-    if (started.status !== 200) throw new Error('worker unavailable');
+    const result = await runtime.exec(user.slug, ['python3', SCRIPT, ...args], { user: String(uid), detached, timeout: 10000 });
     if (detached) return;
-    const inspected = await docker('GET', `/exec/${encodeURIComponent(Id)}/json`, undefined, 10000);
-    if (inspected.status !== 200 || JSON.parse(inspected.body).ExitCode !== 0) throw new Error('worker failed');
-    if (action === 'status') return JSON.parse(dockerOutput(started.body));
+    if (result.exitCode !== 0) throw new Error('worker failed');
+    if (action === 'status') return JSON.parse(result.logs);
   };
 }
 
 /** Authenticated, same-origin setup API. execute is injectable for keyless behavior tests.
- * @param options Dependencies: authenticate, docker, uid, origin, execute, log, restarted
+ * @param options Dependencies: authenticate, runtime, uid, origin, execute, log, restarted
  * @returns HTTP handler returning false for unrelated routes.
  */
-export function createFeishuOnboarding({ authenticate, docker, uid = 1001, origin, containerPrefix = 'workpartner-next-', execute = feishuExecutor(docker, uid, containerPrefix), log = console.log, restarted = () => {} }) {
+export function createFeishuOnboarding({ authenticate, runtime, uid = 1001, origin, execute = feishuExecutor(runtime, uid), log = console.log, restarted = () => {} }) {
   const restarting = new Map(), starting = new Map(), reported = new Set(), restartFailures = new Set();
   async function status(user, retry = false) {
     let value = await execute(user, 'status');
@@ -53,8 +30,7 @@ export function createFeishuOnboarding({ authenticate, docker, uid = 1001, origi
         const task = (async () => {
           try {
             await execute(user, 'restarting');
-            const result = await docker('POST', `/containers/${containerPrefix}${user.slug}/restart?t=10`, undefined, 30000);
-            if (result.status !== 204) throw new Error('restart failed');
+            await runtime.restart(user.slug);
             await execute(user, 'connected');
             restarted(user.slug);
             return { status: 'connected' };
