@@ -93,13 +93,19 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 | `hostPaths.usersFile` | 无，必填 | 节点已有用户文件 → runtime.usersFile。 |
 | `egressExceptCidrs` | 无，必须显式提供，可为 `[]` | 补充禁止用户访问的 IPv4 CIDR，必须包括全部节点公网地址 `/32`；例如 `192.0.2.10/32`。自动合并链路本地、RFC1918、共享地址及回环网段，详见模板。 |
 | `modelEgressSelector` | 与 endpoint 必须二选一 | 非空标签映射，必须含 `workpartner/role: model-egress`，不能选中网关 Pod；模型出口工作负载由部署方提供。 |
-| `modelEgressEndpoint` | 与 selector 必须二选一 | `{ "address": "192.0.2.10", "port": 4100 }`，固定出口 IPv4 字面量和整数 TCP 端口（1–65535）。禁止未指定地址、回环及链路本地地址（包括元数据地址）；不能填域名、CIDR 或含端口的 address。 |
+| `modelEgressEndpoint` | 与 selector 必须二选一 | `{ "address": "192.0.2.10", "port": 4100 }`，仅用于所有节点均可经路由到达、且不是任何节点本机地址的外部端点；Docker 网桥服务用中继 Pod + selector，见[模型出口与 Docker 中继](#model-egress-routing)。固定出口 IPv4 字面量和整数 TCP 端口（1–65535）；禁止未指定地址、回环及链路本地地址（包括元数据地址），不能填域名、CIDR 或含端口的 address。 |
 | `newUserStorage.provisioner` | 无，必填 | 已安装的 provisioner，例如 `rancher.io/local-path`；渲染器不安装 provisioner。 |
 | `newUserStorage.parameters` | `{}` | 字符串映射，原样交给 provisioner；确认其实际支持。 |
 
 所有 hostPaths 必须是非根绝对路径且事先存在。sessionKeyFile、cookieFile、identity.appSecretFile，以及配置 migration 时的 ownersFile，必须在网关 secureDirectory 或 stateDirectory 内。渲染器要求网关与模型 URL 使用短 Service 名，不能用节点 IP、外部域名或完整集群域名替代。生成的 StorageClass 固定为 `Retain`、`WaitForFirstConsumer`。当前网络清单的公网放行/排除使用 IPv4；node-guard 支持 IPv4/IPv6 地址（如 `2001:db8::10`），不能据此宣称整个方案已完成双栈验收。
 
-固定出口模式示例（合并到完整组织配置，删除 `modelEgressSelector`）：
+<a id="model-egress-routing"></a>
+
+### 模型出口与 Docker 中继
+
+`modelEgressEndpoint` 只适用于从所有节点上的 Pod 都能经路由到达的外部端点，目标不能是任何节点的本机地址（包括节点接口和 Docker 网桥地址）。可路由的外部私网端点也可使用，但必须逐节点验证路由；仅在一个 Pod 中连通不能证明多节点可用。RFC1918 地址会触发渲染器的英文 stderr 警告，提醒核实拓扑；警告不拒绝配置，也不改变清单。
+
+固定外部端点模式示例（合并到完整组织配置，删除 `modelEgressSelector`）：
 
 ```json
 {
@@ -123,7 +129,118 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 
 Service 仍叫 `model-egress`，对外端口仍为模型 URL 的 4000；无 selector，由同系统命名空间的 IPv4 EndpointSlice 指向 `192.0.2.10:4100`。目标端口可以不同于 Service 端口；baseUrl 与非空 nextBaseUrl 的主机和端口仍必须一致。实现遵循 Kubernetes 的 [无 selector Service 与 EndpointSlice 关联方式](https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors)。
 
-用户出站策略单独放行 `192.0.2.10/32` 的 TCP 4100；原有私网及 `egressExceptCidrs` 排除项保持不变。实际出口落在被排除的私网段内时，也仅增加该地址/端口的例外。固定出口模式不生成模型 Pod 入站策略。若出口是宿主网桥发布的服务，address 应填写从 Pod 可达的网桥地址；不要填写被 Docker raw 规则丢弃的容器地址。部署时验证节点路由、防火墙与 CNI 的实际转发路径。
+用户出站策略单独放行 `192.0.2.10/32` 的 TCP 4100；原有私网及 `egressExceptCidrs` 排除项保持不变。实际出口落在被排除的私网段内时，也仅增加该地址/端口的例外。固定出口模式不生成模型 Pod 入站策略。
+
+Docker 网桥发布的模型服务不能把网桥地址直接填入 `modelEgressEndpoint.address`，原因有两条：
+
+1. 多个节点常有相同网段、相同地址的 Docker 网桥。其他节点上的 Pod 访问这个地址会落到其本节点宿主机，而不是运行目标 Docker 服务的节点。
+2. 同节点 Pod 经 Service（ClusterIP）访问网桥端点时，在这里的 kube-proxy / Docker 转发路径中，kube-proxy 先 DNAT 到网桥地址，包进入宿主 INPUT，被 node-guard 的 `iifname cni0 drop` 拦截。Service 不保证再经过 Docker 发布端口的 DNAT。
+
+正确接法是在 Docker 所在节点的 `runtime.k8s.systemNamespace` 中运行 TCP 中继 Pod，用 `modelEgressSelector` 选中它。用户 Pod → 模型 Service → 中继 Pod；中继新建 TCP 连接，直连本节点 Docker **网桥上发布的端口**。后一条连接经 Docker DNAT 到容器后走 FORWARD，不经宿主 INPUT；不要改用可能被 Docker raw 规则丢弃的容器地址，也不要把中继的上游再指向该 Service。Docker 发布端口的 NAT 行为见[官方防火墙说明](https://docs.docker.com/engine/network/packet-filtering-firewalls/)。部署时仍须验证 CNI、Docker DNAT/FORWARD 规则及两节点实际连通性。
+
+以下配置片段与 Deployment 配套使用，删除 `modelEgressEndpoint`；`model.baseUrl` 与 `model.nextBaseUrl` 仍使用 `http://model-egress:4000/v1`：
+
+```json
+{
+  "runtime": {
+    "k8s": {
+      "systemNamespace": "workpartner-system",
+      "deploy": {
+        "modelEgressSelector": {
+          "workpartner/role": "model-egress",
+          "example.com/component": "model-relay"
+        }
+      }
+    }
+  }
+}
+```
+
+Deployment 由部署方另行提供，渲染器不会生成它。只在运行目标 Docker 服务的节点设置 `example.com/model-relay: "true"` 标签，使 `nodeSelector` 唯一钉住该节点。示例 `192.0.2.10` 是文档占位地址，部署时替换为**该节点 Docker 网桥地址**，4100 替换为 Docker 发布端口；4000 必须与模型 Service 端口一致。镜像占位引用须替换为含 Node.js 的已核验镜像，并预先导入目标节点。若目标节点有 NoSchedule 污点，按实际配置添加对应 tolerations。
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-relay
+  namespace: workpartner-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      workpartner/role: model-egress
+      example.com/component: model-relay
+  template:
+    metadata:
+      labels:
+        workpartner/role: model-egress
+        example.com/component: model-relay
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        example.com/model-relay: "true"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: example.com/workpartner/tcp-relay:release
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: UPSTREAM_HOST
+              value: "192.0.2.10"
+            - name: UPSTREAM_PORT
+              value: "4100"
+          command: [node, -e]
+          args:
+            - |
+              const net = require('node:net');
+              const server = net.createServer(client => {
+                const upstream = net.createConnection({
+                  host: process.env.UPSTREAM_HOST,
+                  port: Number(process.env.UPSTREAM_PORT),
+                });
+                const close = () => { client.destroy(); upstream.destroy(); };
+                client.on('error', close).on('close', close);
+                upstream.on('error', close).on('close', close);
+                upstream.setTimeout(10000, close);
+                upstream.once('connect', () => upstream.setTimeout(0));
+                client.pipe(upstream).pipe(client);
+              });
+              server.on('error', error => { console.error(error.message); process.exit(1); });
+              server.listen(4000, '0.0.0.0');
+          ports:
+            - name: model
+              containerPort: 4000
+          readinessProbe:
+            tcpSocket:
+              port: model
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: model
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+```
+
+selector 模式生成的 `workpartner-model-ingress` 允许用户 Pod 和网关 Pod 访问中继的模型端口；系统命名空间若另有出站限制，需允许中继直连 Docker 发布端口。`tcpSocket` 探针只确认中继正在监听，不证明上游模型可用；上线前须从每个用户节点发起真实模型请求，验证中继到 Docker 的连接及响应。
 
 ### 迁移归属配置
 
@@ -215,7 +332,7 @@ StatefulSet 只能有 0/1 副本，`OnDelete` 更新。重复 create 保留副�
 
    后续重渲染使用 `--only Namespace,ServiceAccount,Role,RoleBinding,PriorityClass,Deployment,Service,EndpointSlice,NetworkPolicy,StorageClass`，排除 ConfigMap，避免清空已有镜像登记。即使 --only 也校验完整配置。
 5. **镜像分发。** 将用户镜像导入全部可能运行用户/维护 Pod 的节点，网关镜像导入选定网关节点并核实 ID，步骤见下一节。任何节点失败都先处理，不切换用户。所有相关容器（包括 init）使用 imagePullPolicy=Never。
-6. **网关上线。** 应用 Deployment 文件，检查 Pod、Service、RBAC、状态及凭据挂载。模板是单副本 Recreate、TCP liveness probe。迁移场景此时已配置 ownersFile 路径，尚无有效归属时请求 503 是预期保护；在完成第 7 步前不接入用户流量。Docker peer 仅在内部可达位置发布，验证跨 CNI/Docker 的 DNAT 路径，避免依赖会被 guard 阻止的宿主监听。
+6. **网关上线。** 应用 Deployment 文件，检查 Pod、Service、RBAC、状态及凭据挂载。模板是单副本 Recreate、TCP liveness probe。迁移场景此时已配置 ownersFile 路径，尚无有效归属时请求 503 是预期保护；在完成第 7 步前不接入用户流量。Docker peer 仅在内部可达位置发布，验证跨 CNI/Docker 的 DNAT 路径，避免依赖会被 guard 阻止的宿主监听。网关 Pod 访问同节点 Docker 服务（包括迁移 peer）时，应直连该节点网桥上的 Docker 发布端口，不要经指向网桥地址的 Kubernetes Service；确保网关调度在该 Docker 节点，原因见[模型出口与 Docker 中继](#model-egress-routing)。
 7. **归属文件与入口。** 在共享父目录原子放入 `version:1/default:docker/users:{}` 初始文件，两网关确认读取一致后再接流量；已有归属文件必须保留，不能重新清空。配置两端 peerOrigin，验证未迁移用户转发、旧版用户及 WebSocket。测试网关通过部署参考的登录、文件、模型、预览、技能上传、授权、重置口令、镜像重建检查，再按单用户步骤切换。网关 Pod 重启不应影响用户 Pod。
 
 迁移先试点一人观察 48 小时，再按批准节奏每批约 10 人、逐人 verify、每批 status 无报警并观察。切换 default 到 k8s 前，为仍需 Docker 的 AionUi 用户保留显式条目，避免未迁移用户因缺省归属变化被错误接管；新用户之后由 newUserNodeSelector 和 StorageClass 落盘。正式入口切换及首批迁移遵循规格中的授权条件。

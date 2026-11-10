@@ -204,6 +204,15 @@ function context(organization) {
     ...(invalid.length ? [`Invalid configuration: ${invalid.join(', ')}`] : []),
   ].join('\n'));
   const warnings = [];
+  if (hasModelEndpoint) {
+    const [first, second] = modelEndpoint.address.split('.').map(Number);
+    if (first === 10 || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)) {
+      warnings.push('modelEgressEndpoint.address is in an RFC1918 private range; ensure it is an external endpoint '
+        + 'routable from every node, not a node-local or Docker bridge address. For Docker services, use a relay Pod '
+        + 'with modelEgressSelector. See docs/kubernetes.md#model-egress-routing.');
+    }
+  }
   if (entry.mode === 'hostPort' && `${entry.hostIP}:${entry.hostPort}` !== runtime.localAddress) {
     warnings.push('hostPort entry hostIP/hostPort differs from runtime.localAddress; '
       + 'the tunnel targets runtime.localAddress. Align the organization configuration with the entry.');
