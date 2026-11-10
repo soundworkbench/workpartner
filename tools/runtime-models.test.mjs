@@ -426,6 +426,79 @@ test('runtime address adapts legacy endpoints without assuming their network nam
   }
 });
 
+test('legacy runtime exposes only supported operations and requires an existing endpoint', async t => {
+  const { createLegacyRuntime } = await import('../gateway/runtime/index.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-legacy-runtime-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const calls = [];
+  const runtime = createLegacyRuntime({ runtime: {
+    containerPrefix: 'old-', usersDirectory: path.join(dir, 'legacy'),
+    nextContainerPrefix: 'new-', nextDirectory: path.join(dir, 'next'), uid: process.getuid(),
+  } }, { docker: async (method, route) => {
+    calls.push({ method, route });
+    if (route === '/containers/old-person/exec') return { status: 201, body: '{"Id":"job"}' };
+    if (route === '/exec/job/start') return { status: 200, body: Buffer.alloc(0) };
+    if (route === '/exec/job/json') return { status: 200, body: '{"ExitCode":0}' };
+    if (route === '/containers/old-person/stop?t=10' || route === '/containers/old-person?force=1') return { status: 204 };
+    throw new Error('Unexpected legacy request: ' + route);
+  } });
+  assert.deepEqual(Object.keys(runtime).sort(), ['address', 'exec', 'putFiles', 'readFile', 'remove', 'removeFiles', 'stop']);
+  await assert.rejects(runtime.address('person'), /Legacy runtime does not support.*existing/i);
+  assert.deepEqual(await runtime.address('person', 9000, { ip: 'old-host', port: 8000 }), { host: 'old-host', port: 9000 });
+  assert.deepEqual(await runtime.address('person', undefined, { address: { host: 'old-host', port: 8000 } }), { host: 'old-host', port: 8000 });
+  for (const existing of [null, {}, { ip: '' }, { address: null }]) assert.equal(await runtime.address('person', 9000, existing), null);
+  assert.deepEqual(calls, [], 'address must not discover a legacy network');
+  await runtime.putFiles('person', [{ path: 'config', content: 'legacy data' }]);
+  assert.equal(await runtime.readFile('person', 'config'), 'legacy data');
+  assert.equal(fs.readFileSync(path.join(dir, 'legacy/person/config'), 'utf8'), 'legacy data');
+  assert.equal(fs.existsSync(path.join(dir, 'next')), false);
+  await runtime.removeFiles('person', ['config']);
+  await assert.rejects(runtime.readFile('person', 'config'), { code: 'ENOENT' });
+  assert.deepEqual(await runtime.exec('person', ['true']), { exitCode: 0, stdout: '', stderr: '', logs: '' });
+  assert.equal((await runtime.stop('person')).status, 204);
+  assert.equal((await runtime.remove('person')).status, 204);
+  assert.deepEqual(calls.slice(-2), [
+    { method: 'POST', route: '/containers/old-person/stop?t=10' },
+    { method: 'DELETE', route: '/containers/old-person?force=1' },
+  ]);
+});
+
+for (const tail of ['header', 'payload']) {
+  const frame = (type, text) => {
+    const header = Buffer.alloc(8); header[0] = type; header.writeUInt32BE(Buffer.byteLength(text), 4);
+    return Buffer.concat([header, Buffer.from(text)]);
+  };
+  const partial = frame(1, 'discard').subarray(0, tail === 'header' ? 5 : 10);
+  const runtimeWithOutput = body => createDockerRuntime({ docker: async (method, route) => {
+    if (route.endsWith('/exec')) return { status: 201, body: '{"Id":"job"}' };
+    if (route.endsWith('/json')) return { status: 200, body: '{"ExitCode":0}' };
+    if (route.includes('/create?')) return { status: 201 };
+    if (route.endsWith('/wait')) return { status: 200, body: '{"StatusCode":0}' };
+    return { status: 200, body };
+  } });
+
+  test(`runtime exec and runOnce ignore a truncated ${tail} after complete frames`, async () => {
+    const runtime = runtimeWithOutput(Buffer.concat([frame(1, 'out'), frame(2, 'err'), frame(1, 'last'), partial]));
+    assert.deepEqual(await runtime.exec('person', ['fixture']), { exitCode: 0, stdout: 'outlast', stderr: 'err', logs: 'outerrlast' });
+    assert.deepEqual(await runtime.runOnce('person', { cmd: ['fixture'] }), { exitCode: 0, logs: 'outerrlast' });
+  });
+
+  test(`Feishu status ignores a truncated ${tail} after complete JSON`, async () => {
+    const { feishuExecutor } = await import('../gateway/feishu-onboarding.mjs');
+    const runtime = runtimeWithOutput(Buffer.concat([frame(1, '{"status":'), frame(2, '"connected"'), frame(1, '}'), partial]));
+    assert.deepEqual(await feishuExecutor(runtime)({ slug: 'person' }, 'status'), { status: 'connected' });
+  });
+
+  test(`market skills and bounded exec reject a truncated ${tail} even after valid JSON`, async () => {
+    const { skillExecutor } = await import('../gateway/market-skills.mjs');
+    const runtime = runtimeWithOutput(Buffer.concat([frame(1, '{"skills":[]}'), partial]));
+    await assert.rejects(skillExecutor(runtime)({ slug: 'person' }, 'list'), /Truncated runtime output/);
+    for (const options of [{ maxOutputBytes: 1024 }, { maxOutputBytes: 1024, strictOutput: false }, { strictOutput: true }]) {
+      await assert.rejects(runtime.exec('person', ['fixture'], options), /Truncated runtime output/);
+    }
+  });
+}
+
 test('skill upload cleanup survives renaming its parent while the worker runs', async t => {
   const { skillExecutor } = await import('../gateway/market-skills.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-rename-'));
@@ -645,6 +718,7 @@ const runtime = createDockerRuntime({ docker: async (method, route, body, timeou
   if (route.endsWith('/json')) return { status: 200, body: '{"ExitCode":0}' };
   const chunks = command[1] === 'add' ? [frame(1, 'key-'), frame(2, 'fix'), frame(1, 'ture')]
     : command[1] === 'list' ? [frame(1, '42 '), frame(2, 'fixture-' + slug), frame(1, ' active\\n')] : [];
+  if (process.env.WP_TEST_OUTPUT_TAIL) chunks.push(frame(1, 'discard').subarray(0, Number(process.env.WP_TEST_OUTPUT_TAIL)));
   return { status: 200, body: Buffer.concat(chunks) };
 } });
 const user = await provision(runtime, { unionId: 'fixture-union', name: 'Fixture' });
@@ -657,9 +731,13 @@ assert.ok(calls.filter(call => call.method === 'POST').every(call => call.timeou
 assert.ok(calls.filter(call => call.route.endsWith('/exec')).every(call => call.route === '/containers/provisioner/exec'));
 assert.equal(calls.filter(call => call.route === '/exec/job/json').length, 3);
 `;
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8',
-    env: { ...process.env, WORKPARTNER_ORG_DIR: dir } });
-  assert.equal(result.status, 0, result.stderr);
+  for (const tail of ['', '5', '10']) {
+    for (const name of fs.readdirSync(dir).filter(name => name.endsWith('.key'))) fs.rmSync(path.join(dir, name));
+    fs.writeFileSync(path.join(dir, 'users.json'), '[]');
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8',
+      env: { ...process.env, WORKPARTNER_ORG_DIR: dir, WP_TEST_OUTPUT_TAIL: tail } });
+    assert.equal(result.status, 0, `output tail=${tail || 'none'}: ${result.stderr}`);
+  }
 });
 
 test('exported Docker transport preserves callback arguments, Buffer responses and timeout errors', async t => {

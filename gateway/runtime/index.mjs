@@ -5,6 +5,7 @@ import { createDockerRuntime } from './docker.mjs';
  * Runtime methods are asynchronous; inspect returns normalized state and address returns {host, port} or null.
  * create(user, {modelConfig}) uses the configured image and limits; exec/execNamed return {exitCode, stdout, stderr, logs}.
  * logs preserves stdout/stderr frame order; createTimeout and timeout control exec creation and start separately.
+ * Incomplete output frames are ignored unless strictOutput is true or maxOutputBytes is supplied.
  * Detached exec returns a null exitCode. runOnce accepts {name, image, entrypoint, cmd, timeoutMs}.
  * File paths are relative to the personal data root; putFiles accepts [{path, content, mode}].
  * Its optional cleanup paths return an opaque lease to pass to removeFiles(slug, paths, lease) after use.
@@ -24,4 +25,18 @@ export function createRuntime(organization, overrides = {}) {
     memory: r.nextMemory, nanoCpus: r.nanoCpus, pidsLimit: r.nextPidsLimit,
     ...overrides,
   });
+}
+
+/** Legacy containers only support operations independent of next-runtime image, mounts and networks. */
+export function createLegacyRuntime(organization, overrides = {}) {
+  const runtime = createRuntime(organization, {
+    ...overrides, containerPrefix: organization.runtime.containerPrefix, dataDir: organization.runtime.usersDirectory,
+  });
+  const { putFiles, readFile, removeFiles, exec, stop, remove } = runtime;
+  return { putFiles, readFile, removeFiles, exec, stop, remove,
+    address: async (slug, port, existing) => {
+      if (existing === undefined) throw new Error('Legacy runtime does not support address lookup without an existing endpoint');
+      return runtime.address(slug, port, existing);
+    },
+  };
 }

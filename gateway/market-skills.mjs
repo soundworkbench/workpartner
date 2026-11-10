@@ -18,7 +18,7 @@ export function skillExecutor(runtime, uid = 1001) {
       const source = temporary && `/data/${temporary}/${filename}`;
       const args = action === 'install' ? [...(overwrite ? ['--overwrite'] : []), action, '--', source]
         : action === 'delete' ? [action, '--', name] : ['list'];
-      const result = await runtime.exec(user.slug, ['/opt/workpartner/bin/wp-skill', ...args], { user: String(uid) });
+      const result = await runtime.exec(user.slug, ['/opt/workpartner/bin/wp-skill', ...args], { user: String(uid), strictOutput: true });
       if (result.exitCode !== 0) throw new Error('worker failed');
       return JSON.parse(result.stdout);
     } finally {
