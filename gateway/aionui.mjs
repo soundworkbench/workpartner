@@ -74,6 +74,7 @@ const sleepFor = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 export function createAionui(o) {
   const { runtime, sleep = sleepFor, log = console.log, now = Date.now } = o;
+  const owns = o.owns || (() => true);
   const maxJobs = o.maxJobs ?? 2;
   const resetBackoffMs = o.resetBackoffMs ?? 60000;
   const waitTimeoutMs = o.waitTimeoutMs ?? 60000;
@@ -130,6 +131,7 @@ export function createAionui(o) {
   // 同一人的并发请求共用一次核对，所以同一人最多一个任务；不同人的任务达到 maxJobs 后不排队，直接返回 null。
   function upstream(user) {
     const { slug } = user;
+    if (!owns(user)) return Promise.resolve(null);
     if (jobs.has(slug)) return Promise.resolve(null);
     if (!resolving.has(slug)) resolving.set(slug, resolveUpstream(user).finally(() => resolving.delete(slug)));
     return resolving.get(slug);
@@ -138,6 +140,7 @@ export function createAionui(o) {
   async function resolveUpstream(user) {
     const { slug } = user;
     const info = await runtime.inspect(slug);
+    if (!owns(user) || jobs.has(slug)) return null;
     const hasPass = fs.existsSync(passFile(slug));
     const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
     let stale = info.exists && info.image !== o.image;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
@@ -299,5 +302,39 @@ export function createAionui(o) {
   /** 转发失败（网络被断开等）时调用：下次请求重新核对网络。 */
   const forget = (slug) => { joined.delete(slug); };
 
-  return { upstream, session, forget, pending: (slug) => jobs.get(slug) };
+  let keepRunningTimer, keeping;
+  function keepRunning(users) {
+    if (o.kind !== 'k8s') return Promise.resolve();
+    if (keeping) return keeping;
+    keeping = (async () => {
+      for (const user of users()) {
+        const { slug } = user;
+        if (user.backend !== 'aionui' || !owns(user) || jobs.has(slug) || resolving.has(slug)) continue;
+        const job = Promise.resolve().then(async () => {
+          const info = await runtime.inspect(slug);
+          // Only an explicit zero is stopped; older runtimes may omit these fields.
+          if (!owns(user) || !info.exists || info.replicas !== 0 || info.running
+            || Object.hasOwn(info.annotations || {}, 'workpartner/paused')) return;
+          await runtime.start(slug);
+          log(`Workspace kept running: ${slug}`);
+        }).catch(error => log(`Workspace keep-running failed: ${slug} (${error.code || error.name})`))
+          .finally(() => jobs.delete(slug));
+        jobs.set(slug, job);
+        await job;
+      }
+    })().finally(() => { keeping = undefined; });
+    return keeping;
+  }
+  function startKeepRunning(users, intervalMs = 300000) {
+    clearInterval(keepRunningTimer);
+    if (o.kind !== 'k8s' || intervalMs === 0) return;
+    if (!Number.isFinite(intervalMs) || intervalMs < 0) throw new Error('Invalid keepRunningIntervalMs');
+    const tick = () => keepRunning(users).catch(error => log(`Workspace keep-running unavailable (${error.code || error.name})`));
+    void tick();
+    keepRunningTimer = setInterval(tick, intervalMs);
+    keepRunningTimer.unref();
+  }
+  const close = () => clearInterval(keepRunningTimer);
+
+  return { upstream, session, forget, keepRunning, startKeepRunning, close, pending: (slug) => jobs.get(slug) };
 }
