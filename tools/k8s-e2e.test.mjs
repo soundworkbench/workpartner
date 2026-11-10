@@ -273,21 +273,32 @@ test('S11 retries probe errors and waits for both HTTP controls; timeout still f
   await assert.rejects(s.run(c), /Condition timed out/);
 });
 
-test('S12 retries positive and negative controls together and never accepts an open node port', async () => {
+test('S12 retries only the positive control and fails immediately on an open node port', async () => {
   const s = scenarios.find(s => s.id === 'S12');
   let positive = 0, denied = 0;
   const c = { config: { guard: true, policyTimeoutMs: 2000, nodeIps: ['192.0.2.10'], gatewayIp: '192.0.2.20', samplePort: 18081 },
+    name: slug => `fixture-${slug}`,
     from: async (_, target) => {
       if (target.kind === 'route') return '192.0.2.10';
       if (target.host === '192.0.2.20') return { open: ++positive > 1 };
       if ([6443, 10250].includes(target.port)) return { open: true };
-      return { open: ++denied === 1 };
+      denied++; return { open: false };
     } };
   const evidence = await s.run(c);
-  assert.equal(positive, 4);
+  assert.equal(positive, 3);
+  assert.equal(denied, 4);
   assert.ok(evidence.rows.filter(r => r.label === 'nft node denial').every(r => r.open === false));
-  c.config.policyTimeoutMs = 10; c.from = async (_, target) => target.kind === 'route' ? '192.0.2.10' : { open: true };
-  await assert.rejects(s.run(c), /Condition timed out/);
+  c.from = async (_, target) => {
+    if (target.kind === 'route') return c.config.nodeIps[0];
+    if (target.host === c.config.gatewayIp) return { open: true };
+    // A transient open denial must fail, even if a retry would be closed.
+    return { open: ++denied === 5 };
+  };
+  await assert.rejects(s.run(c), /nft node denial/);
+  assert.equal(denied, 5);
+  c.config.policyTimeoutMs = 10;
+  c.from = async (_, target) => target.kind === 'route' ? c.config.nodeIps[0] : { open: false };
+  await assert.rejects(s.run(c), /Policy convergence timed out for Pod fixture-node-server-0/);
 });
 
 test('S9 chooses a K2a required policy by name and SSH defaults are noninteractive', () => {

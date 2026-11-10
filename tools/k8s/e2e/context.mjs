@@ -21,6 +21,24 @@ export function labelObject(object, prefix) {
     labels: { ...body.spec.template.metadata?.labels, 'workpartner-e2e': prefix } };
   return body;
 }
+export function probeRunners(runtime, client, config, script) {
+  async function run(exec, spec) {
+    let result;
+    try { result = await exec(); } catch (error) {
+      if (!/timeout|timed out/i.test(`${error.reason} ${error.code} ${error.message}`)) throw error;
+      const reason = `Probe timed out (kind=${spec.kind ?? 'tcp'}, host=${spec.host ?? 'n/a'}, port=${spec.port ?? 'n/a'}): ${error.reason || error.code || 'Timeout'}`;
+      // The runner records reason, not arbitrary exception messages or output.
+      throw Object.assign(new Error(reason, { cause: error }), { reason, code: error.code });
+    }
+    assert.equal(result.exitCode, 0, 'Probe process must complete');
+    return JSON.parse(result.stdout);
+  }
+  const args = ['node', '--input-type=module', '-e', script];
+  return {
+    from: (slug, spec) => run(() => runtime.exec(slug, args, { stdin: JSON.stringify(spec), timeout: 6000 }), spec),
+    fromProbe: spec => run(() => client.exec(config.probeNamespace, config.probeName, 'probe', args, { stdin: JSON.stringify(spec), timeoutMs: 6000 }), spec),
+  };
+}
 export async function context(config) {
   const { createRuntime } = await import('../../../gateway/runtime/index.mjs');
   const { createKubeClient } = await import('../../../gateway/runtime/kube-client.mjs');
@@ -53,15 +71,6 @@ export async function context(config) {
   const source = await fs.readFile(new URL('./probe.mjs', import.meta.url), 'utf8');
   // Avoid depending on files in the user image; stdin only contains probe arguments.
   const script = source.slice(0, source.indexOf('// The same source')) + '\nconsole.log(JSON.stringify(await probe(JSON.parse(readFileSync(0,"utf8")))));';
-  async function from(slug, spec) {
-    const result = await runtime.exec(slug, ['node', '--input-type=module', '-e', script], { stdin: JSON.stringify(spec), timeout: 6000 });
-    assert.equal(result.exitCode, 0, 'Probe process must complete');
-    return JSON.parse(result.stdout);
-  }
-  async function fromProbe(spec) {
-    const result = await client.exec(config.probeNamespace, config.probeName, 'probe', ['node', '--input-type=module', '-e', script], { stdin: JSON.stringify(spec), timeoutMs: 6000 });
-    assert.equal(result.exitCode, 0, 'Probe process must complete');
-    return JSON.parse(result.stdout);
-  }
+  const { from, fromProbe } = probeRunners(runtime, client, config, script);
   return { config, org, client, runtime, makeRuntime, create, ready, ns, sys, core, name, pod, pods, from, fromProbe, probe, probeScript: script };
 }

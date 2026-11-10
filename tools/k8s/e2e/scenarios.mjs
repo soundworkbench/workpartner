@@ -15,6 +15,19 @@ async function checkMatrix(c, source, targets, rows) {
     assert.equal(result.open, target.open, `${source}: ${target.label}`);
   }
 }
+async function waitForPolicy(c, slugs, check) {
+  let slug;
+  try {
+    await until(async () => {
+      for (slug of slugs) await check(slug);
+      return true;
+    }, c.config.policyTimeoutMs ?? 60000, 200);
+  } catch (error) {
+    const last = error.cause;
+    const reason = `Policy convergence timed out for Pod ${c.name(slug)}-0 (${slug}); last error: ${last?.reason || last?.message || String(last)}`;
+    throw Object.assign(new Error(reason, { cause: error }), { reason });
+  }
+}
 export const scenarios = [
   { id: 'S1', title: 'Lifecycle and persistent data', async run(c) {
     const s = 'lifecycle', r = c.runtime;
@@ -196,6 +209,10 @@ export const scenarios = [
   } },
   { id: 'S10', title: 'Two-node network matrix', async run(c) {
     const rows = [], gateway = new URL(c.org.runtime.gatewayOrigin), model = new URL(c.org.model.baseUrl);
+    await waitForPolicy(c, ['node-server', 'node-agent'], async slug => {
+      const dns = await c.from(slug, { kind: 'dns', host: gateway.hostname });
+      assert.deepEqual([...new Set(dns)], [c.config.gatewayIp]);
+    });
     for (const slug of ['node-server', 'node-agent']) {
       const dns = await c.from(slug, { kind: 'dns', host: gateway.hostname });
       assert.deepEqual([...new Set(dns)], [c.config.gatewayIp]);
@@ -256,14 +273,11 @@ export const scenarios = [
     const rows = [];
     for (const slug of ['node-server', 'node-agent']) {
       const cni = await c.from(slug, { kind: 'route' });
-      const converged = await until(async () => {
-        // Check the positive control and all denials in the same attempt.
+      await waitForPolicy(c, [slug], async () => {
+        // Only the allowed control may retry while policy removal converges.
         assert.equal((await c.from(slug, { host: c.config.gatewayIp, port: c.config.samplePort })).open, true);
-        const attemptRows = [];
-        await checkMatrix(c, slug, [...new Set([...c.config.nodeIps, cni])].flatMap(host => [22, c.config.samplePort].map(port => ({ host, port, open: false, label: 'nft node denial' }))), attemptRows);
-        return attemptRows;
-      }, c.config.policyTimeoutMs ?? 60000, 200);
-      rows.push(...converged);
+      });
+      await checkMatrix(c, slug, [...new Set([...c.config.nodeIps, cni])].flatMap(host => [22, c.config.samplePort].map(port => ({ host, port, open: false, label: 'nft node denial' }))), rows);
       // These are documented exceptions, not negative assertions.
       for (const host of c.config.nodeIps) for (const port of [6443, 10250]) rows.push({ source: slug, host, port, exception: true, ...await c.from(slug, { host, port }) });
 
