@@ -14,8 +14,10 @@ function singleLine(value) {
 
 const zh = JSON.parse(readFileSync(translations, 'utf8'));
 const lines = [];
+const groupFile = join(skills, '.wp-feishu-skills.json');
+const feishu = new Set(existsSync(groupFile) ? JSON.parse(readFileSync(groupFile, 'utf8')) : []);
 for (const entry of readdirSync(skills, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
-  if (!entry.isDirectory()) continue;
+  if (!entry.isDirectory() || (feishu.has(entry.name) && entry.name !== "feishu")) continue;
   const file = join(skills, entry.name, 'SKILL.md');
   if (!existsSync(file)) continue;
   const source = readFileSync(file, 'utf8').replace(/^\uFEFF/u, '');

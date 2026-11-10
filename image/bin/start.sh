@@ -23,23 +23,25 @@ if [ -d /tmp/aionui ] && [ ! -L /tmp/aionui ]; then
   cp -an /tmp/aionui/. /data/work/上传/ && rm -rf /tmp/aionui || exit 1
 fi
 ln -sfnT /data/work/上传 /tmp/aionui || exit 1
-# 个人设置只在第一次写；公司技能每次启动同步（覆盖同名，保留本人另装的）。
-[ -f /data/.claude/settings.json ] || cp /opt/workpartner/home/claude-settings.json /data/.claude/settings.json
+# Follow organization defaults until the user chooses a different model.
+python3 -I /opt/workpartner/bin/wp-model-defaults.py claude \
+  /opt/workpartner/home/claude-settings.json /data/.claude/settings.json \
+  "$ANTHROPIC_MODEL" "$PARTNER_DEFAULT_EFFORT" || exit 1
+bash /opt/workpartner/agent-baseline/install.sh /data/.claude /data/.claude/hooks >/dev/null 2>&1 || echo "警告：防阻塞钩子没装上，继续启动" >&2
+# Claude's environment model must agree with an existing personal selection.
+ANTHROPIC_MODEL=$(python3 -I -c 'import json, os; print(json.load(open("/data/.claude/settings.json")).get("model") or os.environ["ANTHROPIC_MODEL"])') || exit 1
+export ANTHROPIC_MODEL
 cp -R /opt/workpartner/skills/. /data/.claude/skills/
 # Codex 直接链到镜像里的同一份公司技能；镜像里删掉的技能，留下的断链一并清掉。本人同名目录优先，不覆盖。
 for d in /opt/workpartner/skills/*/; do ln -sfnT "${d%/}" "$CODEX_HOME/skills/$(basename "$d")" 2>/dev/null; done
 find "$CODEX_HOME/skills" -maxdepth 1 -xtype l -delete
-if [ ! -f "$CODEX_HOME/config.toml" ]; then
-  python3 -I - /opt/workpartner/home/codex-config.toml "$CODEX_HOME/config.toml" <<'PYTHON'
-import json, os, sys
-from pathlib import Path
-# Quote as a TOML basic string; endpoint characters must not become template syntax.
-url = json.dumps(os.environ['MODEL_BASE_URL'], ensure_ascii=False)[1:-1]
-Path(sys.argv[2]).write_text(Path(sys.argv[1]).read_text().replace('__MODEL_BASE_URL__', url))
-PYTHON
+# 引擎启动前校正早期模型名，再比较组织默认值。
+if [ -f "$CODEX_HOME/config.toml" ]; then
+  python3 -I /opt/workpartner/bin/wp-normalize-codex-model.py "$CODEX_HOME/config.toml" || echo "警告：未更新 Codex 配置，继续启动" >&2
 fi
-# 引擎启动前校正早期模型名前缀，并为支持的提供方补齐原生网页搜索开关。
-python3 -I /opt/workpartner/bin/wp-normalize-codex-model.py "$CODEX_HOME/config.toml" || echo "警告：未更新 Codex 配置，继续启动" >&2
+python3 -I /opt/workpartner/bin/wp-model-defaults.py codex \
+  /opt/workpartner/home/codex-config.toml "$CODEX_HOME/config.toml" \
+  "$PARTNER_CODEX_MODEL" "$PARTNER_DEFAULT_EFFORT" || exit 1
 # 首次写整份说明；原样旧模板整份升级；个人说明只同步统一块，已有 AGENTS.md 不动。
 if ! instructions_error=$(python3 -I /opt/workpartner/bin/wp-sync-instructions.py \
   /opt/workpartner/home/CLAUDE.md /data/work "${PARTNER_USER_NAME:-同事}" 2>&1); then
@@ -59,6 +61,10 @@ python3 -I /opt/workpartner/bin/wp-seed.py "http://127.0.0.1:$AIONUI_PORT"
 # 消息桥：本人扫码建好机器人（生成 config.toml）之后才启动；没有就只跑网页版。
 if [ -f /data/.cc-connect/config.toml ]; then
   /opt/workpartner/bin/cc-connect --config /data/.cc-connect/config.toml &
+fi
+# 网关启用预览时先写入个人 relay key；独立启动且没有 key 时只运行对话入口。
+if [ -f /data/.zp-preview-relay-key ]; then
+  node /opt/workpartner/preview/workspace.mjs "$PARTNER_GATEWAY_ORIGIN" &
 fi
 # 任一进程退出就退出整个容器，由 Docker 的重启策略整体拉起。
 wait -n

@@ -5,6 +5,7 @@
   "displayName": "WorkPartner",
   "identity": {
     "provider": "feishu",
+    "callbackPath": "/_wp/callback",
     "admission": "unrestricted",
     "appSecretFile": "/secure/identity-app.secret",
     "appId": "",
@@ -20,16 +21,56 @@
     "baseEnvironment": "MODEL_BASE_URL",
     "nextBaseUrl": "",
     "defaults": {
-      "codex": "gpt-5",
-      "claude": "claude-sonnet-4-5",
-      "opus": "claude-opus-4-1",
-      "sonnet": "claude-sonnet-4-5",
-      "haiku": "claude-haiku-4-5",
+      "codex": "gpt-6.1-sol",
+      "claude": "claude-opus-5-5",
+      "opus": "claude-opus-5-5",
+      "sonnet": "claude-sonnet-5-5",
+      "haiku": "claude-haiku-5-5",
       "effort": "medium",
       "language": "zh-CN",
       "claudePrefix": "claude"
     },
-    "provision": null
+    "provision": null,
+    "catalog": {
+      "codex": [
+        {
+          "default": "codex",
+          "also": [
+            "default"
+          ],
+          "name": "GPT-6.1 Sol"
+        },
+        {
+          "id": "gpt-6.1-terra",
+          "key": "gpt-6.1-terra",
+          "name": "GPT-6.1 Terra"
+        }
+      ],
+      "claude": [
+        {
+          "default": "claude",
+          "also": [
+            "default",
+            "opus",
+            "opus[1m]"
+          ],
+          "name": "Opus 5.5"
+        },
+        {
+          "default": "sonnet",
+          "id": "sonnet",
+          "also": [
+            "sonnet[1m]"
+          ],
+          "name": "Sonnet 5.5"
+        },
+        {
+          "default": "haiku",
+          "id": "haiku",
+          "name": "Haiku 5.5"
+        }
+      ]
+    }
   },
   "runtime": {
     "project": "workpartner",
@@ -71,7 +112,8 @@
     "rolloutData": "/var/lib/workpartner",
     "rolloutSecure": "/etc/workpartner/secure",
     "rolloutKeyPrefix": "model-",
-    "modelContainer": ""
+    "modelContainer": "",
+    "stateDirectory": "/state"
   },
   "appearance": {
     "brandDirectory": "appearance",
@@ -85,7 +127,7 @@
       "tableFile": "copy.js",
       "appearanceName": "柔和",
       "streamingComment": "/* Shared streaming text algorithm, copied at build time. */",
-      "modelCatalogFile": "models.js"
+      "admissionMessage": "工作伙伴目前只对指定群组的成员开放。"
     },
     "gateway": {
       "mark": "<svg viewBox=\"0 0 64 64\" width=\"72\" height=\"72\" aria-hidden=\"true\"><rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#333\"/><path d=\"m14 22 8 22 10-17 10 17 8-22\" fill=\"none\" stroke=\"white\" stroke-width=\"4\"/></svg>",
@@ -101,7 +143,8 @@
     "avatarColor": "#333333"
   },
   "extensions": {
-    "configFiles": []
+    "configFiles": [],
+    "gatewayModule": ""
   },
   "productName": {
     "zh": "工作伙伴",
@@ -116,5 +159,12 @@
   },
   "bridge": {
     "template": ""
+  },
+  "features": {
+    "feishuAuthorization": false,
+    "feishuOnboarding": true,
+    "marketSkills": true,
+    "autoTitle": true,
+    "preview": true
   }
 }

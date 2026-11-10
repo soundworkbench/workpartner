@@ -346,14 +346,35 @@
   // 固定默认值：新建会话时把工作目录、免确认模式、模型和推理强度写进请求（工作目录、免确认模式由 rebrand.py 在构建时替换占位符）。
   // 工作目录一律是 /data/work（与消息桥同一个目录）；AionUi 自己给的临时目录（/data/aionui-data 下）也换掉。
   // 免确认模式按智能体取 AionUi 自己登记的值（Claude Code 是 bypassPermissions，Codex 是 agent-full-access）。
-  /* __WP_MODEL_CATALOG__ */
+  var WORKDIR = '__WP_WORKDIR__', PERM = '__WP_PERMISSION__';
+  var rawFetch = window.fetch;
+  var MODELS = {}, SAME_MODEL = {};
+  function sameModel(backend, id) { return (SAME_MODEL[backend] || {})[id] || id; }
+  function applyModelConfig(config) {
+    MODELS = config.catalog;
+    SAME_MODEL = { codex: {}, claude: {} };
+    ['codex', 'claude'].forEach(function (backend) {
+      (MODELS[backend] || []).forEach(function (m) {
+        SAME_MODEL[backend][m.key] = m.id;
+        (m.also || []).forEach(function (alias) { SAME_MODEL[backend][alias] = m.id; });
+      });
+      var model = config.defaults[backend];
+      SAME_MODEL[backend]['default'] = SAME_MODEL[backend][model] || model;
+    });
+  }
   var EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-  var keyModels = null, engineEffort = {};
-  rawFetch.call(window, '/api/settings/client').then(function (r) { return r.json(); })
+  var keyModels = null, engineEffort = {}, engineModels = {};
+  var modelSettingsReady = rawFetch.call(window, '/api/settings/client').then(function (r) { return r.json(); })
     .then(function (j) {
       var d = j.data || j;
+      if (d['wp.modelConfig']) applyModelConfig(d['wp.modelConfig']);
       if (Array.isArray(d['wp.models'])) keyModels = d['wp.models'];
       if (d['wp.effort'] && typeof d['wp.effort'] === 'object') engineEffort = d['wp.effort'];
+      engineModels = d['wp.engineModels'] || {};
+      ['codex', 'claude'].forEach(function (backend) {
+        if (engineModels[backend]) SAME_MODEL[backend]['default'] = sameModel(backend, engineModels[backend]);
+      });
+      schedule();
     }).catch(function () {});
   // 菜单里的模型：[{id: 显示和打勾用的模型, value: 切换时发给对话的值, name}]。当前模型始终在列表里。
   function modelsFor(backend, values, current) {
@@ -389,8 +410,10 @@
   }
   function homePick(backend) {
     var p = homeChosen(backend);
-    var ms = modelsFor(backend);
+    p.model = sameModel(backend, p.model || engineModels[backend]);
+    var ms = modelsFor(backend, null, p.model);
     if (!ms.some(function (m) { return m.id === p.model; })) p.model = ms.length ? ms[0].id : '';
+    p.effort = p.effort || engineEffort[backend] || 'medium';
     if (!effortsFor(learnedEfforts(backend)).some(function (e) { return e[0] === p.effort; })) p.effort = 'medium';
     return p;
   }
@@ -483,7 +506,7 @@
     }
     if (!(method === 'POST' && /\/api\/conversations(\?|$)/.test(url) && init && typeof init.body === 'string')) return rawFetch.call(this, input, init);
     ghostPosted = true;
-    return agentInfo().then(function (ids) {
+    return modelSettingsReady.then(agentInfo).then(function (ids) {
       try {
         var b = JSON.parse(init.body);
         b.extra = b.extra || {};
@@ -1137,7 +1160,7 @@
     var sel = document.querySelector('[data-assistant-selected="true"]');
     var backend = (sel && sel.dataset.assistantBackend) || 'codex';
     var p = homePick(backend);
-    return { backend: backend, model: p.model, effort: p.effort, models: modelsFor(backend), efforts: effortsFor(learnedEfforts(backend)) };
+    return { backend: backend, model: p.model, effort: p.effort, models: modelsFor(backend, null, p.model), efforts: effortsFor(learnedEfforts(backend)) };
   }
   function pickerLabel(st) {
     return modelName(st.backend, st.model) + (st.effort ? '<span class="wp-pick-effort">' + effortName(st.effort) + '</span>' : '');
@@ -1163,6 +1186,7 @@
     m.setAttribute('aria-label', t('settings'));
     var status = document.createElement('div'); status.className = 'wp-settings-status'; status.setAttribute('role', 'status');
     function appendLogout() {
+      if (window.wpFeishuAuth) window.wpFeishuAuth.appendMenu(m);
       var sep = document.createElement('div'); sep.className = 'wp-pick-sep'; m.appendChild(sep);
       var logout = document.createElement('button'); logout.type = 'button'; logout.className = 'wp-pick-item';
       logout.setAttribute('role', 'menuitem'); text(logout, t('logout'));

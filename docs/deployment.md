@@ -10,9 +10,11 @@ User containers persist `/data`, including the work directory. Their ports remai
 
 ## Build inputs
 
-`image/third-party.lock.json` contains an `artifacts` array. Every entry supplies `version`, a public `https` URL, the SHA-256 of the downloaded bytes, `destination`, and `format` (`file`, `tar`, or `tar-member`). Required destinations are `aionui-web`, `cc-connect`, `officecli`, `codex`, `codex-code-mode-host`, and `claude`. Downloads are checked before extraction and the completed package directory appears only after all inputs pass.
+`image/third-party.lock.json` contains an `artifacts` array. Every entry supplies `version`, a public `https` URL, the SHA-256 of the downloaded bytes, `destination`, and `format` (`file`, `tar`, or `tar-member`). Required destinations are `aionui-web`, `cc-connect`, `officecli`, `codex`, `codex-code-mode-host`, `claude`, `lark-skills.tar.gz`, and `meegle-skills.tar.gz`. The downloader fetches every input, including `cc-connect`, from its public URL and verifies its locked digest. Downloads are checked before extraction and the completed package directory appears only after all inputs pass. `image/build.sh` verifies the bridge again in `PKG` before creating a context or invoking Docker; missing or mismatched bytes stop the build.
 
 `tar-member` selects exactly one regular file by its full archive path and writes it as the named executable. `tar` entries supply `stripComponents` and normally allow only regular files and directories. AionUi includes three symbolic links pointing at its upstream build machine. Its lock entry declares exact `symlinkReplacements` that rebuild these as relative links to extracted regular files inside the package. Unknown links, missing declared links, external targets and special files are rejected.
+
+The image installs fixed npm versions of the official identity CLIs and exposes only the per-user wrappers; the gateway prepares `/data/.wp-feishu-cli.json` and the signed identity file it references. `WORKPARTNER_IDENTITY_CONFIG` can select that non-secret wrapper configuration. Those npm dependency graphs, like Playwright, are not yet completely SHA-256 locked.
 
 The AionUi archive SHA-256 is different from a digest of an unpacked directory listing. Pin both at their respective download and build checks. A version string or an unchecked URL alone is insufficient. Obtain program releases from their maintainers; the downloader never reads private host package directories.
 
@@ -33,7 +35,7 @@ WORKPARTNER_ORG_DIR="$ORG_DIR" sh image/build.sh workpartner-user:local
 WORKPARTNER_TEST_IMAGE=workpartner-user:local bash tools/check.sh
 ```
 
-The image embeds its own organization, engine templates and model catalog; the gateway mount does not replace them. Existing personal engine files and saved browser selections are preserved. Use a fresh test workspace for first-run default acceptance, and verify the model shown in each engine before sending the test message.
+The gateway supplies current model defaults and the catalog from its mounted organization; the image organization is only a fallback. After this version is initially deployed, changing model configuration replaces idle personal containers without another image build. Refresh the page after replacement. Engine model defaults advance when the current value still matches the last organization default; personal model changes and saved browser selections are preserved. Use a fresh test workspace for first-run default acceptance, and verify the model shown in each engine before sending the test message.
 
 With `ORG_DIR`, `DATA_DIR`, and `SECURE_DIR` set to those absolute host paths, start the gateway:
 
@@ -57,4 +59,12 @@ Forward the preview hostname to `127.0.0.1:3090` with WebSocket upgrades. Open i
 
 ## Current preview limits
 
-The native Claude executable and the other five listed program inputs use verified archive hashes. Playwright is pinned to version 1.61.1 but its npm dependency graph and Chromium download are not yet SHA-256 locked. Third-party license packaging and an actual Linux image build remain release checks. Identity messaging bridge templates and official skill bundles are not included in the public edition. The company image must use its private build script. The optional bridge is disabled, and this preview does not provide personal platform authorization. These limits must be resolved or explicitly accepted before publication.
+The lock selects cc-connect `v1.5.0-sw.87`, SHA-256 `1ff8ac28424d9f6627db3241eb8d24cd9a62769104aa3db00deb02c3e2afac13`. The downloader fetches the `cc-connect-v1.5.0-sw.87-linux-amd64` asset from the public `soundworkbench/cc-connect` release. The build reads `cc-connect` from the download directory and verifies the pinned digest again. A missing binary or mismatched digest stops the build. The image workflow downloads the bridge together with all other inputs.
+
+Official skills use the same upstream commits as the private bundle and verified source archive hashes. `image/build.sh --prepare-only <new-directory>` assembles the full context without invoking Docker, including deterministic skill repacking. Playwright is pinned to version 1.61.1 but its npm dependency graph and Chromium download are not yet SHA-256 locked. Third-party license packaging for the remaining programs and an actual Linux image build remain release checks. The gateway includes personal platform authorization and bot onboarding, selected by the organization feature fields.
+
+## Gateway feature selection
+
+`features.feishuAuthorization` controls personal authorization and CLI identity preparation. `FEISHU_USER_AUTH_ENABLED=0` stops new authorizations and token issuance while retaining revocation and status for an already configured integration. The internal token listener uses `runtime.internalPort`; never publish it on the host. `runtime.stateDirectory` selects its persistent authorization state. `features.feishuOnboarding`, `features.marketSkills`, `features.autoTitle` and `features.preview` select the remaining gateway capabilities. Preview also needs a separate `PREVIEW_HOST` and the user-image relay on its reserved internal port. The gateway writes the personal relay key before starting a workspace. The image starts the relay only when that key exists, resolves the gateway address from `runtime.gatewayOrigin`, and exits for Docker to restart if the relay fails.
+
+`extensions.gatewayModule` optionally names a trusted local module relative to the organization directory. The public default leaves it empty and has no legacy backend or desktop implementation. A configured but missing or broken extension is a startup error. Keep extension code outside the public snapshot.

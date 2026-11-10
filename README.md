@@ -1,6 +1,6 @@
 # WorkPartner
 
-[中文](README.zh.md)
+English | [中文](README.zh.md)
 
 WorkPartner gives each person an isolated AI workspace with a web interface, persistent files, and Claude Code or Codex as the agent engine. A gateway authenticates people, routes them to their own containers, and keeps model credentials outside the browser. AionUi supplies the web interface; its distribution is downloaded during image builds rather than stored in this repository.
 
@@ -31,7 +31,7 @@ Use a Linux host with Docker, Node.js 24, Python 3, outbound HTTPS, a domain wit
 
 4. Mount your organization configuration and persistent data into the gateway, set `WORKPARTNER_ORG_DIR`, and expose only the gateway behind HTTPS. Keep user containers on private networks without published ports.
 
-Set `ORG_DIR` to the absolute path of the organization directory prepared in step 1. The user image embeds its model defaults and appearance at build time. Mounting a different organization in the gateway does not update these image inputs; see [organization configuration](docs/organization.md).
+Set `ORG_DIR` to the absolute path of the organization directory prepared in step 1. The gateway supplies model defaults and the picker catalog at runtime. Later model-configuration changes replace idle personal containers without rebuilding the image. Appearance remains a build input; see [organization configuration](docs/organization.md).
 
 ## Repository map
 

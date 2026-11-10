@@ -93,13 +93,34 @@ def download(entry, destination):
             raise ValueError('unsupported artifact format')
 
 
+def verify_bridge(lock, directory):
+    """Require the downloaded bridge bytes to match the pinned file digest."""
+    entries = [entry for entry in json.loads(lock.read_text())['artifacts']
+               if entry['destination'] == 'cc-connect']
+    if (len(entries) != 1 or entries[0]['format'] != 'file' or not entries[0]['version']
+            or not re.fullmatch(r'[0-9a-f]{64}', entries[0]['sha256'])):
+        raise ValueError('lock must pin one cc-connect file with version and SHA-256')
+    source = directory / 'cc-connect'
+    if not source.is_file():
+        raise ValueError(f'Missing bridge binary: {source}; run download-inputs.py to prepare the package directory')
+    with source.open('rb') as payload:
+        digest = hashlib.file_digest(payload, 'sha256').hexdigest()
+    if digest != entries[0]['sha256']:
+        raise ValueError(f'cc-connect SHA-256 mismatch: {source}')
+    return source
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('lock', type=Path)
     parser.add_argument('destination', type=Path, help='new package directory')
+    parser.add_argument('--verify-bridge', action='store_true', help='verify cc-connect in an existing download directory')
     args = parser.parse_args()
+    if args.verify_bridge:
+        verify_bridge(args.lock, args.destination)
+        return
     entries = json.loads(args.lock.read_text())['artifacts']
-    expected = {'aionui-web', 'cc-connect', 'officecli', 'codex', 'codex-code-mode-host', 'claude'}
+    expected = {'aionui-web', 'cc-connect', 'officecli', 'codex', 'codex-code-mode-host', 'claude', 'lark-skills.tar.gz', 'meegle-skills.tar.gz'}
     if {entry['destination'] for entry in entries} != expected or len(entries) != len(expected):
         raise ValueError('lock must pin each required build input exactly once')
     if args.destination.exists():

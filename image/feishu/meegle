@@ -1,0 +1,3 @@
+#!/bin/sh
+# Per-user settings and signed identity are prepared by the gateway.
+exec node /opt/workpartner/feishu/cli.mjs meegle /data/.wp-feishu-cli.json "$@"

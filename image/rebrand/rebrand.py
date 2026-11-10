@@ -381,6 +381,8 @@ exts = ('.js', '.html', '.webmanifest')
 # Web 包仍把主题通知发给桌面 IPC provider（Web 后端没有此 provider），改成同一进程的原生 theme:changed 事件。
 bridge = open(os.path.join(overlay, 'wp-settings-bridge.js'), encoding='utf8').read().strip()
 native_patches = [
+    ('Re.get("language")||Tt(navigator.language||Pt)',
+     'Re.get("language")||Re.get("wp.modelConfig")?.defaults?.language||Tt(navigator.language||Pt)'),
     ('Rbo();ud.languageChanged.on', 'const wpLanguageReady=Rbo();ud.languageChanged.on'),
     ('const Ne=()=>typeof window<"u"&&!!window.electronAPI', bridge + '(Re,cd,zIo,we,Zd,wpLanguageReady);const Ne=()=>typeof window<"u"&&!!window.electronAPI'),
     ('await Sn.setActive.invoke(e)}export{', 'typeof window<"u"&&!window.electronAPI?O.emit("theme:changed",e):await Sn.setActive.invoke(e)}export{'),
@@ -451,17 +453,21 @@ s = s.replace('<link rel="icon" type="image/png" href="./pwa/icon-192.png" />',
               '<link rel="icon" type="image/svg+xml" href="./favicon.svg" />')
 s = s.replace('<meta name="theme-color" content="#4E5969" />', f'<meta name="theme-color" content="{THEME_COLOR}" />')
 css = open(os.path.join(overlay, 'wp-overlay.css'), encoding='utf8').read().replace('__WP_APPEARANCE_NAME__', copy['appearanceName']).replace('__WP_AVATAR_COLOR__', skin['avatarColor']) + '\n' + pet_css
-js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('  /* __WP_MODEL_CATALOG__ */', Path(brand, 'models.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
+js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
 js = js.replace('__WP_CHAT_MODULE__', chat_modules[0]).replace('__WP_CHAT_STYLES__', json.dumps(chat_styles))
 js += '\n' + Path(overlay, 'wp-skills.js').read_text()
 skills_zh = json.loads(Path(overlay, '..', '..', 'skills-zh.json').read_text())
 js += '\n' + Path(overlay, 'wp-slash-skills.js').read_text().replace('__WP_SKILLS_ZH__', json.dumps(skills_zh, ensure_ascii=False))
+if skin['bridgeEnabled']:
+    js += '\n' + Path(overlay, 'wp-feishu-auth.js').read_text()
 web_js = Path(overlay, 'wp-web-tools.js').read_text()
+feishu_js = open(os.path.join(overlay, 'wp-feishu.js'), encoding='utf8').read() if skin['bridgeEnabled'] else '/* Messaging bridge is disabled for this organization. */\n'
 # 覆盖层文件名不带 hash：引用处加内容版本号，浏览器里缓存的旧覆盖层换版本后不会再被用到。
-ver = hashlib.sha256((css + pet_js + smooth + js + web_js + module_version).encode()).hexdigest()[:10]
+ver = hashlib.sha256((css + pet_js + smooth + js + feishu_js + web_js + module_version).encode()).hexdigest()[:10]
 s = s.replace('</head>', f'    <script src="./wp-web-tools.js?v={ver}"></script>\n  </head>')
-s = s.replace('</head>', f'    <link rel="stylesheet" href="./wp-overlay.css?v={ver}" />\n    <script src="./wp-pet.js?v={ver}"></script>\n    <script src="./wp-smooth.js?v={ver}"></script>\n    <script src="./wp-overlay.js?v={ver}"></script>\n  </head>')
+s = s.replace('</head>', f'    <link rel="stylesheet" href="./wp-overlay.css?v={ver}" />\n    <script src="./wp-pet.js?v={ver}"></script>\n    <script src="./wp-smooth.js?v={ver}"></script>\n    <script src="./wp-overlay.js?v={ver}"></script>\n    <script src="./wp-feishu.js?v={ver}"></script>\n  </head>')
 open(p, 'w', encoding='utf8').write(s)
+open(os.path.join(dst, 'wp-feishu.js'), 'w', encoding='utf8').write(feishu_js)
 open(os.path.join(dst, 'wp-web-tools.js'), 'w', encoding='utf8').write(web_js)
 open(os.path.join(dst, 'wp-overlay.css'), 'w', encoding='utf8').write(css)
 open(os.path.join(dst, 'wp-overlay.js'), 'w', encoding='utf8').write(js)

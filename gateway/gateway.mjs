@@ -1,7 +1,9 @@
 // 工作伙伴网关：网关自己对接飞书登录（飞书内免确认），按飞书 union_id 把每个人带到自己的容器。
 // 名单里 backend 为 "aionui" 的人去新版容器（aionui.mjs），其余去 旧版后端 容器。
 // 容器停了就启动；旧版后端 的一次性口令在这里换成登录 cookie，浏览器只和网关打交道。
-import { resolveOrganization } from "./organization/resolve.mjs";
+import { gatewayExtension } from './optional-modules.mjs';
+import { createGatewayServices } from './services.mjs';
+import { resolveOrganization, organizationData, nextModelConfig } from "./organization/resolve.mjs";
 import http from "node:http";
 import net from "node:net";
 import fs from "node:fs";
@@ -9,6 +11,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } from "./onboard.mjs";
 import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
+import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
 import { createChatTitles } from "./title.mjs";
 
 import { createMarketSkills } from "./market-skills.mjs";
@@ -19,7 +22,6 @@ const PUBLIC_HOST = organization.server.publicHost;
 const MODEL = new URL(organization.model.baseUrl);
 const MODEL_KEY_PREFIX = organization.model.keyPrefix;
 const USERS_FILE = organization.runtime.usersFile;
-const COOKIE_FILE = organization.runtime.cookieFile;
 const users = readUsers;
 
 function docker(method, path, body, timeoutMs) {
@@ -40,6 +42,7 @@ function docker(method, path, body, timeoutMs) {
 // 新版容器：数据在宿主 <PARTNER_DATA>/workspaces/<slug>（网关内 /next），AionUi 口令在 /secure/aionui（只网关读）。
 const aionui = createAionui({
   docker, self: os.hostname(), modelContainer: organization.runtime.modelContainer, modelBaseUrl: MODEL.href, modelBaseEnvironment: organization.model.baseEnvironment,
+  modelConfig: () => nextModelConfig(organizationData()),
   image: organization.runtime.nextImage, containerPrefix: organization.runtime.nextContainerPrefix,
   userLabel: organization.runtime.nextUserLabel, modelKeyFile: organization.runtime.nextModelKeyFile, port: organization.runtime.nextPort, uid: organization.runtime.uid,
   dataDir: organization.runtime.nextDirectory, hostData: `${organization.runtime.hostData}${organization.runtime.nextDirectory}`,
@@ -51,6 +54,11 @@ const aionui = createAionui({
 const marketSkills = createMarketSkills({
   authenticate: req => userFor(req).user, docker, uid: organization.runtime.uid, containerPrefix: organization.runtime.nextContainerPrefix, dataDir: organization.runtime.nextDirectory, origin: `https://${PUBLIC_HOST}`,
 });
+const feishuOnboarding = createFeishuOnboarding({
+  authenticate: req => userFor(req).user, docker, uid: organization.runtime.uid, containerPrefix: organization.runtime.nextContainerPrefix,
+  origin: `https://${PUBLIC_HOST}`, restarted: slug => aionui.forget(slug),
+});
+
 // 登录凭证：{u: union_id, n: 姓名, e: 到期秒} 的 base64url 加 HMAC 签名，30 天有效。
 const SESSION_KEY = (() => {
   const f = organization.runtime.sessionKeyFile;
@@ -58,7 +66,6 @@ const SESSION_KEY = (() => {
   return fs.readFileSync(f, "utf8").trim();
 })();
 const SESSION_DAYS = 30;
-const LOCAL = organization.runtime.localAddress;
 const sign = (data) => crypto.createHmac("sha256", SESSION_KEY).update(data).digest("base64url");
 
 function issueSession(who) {
@@ -66,11 +73,17 @@ function issueSession(who) {
   return `wp_sid=${data}.${sign(data)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`;
 }
 
-const modelKeyFor = (user) => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, "utf8").trim();
-const chatTitles = createChatTitles({ baseUrl: MODEL.href, keyFor: modelKeyFor });
+const legacy = await gatewayExtension(organization, {
+  routePrefix: "/_wp", organization, docker, SESSION_KEY, users, userFor, cookieOf, page, redirect: (...args) => redirect(...args), MODEL, MODEL_KEY_PREFIX, PUBLIC_HOST,
+});
+const services = createGatewayServices({ organization, docker, SESSION_KEY, users, userFor, cookieOf, aionui, legacy });
+const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
+services.listen(legacy);
+const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
+const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
 
 function sessionOf(req) {
-  const [data, mac] = String(cookieOf(req, "wp_sid") || "").split(".");
+  const [data, mac] = String(cookieOf(req, "wp_sid") || legacy?.sessionCookieNames?.map(name => cookieOf(req, name)).find(Boolean) || "").split(".");
   if (!data || !mac || mac.length !== 43 || !crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(sign(data)))) return null;
   const s = JSON.parse(Buffer.from(data, "base64url").toString());
   return s.e > Date.now() / 1000 ? { unionId: s.u, name: s.n, avatar: s.a || "" } : null;
@@ -89,11 +102,17 @@ function page(res, status, title, text, refresh) {
 async function resolve(req) {
   const { who, user } = userFor(req);
   if (!user) return { deny: who };
-  const up = await aionui.upstream(user);
-  if (!up) return { user, backend: "aionui" };
-  const cookie = await aionui.session(user.slug, up);
-  return { user, up, cookie, backend: "aionui", port: up.port, headers: aionuiHeaders, responseHeaders: aionuiResponseHeaders,
-    etag: req => aionuiEtag(up.imageId, req), relogin: () => aionui.session(user.slug, up, true), lost: () => aionui.forget(user.slug) };
+  if (user.backend === "aionui") {
+    try { prepareNextFeishu?.(user); }
+    catch (error) { console.error(`[feishu] ${user.slug}: CLI configuration unavailable (${error.code || error.name}); routing to personal container continues`); }
+    const up = await aionui.upstream(user);
+    if (!up) return { user, backend: "aionui" };
+    const cookie = await aionui.session(user.slug, up);
+    return { user, up, cookie, backend: "aionui", port: up.port, headers: aionuiHeaders, responseHeaders: aionuiResponseHeaders,
+      etag: (req) => aionuiEtag(up.imageId, req),
+      relogin: () => aionui.session(user.slug, up, true), lost: () => aionui.forget(user.slug) };
+  }
+  return legacy?.resolve ? legacy.resolve(req, user) : { missing: user };
 }
 
 function proxy(req, res, r, body, retried) {
@@ -125,6 +144,7 @@ function proxy(req, res, r, body, retried) {
   up.end(body);
 }
 
+// 网关以本人身份直接调 旧版后端 接口的兼容逻辑在组织的可选扩展中。
 const MARK = organization.appearance?.gateway?.mark || "";
 
 function welcome(res, { title, lines, action, note }) {
@@ -156,7 +176,7 @@ async function login(req, res, url, host) {
     const state = crypto.randomBytes(16).toString("hex");
     const onboard = url.searchParams.get("onboard") === "1";
     const next = onboard ? "/_wp/preparing" : (url.searchParams.get("next") || "/").replace(/^(?!\/(?!\/)).*/, "/");
-    return redirect(res, authorizeUrl(state, onboard, host), `wp_state=${state}|${onboard ? 1 : 0}|${encodeURIComponent(next)}; Path=/_wp; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
+    return redirect(res, authorizeUrl(state, onboard, host), `wp_state=${state}|${onboard ? 1 : 0}|${encodeURIComponent(next)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
   }
   // /_wp/callback
   const [state, onboard, next] = String(cookieOf(req, "wp_state") || "").split("|");
@@ -178,6 +198,7 @@ async function login(req, res, url, host) {
       console.log(`不在试用群 ${who.name}`);
       return redirect(res, "/_wp/pilot", session);
     }
+    legacy?.clear?.(slugFor(who.unionId)); // 同一人删掉重开时，旧空间的登录凭证不能沿用
     provision(docker, who).catch((e) => console.log("开通失败", who.name, e.message));
   }
   return redirect(res, decodeURIComponent(next || "/"), session);
@@ -189,7 +210,7 @@ function welcomeNew(res, who) {
     lines: [
       `${who.name}，这是你的专属 AI 工作伙伴：写文档、做表格、查资料、分析文件，都可以交给它。`,
       "每人一个独立空间，同事之间看不到彼此的对话和文件。",
-      "在浏览器中开始对话，文件保存在你的专属空间。",
+      "开通后第一步，把它连到你的飞书，以后在飞书里直接找它。",
     ],
     action: { href: "/_wp/login?onboard=1", text: "开通我的工作伙伴" },
   });
@@ -199,15 +220,29 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `https://${PUBLIC_HOST}`);
     const host = String(req.headers.host || "").toLowerCase();
-    if (host !== PUBLIC_HOST && host !== `${PUBLIC_HOST}:443` && host !== new URL(organization.runtime.gatewayOrigin).host) {
+    if (preview?.isPreviewHost(host) && await preview.handle(req, res, url)) return;
+    // A preview is untrusted code, even when it is a sibling on the same registrable domain.
+    if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) {
       res.writeHead(403); return res.end();
     }
-    if (await marketSkills(req, res, url)) return;
+    const oldHost = Boolean(legacy) && organization.server.legacyHosts.includes(host);
+    if (host !== PUBLIC_HOST && host !== `${PUBLIC_HOST}:443` && !oldHost && host !== new URL(organization.runtime.gatewayOrigin).host) {
+      res.writeHead(403); return res.end();
+    }
+    if (await legacy?.handle(req, res, url)) return;
+    if (await preview?.handle(req, res, url)) return;
+    if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
+    if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
+    if (await feishu?.handle(req, res, url)) return;
+    if (url.pathname.startsWith("/_wp/feishu/") && !userFor(req).user) return redirect(res, "/_wp/login?next=%2F_wp%2Ffeishu%2F");
+    if (await feishuSettings?.(req, res, url)) return;
+    if (url.pathname.startsWith("/_wp/ds-tools/")) { res.writeHead(404); return res.end(); } // Internal port only.
+    if (organization.features.marketSkills && await marketSkills(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
-      res.setHeader("set-cookie", "wp_sid=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+      res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
     }
-    if (url.pathname === "/_wp/login" || url.pathname === "/_wp/callback") return await login(req, res, url, PUBLIC_HOST);
+    if (url.pathname === "/_wp/login" || url.pathname === "/_wp/callback") return await login(req, res, url, oldHost ? host : PUBLIC_HOST);
     if (url.pathname === "/_wp/me") {
       const { who, user } = userFor(req);
       if (!user) { res.writeHead(401); return res.end(); }
@@ -224,15 +259,16 @@ const server = http.createServer(async (req, res) => {
         if (provisioning(r.deny.unionId)) return page(res, 200, ...PREPARING, true);
         return welcome(res, { title: "工作伙伴待开通", lines: ["开通暂未完成，模型钥匙或工作空间尚未准备好。", "请稍后重试；如果仍无法开通，请联系管理员。"], action: { href: "/_wp/login?onboard=1", text: "重新开通" } });
       }
-      if (url.pathname === "/_wp/pilot") return welcome(res, { title: "暂未开通", lines: ["工作伙伴目前只对指定群组的成员开放。", "加入指定群组后，重新打开即可开通。"], action: { href: "/_wp/login?onboard=1", text: "我已入群，重新开通" } });
+      if (url.pathname === "/_wp/pilot") return welcome(res, { title: "目前在小范围试用", lines: [organization.appearance.copy.admissionMessage, "加入指定群组以后，重新打开就能开通。"], action: { href: "/_wp/login?onboard=1", text: "我已入群，重新开通" } });
       return welcomeNew(res, r.deny);
     }
     if (url.pathname === "/_wp/preparing") {
       if (!r.cookie) return page(res, 200, ...PREPARING, true);
-      return redirect(res, "/");
+      if (r.backend !== "aionui") await legacy?.prepared?.(r);
+      return redirect(res, cookieOf(req, "wp_desktop") === "1" ? "/_wp/desktop-login" : "/?zp-welcome=1");
     }
     const titleMatch = /^\/_wp\/next-title\/([\w-]+)$/.exec(url.pathname);
-    if (titleMatch) {
+    if (titleMatch && organization.features.autoTitle) {
       if (req.method !== "POST" || (req.headers.origin && req.headers.origin !== `https://${PUBLIC_HOST}`)) {
         res.writeHead(403); return res.end();
       }
@@ -240,7 +276,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ changed }));
     }
-    if (url.pathname.startsWith("/_wp/")) return redirect(res, "/");
+    if (url.pathname.startsWith("/_wp/")) { res.writeHead(404); return res.end(); }
     if (r.missing) return page(res, 503, "工作空间还没建好", "请联系管理员。");
     if (!r.cookie) return page(res, 200, "正在准备你的工作空间", "通常不超过半分钟，页面会自动刷新。", true);
     const chunks = [];
@@ -259,6 +295,9 @@ const server = http.createServer(async (req, res) => {
 
 server.on("upgrade", async (req, socket, head) => {
   try {
+    if (preview?.isPreviewHost(String(req.headers.host || "").toLowerCase())) return await preview.upgrade(req, socket, head);
+    if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) return socket.destroy();
+    if (legacy?.upgrade?.(req, socket, head)) return;
     const r = await resolve(req);
     if (!r.cookie) return socket.destroy();
     const up = net.connect(r.port, r.up.ip, () => {

@@ -46,6 +46,8 @@ class SkillStore:
         self.codex = home / '.codex/skills'
         self.builtin, self.uploads = builtin, uploads.resolve()
         self.zh = json.loads(translations.read_text())
+        manifest = builtin / '.wp-feishu-skills.json'
+        self.feishu = set(json.loads(manifest.read_text())) if manifest.exists() else set()
         self.protected = set(self.zh) | {p.name for p in builtin.iterdir() if p.is_dir()}
 
     def run(self, action, value=None, overwrite=False):
@@ -62,6 +64,8 @@ class SkillStore:
     def list(self):
         rows = []
         for directory in sorted(self.skills.iterdir()):
+            if directory.name in self.feishu and directory.name != "feishu":
+                continue
             if not NAME.fullmatch(directory.name) or directory.is_symlink() or not directory.is_dir():
                 continue
             file = directory / 'SKILL.md'

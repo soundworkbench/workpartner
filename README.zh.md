@@ -1,17 +1,17 @@
 # 工作伙伴
 
-[English](README.md)
+[English](README.md) | 中文
 
 工作伙伴为每个人提供独立的 AI 工作空间，包括网页界面、持久文件和 Claude Code 或 Codex 引擎。网关负责身份验证、按人路由和容器管理，模型凭据不会交给浏览器。网页界面由 AionUi 提供，构建时下载发行包，仓库不存放第三方二进制。
 
 ```mermaid
 flowchart LR
-  浏览器 --> 网关
-  身份提供方 --> 网关
-  组织配置 --> 网关
-  网关 --> 每人容器[AionUi 和智能体引擎]
-  每人容器 --> 组织模型端点
-  每人容器 --> 持久工作目录
+  Browser --> Gateway
+  Identity[Identity provider] --> Gateway
+  Organization[Organization configuration] --> Gateway
+  Gateway --> Workspace[Per-person container: AionUi and agent engines]
+  Workspace --> Models[Organization model endpoint]
+  Workspace --> Files[Persistent work directory]
 ```
 
 ## 快速部署
@@ -20,7 +20,7 @@ flowchart LR
 
 1. 将 `org/default` 复制到单独的目录，按[组织配置说明](docs/organization.md)填写部署参数。
 2. 运行 Linux 检查：`bash tools/check.sh`。
-3. 下载并校验固定版本的构建输入，再构建每人镜像：
+3. 下载并校验锁定版本的构建输入，再构建每人镜像：
 
    ```sh
    python3 -I tools/download-inputs.py image/third-party.lock.json /tmp/workpartner-inputs
@@ -31,7 +31,7 @@ flowchart LR
 
 4. 将组织配置和持久数据挂进网关，设置 `WORKPARTNER_ORG_DIR`，仅将网关放在 HTTPS 反向代理之后。每人容器使用私有网络，不映射端口。
 
-`ORG_DIR` 为第 1 步准备的组织目录的绝对路径。每人镜像在构建时写入模型默认值和外观；只更换网关挂载的组织配置不会更新这些镜像输入，详见[组织配置说明](docs/organization.md)。
+`ORG_DIR` 为第 1 步准备的组织目录的绝对路径。模型默认值与选择器目录由网关在运行时传入；以后修改模型配置，空闲时重建个人容器即可，无需重建镜像。外观仍属于构建输入，详见[组织配置说明](docs/organization.md)。
 
 ## 目录
 

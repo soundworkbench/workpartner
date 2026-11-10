@@ -4,14 +4,12 @@ import { resolveOrganization } from "./organization/resolve.mjs";
 import fs from "node:fs";
 import crypto from "node:crypto";
 
-import { optionalModule } from "./optional-modules.mjs";
-
 const organization = resolveOrganization();
 const APP_ID = organization.identity.appId;
 const CHAT_ID = organization.identity.pilotChatId;
 const PUBLIC_HOST = organization.server.publicHost;
 const USERS_FILE = organization.runtime.usersFile;
-const redirectUri = (host) => `https://${host}/_wp/callback`;
+const redirectUri = (host) => `https://${host}${organization.identity.callbackPath}`;
 const KEY_PREFIX = organization.model.keyPrefix;
 const KEY_POOL = organization.model.keyMode === "pool" ? `${organization.runtime.secureDirectory}/${KEY_PREFIX}pool` : null;
 const DSH_UID = organization.runtime.uid;

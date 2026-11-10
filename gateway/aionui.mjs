@@ -68,6 +68,7 @@ function demux(buf) {
  * @param o.docker (method, path, body) => {status, body}，Docker 接口
  * @param o.self 网关自己的容器名或 ID（加入每人网络用）
  * @param o.modelContainer 模型出口容器名（加入每人网络用）
+ * @param o.modelConfig Read current non-secret model defaults/catalog; changes use the idle rebuild policy.
  * @param o.image 每人镜像；o.uid 容器用户
  * @param o.dataDir 网关内看到的每人数据根目录；o.hostData 同一目录在宿主上的路径
  * @param o.secretDir 网关内存放 AionUi 口令的目录（只网关读）
@@ -116,7 +117,11 @@ export function createAionui(o) {
     const { network } = names(slug);
     let net = await inspect(`/networks/${network}`);
     if (!net) {
-      const r = await docker("POST", "/networks/create", { Name: network, Driver: "bridge", CheckDuplicate: true, Labels: { [o.userLabel || "workpartner.next-user"]: slug } });
+      const r = await docker("POST", "/networks/create", {
+        Name: network, Driver: "bridge", CheckDuplicate: true, EnableIPv6: false,
+        Options: { "com.docker.network.bridge.name": `wpn-${crypto.createHash("sha256").update(network).digest("hex").slice(0, 11)}` },
+        Labels: { [o.userLabel || "workpartner.next-user"]: slug },
+      });
       if (r.status !== 201 && r.status !== 409) throw new Error(`建网络失败：${r.status}`);
       net = await inspect(`/networks/${network}`);
     }
@@ -129,7 +134,7 @@ export function createAionui(o) {
     joined.set(slug, now());
   }
 
-  async function create(user) {
+  async function create(user, modelConfig) {
     const { slug } = user;
     const { container, network } = names(slug);
     const key = `${o.keyPrefix}${slug}.key`;
@@ -141,7 +146,8 @@ export function createAionui(o) {
       ? [`${o.hostUsers}/${slug}/work:/data/old-work:ro`] : [];
     const r = await docker("POST", `/containers/create?name=${container}`, {
       Image: o.image, User: `${o.uid}:${o.uid}`, Hostname: container,
-      Env: [`${o.modelBaseEnvironment || "MODEL_BASE_URL"}=${o.modelBaseUrl}`, `PARTNER_USER_NAME=${user.name || ""}`],
+      Env: [`${o.modelBaseEnvironment || "MODEL_BASE_URL"}=${o.modelBaseUrl}`, `PARTNER_USER_NAME=${user.name || ""}`,
+        ...(modelConfig ? [`WORKPARTNER_MODEL_CONFIG=${modelConfig}`] : [])],
       Labels: { [o.userLabel || "workpartner.next-user"]: slug },
       HostConfig: {
         Binds: [`${o.hostData}/${slug}:/data`, `${o.hostSecure}/${key}:${o.modelKeyFile || "/etc/partner/model.key"}:ro`, ...oldWork],
@@ -203,6 +209,7 @@ export function createAionui(o) {
     const { container, network } = names(slug);
     const info = await inspect(`/containers/${container}/json`);
     const hasPass = fs.existsSync(passFile(slug));
+    const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
     let stale = !!info && info.Config.Image !== o.image;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
     if (info && !stale) {
       // 标签可原名重建；目标镜像不可用时仍按镜像名判断，不据此删除容器。
@@ -211,6 +218,7 @@ export function createAionui(o) {
       catch (e) { log(`查新版工作伙伴目标镜像失败（${e.message}），仍按镜像名判断`); }
       stale = !!target?.Id && info.Image !== target.Id;
     }
+    if (info && modelConfig && !(info.Config.Env || []).includes(`WORKPARTNER_MODEL_CONFIG=${modelConfig}`)) stale = true;
     if (!stale) { busySince.delete(slug); lastBusyAt.delete(slug); forcePending.delete(slug); }
     let forced = false;
     let current = null;   // 旧容器仍可用时的地址
@@ -243,7 +251,7 @@ export function createAionui(o) {
         if (info.State.Running) await docker("POST", `/containers/${container}/stop?t=10`);
         await docker("DELETE", `/containers/${container}?force=1`);
       }
-      if (!info || stale) await create(user);
+      if (!info || stale) await create(user, modelConfig);
       if (needReset) {
         if (info?.State.Running && !stale) await docker("POST", `/containers/${container}/stop?t=10`);
         lastReset.set(slug, now());

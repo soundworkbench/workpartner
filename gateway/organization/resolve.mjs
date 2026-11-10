@@ -30,30 +30,64 @@ export function organizationData(environment = process.env) {
   const selected = environment.WORKPARTNER_ORG_DIR ? JSON.parse(readFileSync(resolve(directory, 'organization.json'), 'utf8')) : {};
   const data = merge(defaults, selected);
   if (data.schemaVersion !== 1 || typeof data.organizationId !== 'string') throw new Error('Unsupported organization configuration');
+  if (!/^\/_[a-z0-9]+\/callback$/.test(data.identity.callbackPath)) throw new Error('Invalid identity.callbackPath');
   if (!/^[A-Z_][A-Z0-9_]*$/.test(data.model.keyEnvironment) || !/^[A-Z_][A-Z0-9_]*$/.test(data.model.baseEnvironment)) throw new Error('Invalid model environment variable');
   if (!['pool', 'exec'].includes(data.model.keyMode)) throw new Error('Invalid model key mode');
   if (!['unrestricted', 'pilot-group'].includes(data.identity.admission)) throw new Error('Invalid admission policy');
   return { ...data, directory };
 }
 
+/** Model defaults and optional catalog entries, shared by gateway and image startup. */
+export function nextModelConfig(data, environment = {}) {
+  const selected = environment.WORKPARTNER_MODEL_CONFIG
+    ? JSON.parse(environment.WORKPARTNER_MODEL_CONFIG) : { defaults: data.model.defaults, catalog: data.model.catalog };
+  const defaults = { ...selected.defaults };
+  for (const [field, variable] of Object.entries({ claude: 'ANTHROPIC_MODEL', opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL', haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' })) {
+    if (environment[variable]) defaults[field] = environment[variable];
+  }
+  for (const name of ['codex', 'claude', 'opus', 'sonnet', 'haiku', 'effort', 'language', 'claudePrefix']) {
+    if (typeof defaults?.[name] !== 'string' || !defaults[name] || /[\r\n]/.test(defaults[name])) throw new Error(`Invalid model.defaults.${name}`);
+  }
+  const catalog = {};
+  for (const backend of ['codex', 'claude']) {
+    const entries = selected.catalog?.[backend] || [{ default: backend, also: ['default'] }];
+    if (!Array.isArray(entries) || !entries.length) throw new Error(`Invalid model.catalog.${backend}`);
+    catalog[backend] = entries.map(entry => {
+      const key = entry.default ? defaults[entry.default] : entry.key;
+      const id = entry.id || key;
+      if (typeof key !== 'string' || !key || typeof id !== 'string' || !id
+        || (entry.also && (!Array.isArray(entry.also) || entry.also.some(value => typeof value !== 'string')))) throw new Error('Invalid model catalog entry');
+      return { id, key, name: entry.name || key.split('/').at(-1), also: entry.also || [] };
+    });
+  }
+  return { defaults, catalog };
+}
+
 /** Environment consumed by the next image; credentials remain in the mounted key file. */
 export function nextEnvironment(data, environment = {}) {
   const model = data.model;
+  const config = nextModelConfig(data, environment);
+  const defaults = config.defaults;
   const base = environment.MODEL_BASE_URL || environment[model.baseEnvironment] || model.nextBaseUrl || model.baseUrl;
   const url = new URL(base);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid MODEL_BASE_URL');
   return {
+    WORKPARTNER_MODEL_CONFIG: JSON.stringify(config),
+    PARTNER_GATEWAY_ORIGIN: data.runtime.gatewayOrigin,
+    PARTNER_CODEX_MODEL: defaults.codex,
+    PARTNER_DEFAULT_EFFORT: defaults.effort,
     MODEL_BASE_URL: base,
     PARTNER_CODEX_PROVIDER: model.codexProvider,
     PARTNER_MODEL_KEY_FILE: environment.PARTNER_MODEL_KEY_FILE || data.runtime.nextModelKeyFile,
     PARTNER_MODEL_KEY_ENV: model.keyEnvironment,
     ANTHROPIC_BASE_URL: environment.ANTHROPIC_BASE_URL || base.replace(/\/v1\/?$/, ''),
-    ANTHROPIC_MODEL: environment.ANTHROPIC_MODEL || model.defaults.claude,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: environment.ANTHROPIC_DEFAULT_OPUS_MODEL || model.defaults.opus,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: environment.ANTHROPIC_DEFAULT_SONNET_MODEL || model.defaults.sonnet,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: environment.ANTHROPIC_DEFAULT_HAIKU_MODEL || model.defaults.haiku,
-    PARTNER_DEFAULT_LANGUAGE: model.defaults.language,
-    PARTNER_CLAUDE_MODEL_PREFIX: model.defaults.claudePrefix,
+    ANTHROPIC_MODEL: environment.ANTHROPIC_MODEL || defaults.claude,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: environment.ANTHROPIC_DEFAULT_OPUS_MODEL || defaults.opus,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: environment.ANTHROPIC_DEFAULT_SONNET_MODEL || defaults.sonnet,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: environment.ANTHROPIC_DEFAULT_HAIKU_MODEL || defaults.haiku,
+    PARTNER_DEFAULT_LANGUAGE: defaults.language,
+    PARTNER_CLAUDE_MODEL_PREFIX: defaults.claudePrefix,
     AIONUI_PORT: environment.AIONUI_PORT || String(data.runtime.nextPort),
   };
 }
@@ -83,7 +117,7 @@ export function resolveOrganization(environment = process.env) {
       previewHost: environment.PREVIEW_HOST || '',
       projectHost,
     },
-    identity: { ...data.identity, appId: environment.FEISHU_APP_ID ?? data.identity.appId, pilotChatId: environment.ADMISSION_GROUP_ID ?? data.identity.pilotChatId },
+    identity: { ...data.identity, appId: environment.FEISHU_APP_ID ?? data.identity.appId, pilotChatId: environment.ADMISSION_GROUP_ID ?? environment.ADMISSION_GROUP_ID ?? data.identity.pilotChatId },
     model: { ...data.model, baseUrl, keyPrefix, keyMode: environment.MODEL_KEYS || environment.MODEL_KEYS || data.model.keyMode },
     runtime: {
       ...data.runtime,

@@ -5,7 +5,7 @@
 显示名 ChatGPT、Claude 和图标由网页的 wp-overlay.js 换，AionUi 里登记的名字仍是 Codex CLI、Claude Code。
 本人钥匙能用的模型清单每次启动写进 AionUi 的客户端设置 wp.models，网页输入框下面的模型选择只列这些；
 引擎默认推理强度写进 wp.effort，对话没写推理强度时按钮按它显示。"""
-import json, os, sys, time, urllib.request
+import json, os, sys, time, tomllib, urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:25808'
 ORDER = ('codex', 'claude')  # 显示顺序；第一个是默认
@@ -78,6 +78,23 @@ def engine_efforts():
     return {k: v for k, v in out.items() if v}
 
 
+def engine_models():
+    """Read personal engine selections so the picker uses the same implicit defaults."""
+    out = {}
+    for backend, file, load in [
+        ('claude', '/data/.claude/settings.json', lambda f: json.load(f)),
+        ('codex', os.path.join(os.environ.get('CODEX_HOME', '/data/.codex'), 'config.toml'), lambda f: tomllib.loads(f.read())),
+    ]:
+        try:
+            with open(file) as source:
+                model = load(source).get('model')
+                if model:
+                    out[backend] = model
+        except (OSError, ValueError):
+            pass
+    return out
+
+
 # 后端启动时检测 PATH 上的 codex、claude；等两者都出现（最多约 30 秒）。
 for _ in range(30):
     found = bare()
@@ -101,9 +118,12 @@ for a in call('GET', '/api/assistants'):
         call('PATCH', f"/api/assistants/{a['id']}/state", state)
 client = call('GET', '/api/settings/client') or {}
 update = {'assistants.enabledOrder': keep}
+if os.environ.get('WORKPARTNER_MODEL_CONFIG'):
+    update['wp.modelConfig'] = json.loads(os.environ['WORKPARTNER_MODEL_CONFIG'])
 if models is not None:
     update['wp.models'] = models
 update['wp.effort'] = engine_efforts()
+update['wp.engineModels'] = engine_models()
 first = not os.path.exists(FIRST_RUN)
 if first or client.get('guid.lastAssistantId') not in keep:
     update['guid.lastAssistantId'] = keep[0]

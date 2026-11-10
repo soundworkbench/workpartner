@@ -1,20 +1,30 @@
 /** Copy the selected organization's complete skin into a disposable build directory. */
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { organizationData } from './resolve.mjs';
+
+// Resolve each entry before copying: the Docker context cannot refer back to the checkout.
+function copyAssets(source, destination) {
+  const file = realpathSync(source);
+  if (lstatSync(destination, { throwIfNoEntry: false })?.isSymbolicLink()) rmSync(destination);
+  if (statSync(file).isDirectory()) {
+    mkdirSync(destination, { recursive: true });
+    for (const name of readdirSync(file)) copyAssets(join(file, name), join(destination, name));
+  } else copyFileSync(file, destination);
+}
 
 export function materializeAppearance(destination, data = organizationData()) {
   const { appearance, productName } = data;
   if (![appearance.themeColor, appearance.avatarColor].every(color => /^#[a-f\d]{6}$/i.test(color))) throw new Error('Invalid appearance.themeColor');
   const copy = appearance.copy;
-  for (const name of ['footerTitle', 'footerSubtitle', 'taglineEn', 'homeExample', 'manifestDescription', 'tableFile', 'appearanceName', 'streamingComment', 'modelCatalogFile']) {
+  for (const name of ['footerTitle', 'footerSubtitle', 'taglineEn', 'homeExample', 'manifestDescription', 'tableFile', 'appearanceName', 'streamingComment']) {
     if (typeof copy[name] !== 'string') throw new Error(`Missing appearance.copy.${name}`);
   }
   const source = resolve(data.directory, appearance.brandDirectory);
   // Dereference organization-owned symlinks: the assembled context must stand on its own.
   mkdirSync(destination, { recursive: true });
-  cpSync(source, destination, { recursive: true, dereference: true });
+  copyAssets(source, destination);
   let table = readFileSync(resolve(source, copy.tableFile), 'utf8');
   for (const [locale, name] of [['zh-CN', productName.zh], ['en-US', productName.en]]) {
     if (typeof name !== 'string' || !name) throw new Error('Invalid productName');
@@ -23,13 +33,6 @@ export function materializeAppearance(destination, data = organizationData()) {
     table = table.replace(pattern, (whole, prefix, current) => current === name ? whole : prefix + JSON.stringify(name));
   }
   writeFileSync(join(destination, 'copy.js'), table);
-  let catalog = readFileSync(resolve(source, copy.modelCatalogFile), 'utf8');
-  for (const [slot, value] of Object.entries({ __CODEX_MODEL__: data.model.defaults.codex, __CLAUDE_MODEL__: data.model.defaults.claude })) {
-    // These slots occur in single-quoted JS literals. Encode quotes and line separators as well.
-    const literal = JSON.stringify(value).slice(1, -1).replaceAll("'", '\\u0027');
-    catalog = catalog.replaceAll(slot, literal);
-  }
-  writeFileSync(join(destination, 'models.js'), catalog);
   for (const file of ['icon-512.png', 'icon-192.png', 'apple-touch-icon.png', 'favicon.svg', 'agents/chatgpt.svg', 'agents/claude.svg', 'wp-pet.js', 'wp-pet.css']) {
     readFileSync(join(destination, file));
   }

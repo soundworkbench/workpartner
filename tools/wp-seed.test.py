@@ -49,8 +49,8 @@ class ModelDiscovery(unittest.TestCase):
             models = scope['key_models']()
             self.assertEqual(models, ['codex/gpt-6.1-sol', 'gpt-6.1-sol'])
             self.assertFalse(any(model.startswith('claude') for model in models))
-            allowed.append({'id': 'claude/claude-sonnet-5-5'})
-            self.assertEqual(scope['key_models'](), ['claude-sonnet-5-5', 'claude/claude-sonnet-5-5', 'codex/gpt-6.1-sol', 'gpt-6.1-sol'])
+            allowed.append({'id': 'claude/claude-opus-5-5'})
+            self.assertEqual(scope['key_models'](), ['claude-opus-5-5', 'claude/claude-opus-5-5', 'codex/gpt-6.1-sol', 'gpt-6.1-sol'])
         self.assertEqual(len(requests), 2)
         for request_path, headers in requests:
             self.assertEqual(request_path, '/v1/models')

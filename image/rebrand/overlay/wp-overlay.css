@@ -1,5 +1,35 @@
 /* 工作伙伴：隐藏不给同事用的入口。选择器由 wp-overlay.js 打上 wp-hide 类。 */
 .wp-hide { display: none !important; }
+.wp-feishu-banner {
+  display: flex; align-items: center; gap: 12px; flex: 0 0 auto; box-sizing: border-box;
+  margin: 12px 20px 0; padding: 10px 14px; border: 1px solid var(--wp-line); border-radius: 12px;
+  background: var(--wp-card); color: var(--wp-ink-2); font-size: 13px; line-height: 1.6;
+}
+.wp-feishu-banner > span { flex: 1; min-width: 0; }
+.wp-feishu-banner button, .wp-feishu-dialog button {
+  flex-shrink: 0; cursor: pointer; border: 1px solid var(--wp-line); border-radius: 8px; padding: 6px 12px;
+  background: var(--wp-send); color: var(--wp-send-ink); font-size: 13px;
+}
+.wp-feishu-banner .wp-feishu-dismiss, .wp-feishu-dialog .wp-feishu-dismiss {
+  background: transparent; color: var(--wp-ink-2); border: 0; padding: 4px 8px; font-size: 22px;
+}
+main:has(> .wp-feishu-banner) > [class*="_guidContainer_"] { flex: 1; min-height: 0; height: auto; }
+.wp-feishu-dialog {
+  position: fixed; inset: 0; margin: auto;
+  box-sizing: border-box; width: 400px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px);
+  overflow: auto; padding: 24px; border: 1px solid var(--wp-line); border-radius: 18px;
+  background: var(--wp-card); color: var(--wp-ink); font: 14px/1.65 var(--wp-font);
+}
+.wp-feishu-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
+.wp-feishu-dialog h2 { margin: 0 28px 12px 0; font-size: 18px; }
+.wp-feishu-dialog .wp-feishu-dismiss { position: absolute; right: 12px; top: 10px; }
+.wp-feishu-dialog p { color: var(--wp-ink-2); margin: 12px 0; }
+.wp-feishu-dialog img { display: block; width: 240px; max-width: 100%; height: auto; margin: 16px auto; background: white; }
+.wp-feishu-dialog img[hidden], .wp-feishu-dialog button[hidden] { display: none; }
+@media (max-width: 600px) {
+  .wp-feishu-banner { margin: 8px 12px 0; padding: 8px 10px; gap: 8px; font-size: 12px; }
+  .wp-feishu-dialog { padding: 20px; }
+}
 /* ChatGPT 图标是黑色花形标志，深色主题下反白 */
 [data-theme="dark"] img.wp-chatgpt { filter: invert(1); }
 

@@ -1,1 +1,27 @@
-{}
+{
+  "officecli": {
+    "name": "办公文件",
+    "description": "创建、检查和修改文档、表格及演示文稿。",
+    "example": "检查这份文件的排版和内容"
+  },
+  "officecli-pptx": {
+    "name": "演示文稿",
+    "description": "制作、阅读和修改幻灯片。",
+    "example": "把这份方案做成汇报幻灯片"
+  },
+  "officecli-docx": {
+    "name": "文字文档",
+    "description": "撰写、阅读和修改 Word 文档。",
+    "example": "把这些要点整理成一份报告"
+  },
+  "officecli-xlsx": {
+    "name": "电子表格",
+    "description": "创建、分析和修改 Excel 表格。",
+    "example": "分析这张销售表并制作图表"
+  },
+  "feishu": {
+    "name": "飞书",
+    "description": "用本人身份处理日程、消息、文档、表格、邮件、审批和飞书项目，写操作前先确认。",
+    "example": "查我今天的飞书日程"
+  }
+}

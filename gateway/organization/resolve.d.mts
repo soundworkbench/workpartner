@@ -7,24 +7,25 @@ export interface Organization {
   productName: { zh: string; en: string };
   displayName: string;
   server: { publicHost: string; publicOrigin: string; legacyHosts: string[]; previewHost: string; projectHost: string };
-  identity: { provider: 'feishu'; admission: 'pilot-group' | 'unrestricted'; appSecretFile: string; appId: string; pilotChatId: string };
-  model: { codexProvider: string; baseUrl: string; keyPrefix: string; keyMode: 'exec' | 'pool'; defaultsFile: string; keyEnvironment: string; baseEnvironment: string; nextBaseUrl: string; defaults: { codex: string; claude: string; opus: string; sonnet: string; haiku: string; effort: string; language: string; claudePrefix: string }; provision: null | { container: string; command: string[]; keyPattern: string; models: string[] } };
+  identity: { provider: 'feishu'; callbackPath: string; admission: 'pilot-group' | 'unrestricted'; appSecretFile: string; appId: string; pilotChatId: string };
+  model: { codexProvider: string; baseUrl: string; keyPrefix: string; keyMode: 'exec' | 'pool'; defaultsFile: string; keyEnvironment: string; baseEnvironment: string; nextBaseUrl: string; catalog?: Record<'codex' | 'claude', { default?: string; id?: string; key?: string; name?: string; also?: string[] }[]>; defaults: { codex: string; claude: string; opus: string; sonnet: string; haiku: string; effort: string; language: string; claudePrefix: string }; provision: null | { container: string; command: string[]; keyPattern: string; models: string[] } };
   runtime: {
     modelContainer: string; nextImage: string; buildImage: string; baseImage: string; nextContainerPrefix: string; nextUserLabel: string;
     nextDirectory: string; nextModelKeyFile: string; nextMemory: number; nextPidsLimit: number; nextPort: number;
     packageDirectory: string; gatewayContainer: string; protectedUsers: string[]; rolloutData: string; rolloutSecure: string; rolloutKeyPrefix: string;
     project: string; image: string; gatewayImage: string; containerPrefix: string; userLabel: string;
     network: string; uid: number; memory: number; nanoCpus: number; pidsLimit: number;
-    gatewayPort: number; internalPort: number; webPort: number; gatewayOrigin: string; internalOrigin: string;
+    stateDirectory: string; gatewayPort: number; internalPort: number; webPort: number; gatewayOrigin: string; internalOrigin: string;
     localAddress: string; configDirectory: string; usersFile: string; usersDirectory: string;
     modelKeyFile: string; sessionKeyFile: string; secureDirectory: string; cookieFile: string;
     hostData: string; hostSecure: string; hostConfig: string;
   };
-  appearance: { brandDirectory: string; timezoneFallback: string; themeColor: string; avatarColor: string; gateway: Record<string, string>; copy?: Record<string, unknown> };
+  appearance: { authorizationStyle?: string; brandDirectory: string; timezoneFallback: string; themeColor: string; avatarColor: string; gateway: Record<string, string>; copy?: Record<string, unknown> };
   image: { officialSkillsArchive?: string; homeDirectory: string; instructions: string; legacyInstructions: string; skillTranslations: string; skills: string[] };
   bridge: { template: string };
   tools?: { legacyRollout?: string };
-  extensions: { configFiles: string[] };
+  features: { feishuAuthorization: boolean; feishuOnboarding: boolean; marketSkills: boolean; autoTitle: boolean; preview: boolean };
+  extensions: { configFiles: string[]; gatewayModule: string };
 }
 /** Read locally shipped data and existing environment overrides; never reads credentials or writes profiles. */
 export function resolveOrganization(environment?: NodeJS.ProcessEnv): Organization;
@@ -36,3 +37,8 @@ export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publ
 export function organizationData(environment?: NodeJS.ProcessEnv): OrganizationData;
 /** Resolve next image startup variables without reading a credential. */
 export function nextEnvironment(organization: OrganizationData, environment?: NodeJS.ProcessEnv): Record<string, string>;
+/** Resolve and validate model defaults and the runtime browser catalog. */
+export function nextModelConfig(organization: OrganizationData, environment?: NodeJS.ProcessEnv): {
+  defaults: Organization['model']['defaults'];
+  catalog: Record<'codex' | 'claude', { id: string; key: string; name: string; also: string[] }[]>;
+};
