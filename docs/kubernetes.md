@@ -4,7 +4,20 @@
 
 ## 配置与缺省值
 
-`gateway/organization/resolve.mjs` 将 `organization.json` 递归合并到 `gateway/organization/default.json`。默认 JSON **没有** `runtime.kind`、`runtime.k8s`、`runtime.migration`；下面的缺省值由使用它们的模块提供，不会被 resolver 自动写回。新增字段没有专用环境变量覆盖。`WORKPARTNER_ORG_DIR` 选择组织目录；原有 `NEXT_IMAGE`、`MODEL_BASE_URL` 等覆盖仍有效。渲染工具使用 `organizationData`，不应用 `resolveOrganization` 的部署环境覆盖，应把所需值写进组织 JSON。
+`gateway/organization/resolve.mjs` 将 `organization.json` 递归合并到 `gateway/organization/default.json`。默认 JSON **没有** `runtime.kind`、`runtime.k8s`、`runtime.migration`；下面的缺省值由使用它们的模块提供，不会被 resolver 自动写回。新增 Kubernetes 运行时字段没有专用环境变量覆盖。`WORKPARTNER_ORG_DIR` 选择组织目录；原有 `NEXT_IMAGE`、`MODEL_BASE_URL` 等覆盖仍有效。渲染工具使用 `organizationData`，不应用 `resolveOrganization` 的部署环境覆盖，应把所需值写进组织 JSON。
+
+### 网关域名
+
+以下字段位于组织 JSON 顶层。非空环境变量优先，未设置或为空时回退到 JSON，与 `publicHost` 一致。主机名沿用现有校验：不含协议、路径或认证信息，可带端口。`legacyHosts` 必须为字符串数组，各元素同样校验。
+
+| JSON 字段 | 环境变量 | 缺省值与用途 |
+| --- | --- | --- |
+| `publicHost` | `PUBLIC_HOST` | 必填，公开入口及登录回调主机名，例如 `workspace.example.com`。 |
+| `previewHost` | `PREVIEW_HOST` | 空字符串，预览域名，例如 `preview.example.com`；预览还需启用 `features.preview`。 |
+| `legacyHosts` | `OLD_HOSTS` | `[]`，允许的旧域名，例如 `["old.example.com"]`；环境变量沿用逗号分隔、去空白格式。 |
+| `projectHost` | `MEEGLE_HOST` | 空字符串，项目服务主机名，例如 `project.example.com`。 |
+
+将所需域名写入挂载的 `organization.json`，网关启动时直接读取；渲染的 Deployment 只需 `WORKPARTNER_ORG_DIR=/organization`，无需手工补这些环境变量。
 
 ### 运行时、连接与存储
 
@@ -36,7 +49,7 @@
 | `terminationGraceSeconds` | `10` | Pod 优雅终止秒数。 |
 | `inspectCacheMs` | `2000` | inspect 缓存毫秒，有限且非负；0 禁用。 |
 | `keepRunningIntervalMs` | `300000` | 启动时立即巡检，此后按间隔巡检；0 关闭。只启动归自己所有、已存在、replicas=0、未运行、未 paused 的 AionUi 工作区，不创建缺失工作区。 |
-| `loadGatewayExtension` | 未设置时不加载 | 推荐 `false`。`true` 允许加载组织扩展，但不会恢复 Docker 访问能力；旧版运行时仍不可用。 |
+| `loadGatewayExtension` | 未设置时不加载 | 默认行为不变；需要组织扩展提供的路由时设为 `true`。扩展不能依赖 Docker 传输；旧版运行时仍不可用。 |
 | `cacheMs` | `2000` | 经运行时透传给文件模块的发布 Secret 读取缓存毫秒，独立于 inspect 缓存。 |
 | `leaseTtlMs` | `1800000` | 文件模块暂存清理 lease 的有效期，毫秒，正整数且不超过 2147483647。 |
 
@@ -79,11 +92,38 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 | `hostPaths.state` | 无，必填 | 节点状态目录 → runtime.stateDirectory。 |
 | `hostPaths.usersFile` | 无，必填 | 节点已有用户文件 → runtime.usersFile。 |
 | `egressExceptCidrs` | 无，必须显式提供，可为 `[]` | 补充禁止用户访问的 IPv4 CIDR，必须包括全部节点公网地址 `/32`；例如 `192.0.2.10/32`。自动合并链路本地、RFC1918、共享地址及回环网段，详见模板。 |
-| `modelEgressSelector` | 无，必填 | 非空标签映射，必须含 `workpartner/role: model-egress`，不能选中网关 Pod；模型出口工作负载由部署方提供。 |
+| `modelEgressSelector` | 与 endpoint 必须二选一 | 非空标签映射，必须含 `workpartner/role: model-egress`，不能选中网关 Pod；模型出口工作负载由部署方提供。 |
+| `modelEgressEndpoint` | 与 selector 必须二选一 | `{ "address": "192.0.2.10", "port": 4100 }`，固定出口 IPv4 字面量和整数 TCP 端口（1–65535）。禁止未指定地址、回环及链路本地地址（包括元数据地址）；不能填域名、CIDR 或含端口的 address。 |
 | `newUserStorage.provisioner` | 无，必填 | 已安装的 provisioner，例如 `rancher.io/local-path`；渲染器不安装 provisioner。 |
 | `newUserStorage.parameters` | `{}` | 字符串映射，原样交给 provisioner；确认其实际支持。 |
 
 所有 hostPaths 必须是非根绝对路径且事先存在。sessionKeyFile、cookieFile、identity.appSecretFile，以及配置 migration 时的 ownersFile，必须在网关 secureDirectory 或 stateDirectory 内。渲染器要求网关与模型 URL 使用短 Service 名，不能用节点 IP、外部域名或完整集群域名替代。生成的 StorageClass 固定为 `Retain`、`WaitForFirstConsumer`。当前网络清单的公网放行/排除使用 IPv4；node-guard 支持 IPv4/IPv6 地址（如 `2001:db8::10`），不能据此宣称整个方案已完成双栈验收。
+
+固定出口模式示例（合并到完整组织配置，删除 `modelEgressSelector`）：
+
+```json
+{
+  "publicHost": "workspace.example.com",
+  "previewHost": "preview.example.com",
+  "legacyHosts": ["old.example.com"],
+  "projectHost": "project.example.com",
+  "model": {
+    "baseUrl": "http://model-egress:4000/v1",
+    "nextBaseUrl": "http://model-egress:4000/v1"
+  },
+  "runtime": {
+    "k8s": {
+      "deploy": {
+        "modelEgressEndpoint": { "address": "192.0.2.10", "port": 4100 }
+      }
+    }
+  }
+}
+```
+
+Service 仍叫 `model-egress`，对外端口仍为模型 URL 的 4000；无 selector，由同系统命名空间的 IPv4 EndpointSlice 指向 `192.0.2.10:4100`。目标端口可以不同于 Service 端口；baseUrl 与非空 nextBaseUrl 的主机和端口仍必须一致。实现遵循 Kubernetes 的 [无 selector Service 与 EndpointSlice 关联方式](https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors)。
+
+用户出站策略单独放行 `192.0.2.10/32` 的 TCP 4100；原有私网及 `egressExceptCidrs` 排除项保持不变。实际出口落在被排除的私网段内时，也仅增加该地址/端口的例外。固定出口模式不生成模型 Pod 入站策略。若出口是宿主网桥发布的服务，address 应填写从 Pod 可达的网桥地址；不要填写被 Docker raw 规则丢弃的容器地址。部署时验证节点路由、防火墙与 CNI 的实际转发路径。
 
 ### 迁移归属配置
 
@@ -115,9 +155,10 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 | 一次性维护 Pod | `<c>-<name>`，name 默认 `resetpass`，完整名称需为 DNS label。 |
 | 网关 Deployment / ServiceAccount / headless Service | systemNamespace 中，名称取 gatewayOrigin 的短主机名；Pod 名由控制器生成，容器名为 `gateway`。 |
 | 其他 Service | governingService 位于用户 namespace；模型 Service 名取 model.baseUrl；clusterIP 入口为 `<gateway>-entry`，原 headless Service 保留用于预览来源验证。 |
+| 固定模型 EndpointSlice | 仅 endpoint 模式生成，与模型 Service 同名、同系统 namespace，通过 `kubernetes.io/service-name` 标签关联。 |
 | RBAC / PriorityClass | Role 和 RoleBinding 分别为用户 namespace 的 `workpartner-users`、系统 namespace 的 `workpartner-system`；网关 PriorityClass 为 `<systemNamespace>-gateway`，值 1000000。 |
 
-用户资源标签为 `app.kubernetes.io/part-of=workpartner`、`workpartner/role=user`、`<nextUserLabel>=<slug>`；一次性 Pod 的 role 为 `job`。网关 Pod 的 role 为 `gateway`，模型出口必须为 `model-egress`。nextUserLabel 必须为合法标签键，不能与上述两个固定键冲突。渲染对象带 part-of 标签，用户 Namespace 还带 PSA `enforce=baseline`、`warn=restricted`。镜像 ConfigMap 名可配置；NetworkPolicy 名固定为三条用户策略及系统 namespace 的 `workpartner-model-ingress`。
+用户资源标签为 `app.kubernetes.io/part-of=workpartner`、`workpartner/role=user`、`<nextUserLabel>=<slug>`；一次性 Pod 的 role 为 `job`。网关 Pod 的 role 为 `gateway`，selector 模式的模型出口 Pod 必须为 `model-egress`。nextUserLabel 必须为合法标签键，不能与上述两个固定键冲突。渲染对象带 part-of 标签，用户 Namespace 还带 PSA `enforce=baseline`、`warn=restricted`。镜像 ConfigMap 名可配置；NetworkPolicy 名固定为三条用户策略；selector 模式还包含系统 namespace 的 `workpartner-model-ingress`。
 
 StatefulSet 注解 `workpartner/image-id` 保存创建/更新模板时的镜像登记摘要；`workpartner/paused` **只要键存在**就暂停常驻巡检，写 `"false"` 也仍暂停。维护时可先 annotate paused 再 scale 到 0；恢复要删除注解键。该注解不拦截用户触发的 start，维护窗口需同时暂停用户请求。
 
@@ -140,7 +181,7 @@ StatefulSet 只能有 0/1 副本，`OnDelete` 更新。重复 create 保留副�
 
 ## 部署顺序
 
-1. **节点准备。** 准备 Node 24 管理工具、kubectl、k3s/containerd、支持 NetworkPolicy 的 CNI 和已验证的存储 provisioner。检查所有可调度节点的镜像架构、磁盘、pod-max-pids、节点标签及已有数据权限。保留旧 Docker 容器、网络和原数据目录。网关节点准备 hostPaths 指向的目录及 users.json；模型出口 Pod 由部署方准备，标签必须匹配 selector。备份数据和状态。
+1. **节点准备。** 准备 Node 24 管理工具、kubectl、k3s/containerd、支持 NetworkPolicy 的 CNI 和已验证的存储 provisioner。检查所有可调度节点的镜像架构、磁盘、pod-max-pids、节点标签及已有数据权限。保留旧 Docker 容器、网络和原数据目录。网关节点准备 hostPaths 指向的目录及 users.json；模型出口由部署方准备：Pod 标签须匹配 selector，或提供从 Pod 可达的固定 IPv4/端口。备份数据和状态。
 2. **node-guard。** 在每个节点先预览再加载独立的 `inet workpartner_guard` 表：
 
    ```bash
@@ -160,7 +201,7 @@ StatefulSet 只能有 0/1 副本，`OnDelete` 更新。重复 create 保留副�
    node tools/k8s/render.mjs --org "$ORG_DIR" --output "$MANIFEST_DIR"
    ```
 
-   不指定 output 时输出到 stdout；JSON 文档也是合法 YAML。已有非空目录会拒绝，部分写失败保留文件，重跑换新空目录。检查 hostPort 与 localAddress 一致。模型出口只渲染 Service/网络规则，不生成其镜像、凭据和工作负载。
+   不指定 output 时输出到 stdout；JSON 文档也是合法 YAML。已有非空目录会拒绝，部分写失败保留文件，重跑换新空目录。检查 hostPort 与 localAddress 一致。模型出口渲染 Service/网络规则，endpoint 模式还生成 EndpointSlice；不生成其镜像、凭据和工作负载。
 4. **apply 基础对象。** 先应用 namespace，再应用其他对象；首次可以包含空镜像 ConfigMap。为符合先分发后上线的顺序，先把 Deployment 文件留到第 6 步：
 
    ```bash
@@ -172,7 +213,7 @@ StatefulSet 只能有 0/1 副本，`OnDelete` 更新。重复 create 保留副�
    done
    ```
 
-   后续重渲染使用 `--only Namespace,ServiceAccount,Role,RoleBinding,PriorityClass,Deployment,Service,NetworkPolicy,StorageClass`，排除 ConfigMap，避免清空已有镜像登记。即使 --only 也校验完整配置。
+   后续重渲染使用 `--only Namespace,ServiceAccount,Role,RoleBinding,PriorityClass,Deployment,Service,EndpointSlice,NetworkPolicy,StorageClass`，排除 ConfigMap，避免清空已有镜像登记。即使 --only 也校验完整配置。
 5. **镜像分发。** 将用户镜像导入全部可能运行用户/维护 Pod 的节点，网关镜像导入选定网关节点并核实 ID，步骤见下一节。任何节点失败都先处理，不切换用户。所有相关容器（包括 init）使用 imagePullPolicy=Never。
 6. **网关上线。** 应用 Deployment 文件，检查 Pod、Service、RBAC、状态及凭据挂载。模板是单副本 Recreate、TCP liveness probe。迁移场景此时已配置 ownersFile 路径，尚无有效归属时请求 503 是预期保护；在完成第 7 步前不接入用户流量。Docker peer 仅在内部可达位置发布，验证跨 CNI/Docker 的 DNAT 路径，避免依赖会被 guard 阻止的宿主监听。
 7. **归属文件与入口。** 在共享父目录原子放入 `version:1/default:docker/users:{}` 初始文件，两网关确认读取一致后再接流量；已有归属文件必须保留，不能重新清空。配置两端 peerOrigin，验证未迁移用户转发、旧版用户及 WebSocket。测试网关通过部署参考的登录、文件、模型、预览、技能上传、授权、重置口令、镜像重建检查，再按单用户步骤切换。网关 Pod 重启不应影响用户 Pod。
