@@ -23,6 +23,8 @@ function fixture({ external = true, respond = () => undefined } = {}) {
       calls.push({ slug, ...target });
       const override = respond(slug, target, calls);
       const value = override ?? (target.kind === 'dns' ? [config.gatewayIp]
+        : target.kind === 'lookup' ? { addresses: [{ address: config.gatewayIp, family: 4 }], ms: target.host.endsWith('.') ? 2 : 1200 }
+        : target.kind === 'resolv' ? ['search fixture-users.svc.cluster.invalid fixture-system.svc.cluster.invalid', 'options ndots:5']
         : target.kind === 'route' ? 'cni-address'
           : { open: allowedLabels.includes(target.label), reason: 'fixture' });
       return { exitCode: 0, stdout: JSON.stringify(value), stderr: '' };
@@ -32,8 +34,9 @@ function fixture({ external = true, respond = () => undefined } = {}) {
   };
   const c = {
     config, runtime,
-    org: { runtime: { gatewayOrigin: 'http://gateway.invalid:18080', gatewayPort: 18080, internalPort: 18082 },
-      model: { baseUrl: 'http://model.invalid:18083' } },
+    org: { runtime: { gatewayOrigin: 'http://gateway.fixture-system.svc.cluster.invalid:18080', gatewayPort: 18080, internalPort: 18082,
+      k8s: { systemNamespace: 'fixture-system', clusterDomain: 'cluster.invalid' } },
+      model: { baseUrl: 'http://model.fixture-system.svc.cluster.invalid:18083' } },
     name: slug => `fixture-${slug}`,
     pod: async slug => ({ status: { podIP: `${slug}-address-${recreated.includes(slug) ? 'new' : 'old'}` } }),
     ready: async slug => { recreated.push(slug); },
@@ -105,8 +108,10 @@ test('S10 persistent TCP failure times out before any denial or job runs', async
     if (slug === 'node-agent' && target.label === 'gateway HTTP') return { open: false, reason: 'timeout' };
   } });
   f.c.config.policyTimeoutMs = 10;
-  await assert.rejects(s10.run(f.c), /Policy convergence timed out for Pod fixture-node-agent-0/);
+  await assert.rejects(s10.run(f.c), /Policy convergence timed out for Pod fixture-node-agent-0.*node-agent: gateway HTTP \(timeout\)/);
   assert.deepEqual(f.c.evidence.policyTimeout, { slug: 'node-agent', pod: 'fixture-node-agent-0' });
+  assert.equal(f.c.evidence.nameResolution.length, 2);
+  assert.ok(f.c.evidence.nameResolution.every(entry => entry.lookups.length === 4 && entry.resolv.length === 2));
   assert.equal(f.calls.filter(call => call.open === false).length, 0);
   assert.equal(f.jobs.length, 0);
 });
@@ -114,9 +119,53 @@ test('S10 persistent TCP failure times out before any denial or job runs', async
 test('S10 retains the original matrix allow assertion after convergence', async () => {
   let attempts = 0;
   const f = fixture({ respond: (_slug, target) => {
-    if (target.label === 'gateway HTTP') return { open: ++attempts <= 2 };
+    if (target.label === 'gateway HTTP') return { open: ++attempts <= 2, reason: 'ECONNREFUSED' };
   } });
-  await assert.rejects(s10.run(f.c), /node-server: gateway HTTP/);
+  await assert.rejects(s10.run(f.c), /node-server: gateway HTTP \(ECONNREFUSED\)/);
+  assert.equal(f.c.evidence.nameResolution.length, 2);
   assert.equal(attempts, 3);
   assert.equal(f.jobs.length, 0);
+});
+
+test('S10 records configured gateway/model, short and absolute lookup timings before convergence, including on PASS', async () => {
+  const f = fixture();
+  const result = await s10.run(f.c);
+  assert.deepEqual(result.nameResolution.map(entry => entry.source), slugs);
+  for (const entry of result.nameResolution) {
+    assert.deepEqual(entry.lookups, [
+      { host: 'gateway.fixture-system.svc.cluster.invalid', addresses: [{ address: f.c.config.gatewayIp, family: 4 }], ms: 1200 },
+      { host: 'model.fixture-system.svc.cluster.invalid', addresses: [{ address: f.c.config.gatewayIp, family: 4 }], ms: 1200 },
+      { host: 'gateway', addresses: [{ address: f.c.config.gatewayIp, family: 4 }], ms: 1200 },
+      { host: 'gateway.fixture-system.svc.cluster.invalid.', addresses: [{ address: f.c.config.gatewayIp, family: 4 }], ms: 2 },
+    ]);
+    assert.deepEqual(entry.resolv, ['search fixture-users.svc.cluster.invalid fixture-system.svc.cluster.invalid', 'options ndots:5']);
+  }
+  assert.deepEqual(f.calls.slice(0, 10).map(call => [call.slug, call.kind]),
+    slugs.flatMap(slug => ['resolv', 'lookup', 'lookup', 'lookup', 'lookup'].map(kind => [slug, kind])));
+  assert.ok(f.calls.filter(call => call.kind === 'dns' || call.label?.startsWith('gateway ')
+    && call.open === true).every(call => call.host === 'gateway.fixture-system.svc.cluster.invalid'));
+  assert.ok(f.calls.filter(call => call.label === 'model egress').every(call => call.host === 'model.fixture-system.svc.cluster.invalid'));
+});
+
+test('S10 retains lookup errors and continues collecting evidence after a probe transport failure', async () => {
+  const f = fixture({ respond: (slug, target) => {
+    if (target.kind !== 'lookup' || target.host !== 'gateway') return;
+    if (slug === 'node-server') throw Object.assign(new Error('not evidence'), { code: 'Timeout' });
+    return { error: 'EAI_AGAIN', ms: 1500 };
+  } });
+  const result = await s10.run(f.c);
+  assert.deepEqual(result.nameResolution[0].lookups[2], { host: 'gateway', status: 'unavailable', error: 'Timeout' });
+  assert.deepEqual(result.nameResolution[1].lookups[2], { host: 'gateway', error: 'EAI_AGAIN', ms: 1500 });
+  assert.ok(result.nameResolution.every(entry => entry.lookups[3].ms === 2));
+});
+
+test('S10 uses a no reason fallback in convergence and matrix assertion messages', async t => {
+  for (const stage of ['convergence', 'matrix']) await t.test(stage, async () => {
+    let attempts = 0;
+    const f = fixture({ respond: (_slug, target) => {
+      if (target.label === 'gateway HTTP') return { open: stage === 'matrix' && ++attempts <= 2 };
+    } });
+    f.c.config.policyTimeoutMs = 10;
+    await assert.rejects(s10.run(f.c), /node-server: gateway HTTP \(no reason\)/);
+  });
 });

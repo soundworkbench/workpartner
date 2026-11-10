@@ -34,6 +34,10 @@ export function organizationData(environment = process.env) {
   if (!/^[A-Z_][A-Z0-9_]*$/.test(data.model.keyEnvironment) || !/^[A-Z_][A-Z0-9_]*$/.test(data.model.baseEnvironment)) throw new Error('Invalid model environment variable');
   if (!['pool', 'exec'].includes(data.model.keyMode)) throw new Error('Invalid model key mode');
   if (!['unrestricted', 'pilot-group'].includes(data.identity.admission)) throw new Error('Invalid admission policy');
+  const dnsNdots = data.runtime.k8s?.dnsNdots;
+  if (dnsNdots !== undefined && (!Number.isInteger(dnsNdots) || dnsNdots < 1 || dnsNdots > 15)) {
+    throw new Error('runtime.k8s.dnsNdots must be an integer from 1 to 15');
+  }
   return { ...data, directory };
 }
 

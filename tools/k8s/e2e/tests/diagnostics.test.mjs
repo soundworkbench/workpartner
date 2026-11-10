@@ -41,6 +41,7 @@ function fixture() {
     probe: async (source, target) => {
       calls.push({ source, target });
       return target.kind === 'http' ? { status: 200, body: sentinel }
+        : target.kind === 'lookup' ? { addresses: [{ address: config.gatewayIp, family: 4, secret: sentinel }], ms: 12, stderr: sentinel }
         : { open: target.port === 18084 || source.container === 'gateway', reason: 'timeout', stderr: sentinel };
     },
     guard: async node => { calls.push({ guard: node }); return { file: `guard-${node}.txt`, rules: 'counter packets 2 bytes 120 drop' }; },
@@ -59,19 +60,45 @@ test('timeout diagnostics include actual resources, both ports, same-node peer a
   assert.deepEqual(result.endpointSlices[0].endpoints[0].addresses, [f.config.gatewayIp]);
   assert.equal(result.networkPolicies.length, 2);
   assert.deepEqual(result.networkPolicies[0].egress[0].ports.map(p => p.port), [18083, 18084]);
-  assert.equal(result.probes.length, 12);
+  assert.equal(result.probes.length, 16);
   const self = result.probes.filter(p => p.source.container === 'gateway');
   assert.equal(self.length, 6);
   assert.deepEqual([...new Set(self.map(p => p.target.host))], ['127.0.0.1', f.config.gatewayIp]);
   assert.equal(self.filter(p => p.target.kind === 'http' && p.result.status === 200).length, 2);
-  const peer = result.probes.filter(p => p.source.name === 'wp-e2e-fixture-another-0');
+  const peer = result.probes.filter(p => p.source.name === 'wp-e2e-fixture-another-0' && p.target.host === f.config.gatewayIp);
   assert.deepEqual(peer.map(p => [p.target.host, p.target.port, p.result.open]),
     [[f.config.gatewayIp, 18083, false], [f.config.gatewayIp, 18084, true]]);
   assert.deepEqual(result.sameNodeUserPods, ['wp-e2e-fixture-node-server-0', 'wp-e2e-fixture-another-0']);
+  const hostname = new URL(f.config.organization.runtime.gatewayOrigin).hostname;
+  for (const name of result.sameNodeUserPods) {
+    const probes = result.probes.filter(p => p.source.name === name && p.target.host === hostname);
+    assert.deepEqual(probes.map(p => p.target), [{ kind: 'tcp', host: hostname, port: 18083 }, { kind: 'lookup', host: hostname }]);
+    assert.equal(probes[0].result.reason, 'timeout');
+    assert.deepEqual(probes[1].result.addresses, [{ address: f.config.gatewayIp, family: 4 }]);
+    assert.equal(probes[1].result.ms, 12);
+  }
+  assert.ok(f.calls.some(c => c.resource === 'service/wp-e2e-fixture-gateway'));
+  assert.ok(f.calls.some(c => c.resource === 'endpointslices.discovery.k8s.io'
+    && c.selector === 'kubernetes.io/service-name=wp-e2e-fixture-gateway'));
   assert.deepEqual(result.guards.map(g => g.file), ['guard-server.txt', 'guard-agent.txt']);
   assert.ok(result.guards.every(g => g.rules.includes('counter')));
   assert.ok(!JSON.stringify(result).includes(f.sentinel));
   assert.ok(f.calls.every(c => !c.resource || !/secret|configmap/.test(c.resource)));
+});
+
+test('failed Pod on the other node gets hostname TCP and lookup diagnostics alongside IP probes', async () => {
+  const f = fixture();
+  const result = await collectPolicyDiagnostics(f.runtime, f.config, 'node-agent');
+  const hostname = new URL(f.config.organization.runtime.gatewayOrigin).hostname;
+  const probes = result.probes.filter(p => p.source.name === 'wp-e2e-fixture-node-agent-0');
+  assert.deepEqual(probes.map(p => p.target), [
+    { kind: 'tcp', host: f.config.gatewayIp, port: 18083 },
+    { kind: 'tcp', host: f.config.gatewayIp, port: 18084 },
+    { kind: 'tcp', host: hostname, port: 18083 },
+    { kind: 'lookup', host: hostname },
+  ]);
+  assert.equal(probes[2].result.reason, 'timeout');
+  assert.equal(probes[3].result.ms, 12);
 });
 
 test('diagnostic API, exec and node failures preserve partial evidence and never include exception text', async () => {
@@ -84,11 +111,11 @@ test('diagnostic API, exec and node failures preserve partial evidence and never
   f.runtime.guard = async node => { if (node === 'server') throw new Error(f.sentinel); return { file: 'guard-agent.txt' }; };
   const result = await collectPolicyDiagnostics(f.runtime, f.config, 'node-agent');
   assert.equal(result.services.length, 1);
-  assert.equal(result.probes.length, 10);
+  assert.equal(result.probes.length, 18);
   assert.ok(result.probes.every(p => p.result.status === 'unavailable'));
   assert.equal(result.guards[0].status, 'unavailable');
   assert.equal(result.guards[1].file, 'guard-agent.txt');
-  assert.equal(result.errors.length, 13);
+  assert.equal(result.errors.length, 21);
   assert.ok(!JSON.stringify(result).includes(f.sentinel));
 });
 

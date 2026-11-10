@@ -107,10 +107,12 @@ function context(organization) {
   const endpoint = (name, value) => {
     try {
       const url = new URL(value);
+      const suffix = `.${systemNamespace}.svc.${k8s.clusterDomain ?? 'cluster.local'}`;
+      const service = url.hostname.endsWith(suffix) ? url.hostname.slice(0, -suffix.length) : url.hostname;
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
-        || !serviceName(url.hostname)) throw new Error();
-      return { name: url.hostname, port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)), url };
-    } catch { invalid.push(`${name} (expected an HTTP(S) URL with a short Service hostname)`); return {}; }
+        || !dnsName(url.hostname) || !serviceName(service)) throw new Error();
+      return { name: service, port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)), url };
+    } catch { invalid.push(`${name} (expected an HTTP(S) URL with a short Service hostname or its system-namespace FQDN)`); return {}; }
   };
 
   const gateway = endpoint('runtime.gatewayOrigin', runtime.gatewayOrigin);
@@ -300,7 +302,8 @@ systemNamespace defaults to the mounted ServiceAccount namespace when available.
 entry is {mode:"hostPort",hostIP:"127.0.0.1",hostPort:<port>} or
 {mode:"clusterIP",clusterIP:<IPv4>}. ClusterIP mode adds <gateway>-entry and keeps
 the gateway's same-name headless Service for preview source validation.
-Gateway origins must share a short Service hostname and match their configured ports.
+Gateway origins must name the same Service and match their configured ports.
+Service hostnames may be short names or <name>.<systemNamespace>.svc.<clusterDomain> (default cluster.local).
 The model Service uses model.baseUrl; model.nextBaseUrl must match its hostname and port if set.
 modelEgressEndpoint creates a selector-less Service and an IPv4 EndpointSlice, with precise
 TCP egress to address/32 at the endpoint port. Unspecified, loopback and link-local addresses are rejected.

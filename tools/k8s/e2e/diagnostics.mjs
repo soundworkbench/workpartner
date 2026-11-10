@@ -22,11 +22,13 @@ const policySummary = policy => ({
 });
 const probeSummary = result => ({ open: result.open, status: result.status,
   reason: /^(connected|timeout|E[A-Z0-9_]+)$/.test(result.reason || '') ? result.reason : undefined });
+const lookupSummary = result => ({ addresses: result.addresses?.map(({ address, family }) => ({ address, family })),
+  ms: result.ms, error: /^E[A-Z0-9_]+$/.test(result.error || '') ? result.error : undefined });
 
 export async function collectPolicyDiagnostics(runtime, config, failedSlug) {
   const { namespace: users, systemNamespace: system } = config.organization.runtime.k8s;
   const { gatewayPort, internalPort, gatewayOrigin } = config.organization.runtime;
-  const service = new URL(gatewayOrigin).hostname;
+  const hostname = new URL(gatewayOrigin).hostname, service = hostname.split('.')[0];
   const evidence = { failedSlug, configuredGatewayIp: config.gatewayIp, gatewayPort, internalPort, errors: [] };
   async function attempt(step, fn) {
     try { return await fn(); }
@@ -57,11 +59,10 @@ export async function collectPolicyDiagnostics(runtime, config, failedSlug) {
   evidence.probes = [];
   const gateway = gateways.find(p => !p.metadata?.deletionTimestamp && p.status?.podIP === config.gatewayIp)
     || gateways.find(p => !p.metadata?.deletionTimestamp);
-  const failedName = `${config.organization.runtime.nextContainerPrefix}${failedSlug}-0`;
-  const sameNode = gateway?.spec?.nodeName && userPods.find(p => p.spec?.nodeName === gateway.spec.nodeName
-    && p.metadata?.name !== failedName && !p.metadata?.deletionTimestamp && p.metadata?.labels?.['workpartner/role'] === 'user');
+  const sameNode = p => gateway?.spec?.nodeName && p.spec?.nodeName === gateway.spec.nodeName
+    && !p.metadata?.deletionTimestamp && p.metadata?.labels?.['workpartner/role'] === 'user';
   const sources = userPods.filter(p => ['node-server', 'node-agent', failedSlug].some(slug =>
-    p.metadata?.name === `${config.organization.runtime.nextContainerPrefix}${slug}-0`) || p === sameNode);
+    p.metadata?.name === `${config.organization.runtime.nextContainerPrefix}${slug}-0`) || sameNode(p));
   evidence.userPods = sources.map(podSummary);
   evidence.sameNodeUserPods = sources.filter(p => gateway?.spec?.nodeName && p.spec?.nodeName === gateway.spec.nodeName).map(p => p.metadata.name);
   if (!gateway) evidence.errors.push({ step: 'gateway probes', status: 'no gateway Pod' });
@@ -69,7 +70,7 @@ export async function collectPolicyDiagnostics(runtime, config, failedSlug) {
   async function check(pod, container, target) {
     const source = { ...identity(pod), container };
     const result = await attempt(`probe ${source.name} ${target.kind} ${target.host}:${target.port}`,
-      async () => probeSummary(await runtime.probe(source, target)));
+      async () => (target.kind === 'lookup' ? lookupSummary : probeSummary)(await runtime.probe(source, target)));
     evidence.probes.push({ source, target, result: result || { status: 'unavailable' } });
   }
   if (gateway) {
@@ -79,6 +80,11 @@ export async function collectPolicyDiagnostics(runtime, config, failedSlug) {
     }
     if (gateway.status?.podIP) for (const pod of sources) {
       for (const port of [gatewayPort, internalPort]) await check(pod, 'workspace', { kind: 'tcp', host: gateway.status.podIP, port });
+    }
+    for (const pod of sources.filter(p => sameNode(p)
+      || p.metadata?.name === `${config.organization.runtime.nextContainerPrefix}${failedSlug}-0`)) {
+      await check(pod, 'workspace', { kind: 'tcp', host: hostname, port: gatewayPort });
+      await check(pod, 'workspace', { kind: 'lookup', host: hostname });
     }
   }
   evidence.guards = await Promise.all([config.serverNode, config.agentNode].map(async node => ({ node,
