@@ -10,6 +10,7 @@ USER root
 
 # Keep service paths on the data volume; refuse to discard existing image content.
 RUN rmdir /srv && ln -s /data/srv /srv
+RUN install -d -o 1001 -g 1001 -m 755 /run/mysqld
 
 # 中文字体：镜像已有 Noto Sans/Serif CJK；补文泉驿微米黑/正黑，以及 Office 常用西文字体的等宽替代。
 RUN apt-get update \

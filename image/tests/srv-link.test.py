@@ -1,4 +1,4 @@
-"""Check persistent service paths without building or running an image."""
+"""Check service paths without building or running an image."""
 import os
 from pathlib import Path
 import subprocess
@@ -27,10 +27,10 @@ class SrvLinkTest(unittest.TestCase):
         self.assertEqual(result.stdout, 'continued\n')
         return result
 
-    def test_dockerfile_replaces_empty_srv_as_root_before_runtime_user(self):
+    def test_dockerfile_prepares_service_paths_as_root_before_runtime_user(self):
         lines = (ROOT / 'Dockerfile').read_text().replace('\\\n', ' ').splitlines()
         user = None
-        link_at = runtime_at = None
+        link_at = mysqld_at = runtime_at = None
         for index, line in enumerate(lines):
             fields = line.strip().split(maxsplit=1)
             if not fields or fields[0].startswith('#'):
@@ -38,7 +38,7 @@ class SrvLinkTest(unittest.TestCase):
             instruction = fields[0].upper()
             if instruction == 'FROM':
                 user = None
-                link_at = None
+                link_at = mysqld_at = None
             elif instruction == 'USER':
                 user = fields[1]
                 if user == '1001:1001':
@@ -47,9 +47,14 @@ class SrvLinkTest(unittest.TestCase):
             elif instruction == 'RUN' and fields[1] == 'rmdir /srv && ln -s /data/srv /srv':
                 self.assertEqual(user, 'root')
                 link_at = index
+            elif instruction == 'RUN' and fields[1] == 'install -d -o 1001 -g 1001 -m 755 /run/mysqld':
+                self.assertEqual(user, 'root')
+                mysqld_at = index
         self.assertIsNotNone(link_at, 'missing fail-safe /srv link creation')
+        self.assertIsNotNone(mysqld_at, 'missing /run/mysqld creation with owner 1001:1001 and mode 755')
         self.assertIsNotNone(runtime_at, 'missing runtime USER')
         self.assertLess(link_at, runtime_at)
+        self.assertLess(mysqld_at, runtime_at)
 
     def test_missing_directory_is_created(self):
         result = self.ensure_srv()

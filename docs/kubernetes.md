@@ -370,6 +370,7 @@ bash tools/k8s/distribute-image.sh --unpin "$OLD_IMAGE" \
 ## 单用户接管与回滚（K7）
 
 用户镜像中的 `/srv` 是指向 `/data/srv` 的符号链接，因此 `/srv` 下的内容持久保存在数据卷中。
+镜像还提供用户可写的 `/run/mysqld`，供自托管 MariaDB 存放 socket 和 pid 文件，数据仍保存在 `/data` 下。
 
 在原 Docker 宿主执行，能够读取原数据、钥匙和共享归属文件，并使用有 PV/节点权限的管理员 JSON kubeconfig。只支持已存在的 AionUi 用户。不自动搬迁服务或凭据，不删旧容器。每条命令默认 dry-run，**没有 `--dry-run` 参数**；省略 --apply 不做文件、Docker、Kubernetes 或 exec 写操作，但仍连接 Docker/集群读取状态。
 
