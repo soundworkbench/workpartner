@@ -75,11 +75,6 @@ case "$action" in
     [[ ${kubectl_sha,,} == "$KUBECTL_SHA256" ]] || { echo 'Published kubectl SHA256 differs from pin' >&2; exit 1; }
     printf '%s  kubectl\n' "$KUBECTL_SHA256" | sha256sum --check --strict -
     curl "${curl_args[@]}" -o k3d-linux-amd64 "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/k3d-linux-amd64"
-    curl "${curl_args[@]}" -o checksums.txt "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/checksums.txt"
-    awk '$2 == "k3d-linux-amd64" || $2 == "*k3d-linux-amd64" { print }' checksums.txt >k3d.sha256
-    [[ $(wc -l <k3d.sha256) == 1 ]] || { echo 'Missing or ambiguous k3d SHA256' >&2; exit 1; }
-    k3d_sha=$(awk '{ print $1 }' k3d.sha256)
-    [[ ${k3d_sha,,} == "$K3D_SHA256" ]] || { echo 'Published k3d SHA256 differs from pin' >&2; exit 1; }
     printf '%s  k3d-linux-amd64\n' "$K3D_SHA256" | sha256sum --check --strict -
     install -m 700 kubectl "$CI_E2E_DIR/bin/kubectl"
     install -m 700 k3d-linux-amd64 "$CI_E2E_DIR/bin/k3d"

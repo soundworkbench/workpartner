@@ -38,7 +38,7 @@ if (tool === 'curl') {
   const file = args[args.indexOf('-o') + 1];
   let data = ${JSON.stringify(fixture)};
   if (file === 'kubectl.sha256') data = process.env.CI_TEST_KUBECTL_SHA + '\\n';
-  if (file === 'checksums.txt') data = process.env.CI_TEST_K3D_SHA + '  k3d-linux-amd64\\n';
+  if (file === 'checksums.txt') process.exit(22);
   if (process.env.CI_TEST_CORRUPT === file) data += 'corrupt\\n';
   fs.writeFileSync(file, data);
 }
@@ -62,7 +62,7 @@ if (tool === 'k3d' && args[0] === 'kubeconfig') console.log('{}');
     K3S_BASE_IMAGE: 'images.test/k3s:v1', EXTERNAL_PROBE: 'probe.test:443',
     KUBECTL_VERSION: 'v1.37.2', K3D_VERSION: 'v5.8.3',
     KUBECTL_SHA256: fixtureSha, K3D_SHA256: fixtureSha,
-    CI_TEST_KUBECTL_SHA: fixtureSha, CI_TEST_K3D_SHA: fixtureSha,
+    CI_TEST_KUBECTL_SHA: fixtureSha,
     CI_TEST_FAIL: '', CI_TEST_CORRUPT: '',
   };
   const run = (name, args, extra = {}, input = '') => {
@@ -77,6 +77,32 @@ if (tool === 'k3d' && args[0] === 'kubeconfig') console.log('{}');
   })).trim().split('\n').filter(Boolean).map(JSON.parse);
   return { directory, env, run, calls };
 }
+
+test('first workflow step rejects malformed external_probe with a format example', async t => {
+  const f = await sandbox(t);
+  const workflow = await fs.readFile(path.join(root, '.github/workflows/e2e-k3d.yml'), 'utf8');
+  const firstStep = /    steps:\n      - name: [^\n]+\n        run: \|\n((?:          [^\n]*\n)+)/.exec(workflow);
+  assert.ok(firstStep, 'first step must validate inputs before checkout or tool setup');
+  const script = firstStep[1].replace(/^          /gm, '');
+  for (const probe of ['', '192.0.2.1', '192.0.2.1:', ':443', '192.0.2.1:abc',
+    '192.0.2.1:0', '192.0.2.1:65536', '192.0.2.1:99999999999999999999',
+    '192.0.2.1:443/path', ' 192.0.2.1:443', '192.0.2.1:443\n',
+    '192.0.2.1:443:443']) {
+    const result = execute('/bin/bash', ['-e', '-o', 'pipefail', '-c', script], {
+      env: { ...f.env, EXTERNAL_PROBE: probe, RUNNER_TEMP: f.directory, GITHUB_ENV: path.join(f.directory, 'env') },
+      acceptFailure: true,
+    });
+    assert.notEqual(result.status, 0, JSON.stringify(probe));
+    assert.match(result.stderr, /external_probe.*host:port.*192\.0\.2\.1:443/);
+  }
+  for (const port of ['1', '443', '65535']) {
+    const result = execute('/bin/bash', ['-e', '-o', 'pipefail', '-c', script], {
+      env: { ...f.env, EXTERNAL_PROBE: `192.0.2.1:${port}`, RUNNER_TEMP: f.directory, GITHUB_ENV: path.join(f.directory, 'env') },
+      acceptFailure: true,
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
 
 test('K6 adapter rewrites exact prefixes, preserves argv/stdin and rejects unknown commands', async t => {
   const f = await sandbox(t);
@@ -152,13 +178,14 @@ test('init rejects numeric and hexadecimal hostnames before creating directories
   assert.deepEqual(await f.calls(), []);
 });
 
-test('install requires pinned hashes, cross-checks published hashes and verifies binary bytes', async t => {
+test('install verifies pinned binary hashes without fetching k3d checksums', async t => {
   for (const [name, extra, error] of [
     ['matching hashes', {}, null],
-    ['missing pin', { KUBECTL_SHA256: '' }, /KUBECTL_SHA256/],
+    ['missing kubectl pin', { KUBECTL_SHA256: '' }, /KUBECTL_SHA256/],
+    ['missing k3d pin', { K3D_SHA256: '' }, /K3D_SHA256/],
     ['malformed pin', { K3D_SHA256: 'invalid' }, /Invalid pinned SHA256/],
     ['kubectl publication changed', { CI_TEST_KUBECTL_SHA: otherSha }, /Published kubectl SHA256 differs/],
-    ['k3d publication changed', { CI_TEST_K3D_SHA: otherSha }, /Published k3d SHA256 differs/],
+    ['k3d pin differs from binary', { K3D_SHA256: otherSha }, /checksum did NOT match/],
     ['kubectl binary changed', { CI_TEST_CORRUPT: 'kubectl' }, /checksum did NOT match/],
     ['k3d binary changed', { CI_TEST_CORRUPT: 'k3d-linux-amd64' }, /checksum did NOT match/],
   ]) await t.test(name, async t => {
