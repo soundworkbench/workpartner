@@ -393,12 +393,12 @@ slug=fixture-user
 
 | 阶段 | 实际动作 | 失败处理 |
 | --- | --- | --- |
-| `pv` | 核对 Docker `/data` 的可写 bind mount 与 `<data-root><nextDirectory>/<slug>` 一致，节点存在；若 `<data-root>/users/<slug>/work` 存在，还核对旧只读 mount。创建 Retain 静态 local PV/PVC，空 storageClass，预绑定到原节点和原目录。 | 已有卷须与计划一致；冲突时核对 claim、路径、节点，不删数据或重绑别人的卷。部分创建可在修复后重复 pv；等待 PVC Bound 再 switch。 |
+| `pv` | 核对 Docker `/data` 的可写 bind mount 与 `<data-root><nextDirectory>/<slug>` 一致，节点存在且有非空 `kubernetes.io/hostname` 标签；若 `<data-root>/users/<slug>/work` 存在，还核对旧只读 mount。创建 Retain 静态 local PV/PVC，空 storageClass，用 `matchExpressions` + `kubernetes.io/hostname` + `In` 约束原节点，values 使用读取到的标签值（不假定等于节点名），预绑定原目录。 | 标签缺失时停止，不创建任何对象。已有卷须与计划一致；旧 `matchFields` / `metadata.name` 亲和会被拒绝，须人工删除对应 PV/PVC 对象（Retain，不删数据）后重跑 pv。其他冲突核对 claim、路径、节点，不重绑别人的卷。部分创建可在修复后重复 pv；等待 PVC Bound 再 switch。 |
 | `inventory` | 全用户 cron、服务目录、进程、端口、会话、凭据文件元数据及机器人配置路径，写 JSON/文本和逐项对照表；docker diff；--apply 时仅从运行容器把 `/usr/local/bin` 下新增/修改且本人可读的普通可执行文件复制到 `/data/.zp-init.d/bin`，UID 为 runtime.uid。符号链接只报告目标，其他修改仅报告。 | 检查报告、手动转写支持的补丁，再重跑。需要 root 才能还原或涉及身份分流且不能用 PATH 覆盖的补丁按规格停止迁移。不会自动转换所有补丁。 |
-| `switch` 预检 | 在创建锁和任何写操作前确认最新完整对照表，拿锁后再核对；Bound local PVC/PV、精确节点、可选 oldwork 同节点、镜像登记、钥匙、Docker/PV 同数据目录、无旧 k8s Pod。 | 修复预检再试，不能绕过检查；核实 status，镜像登记之外还须确认节点已导入。 |
+| `switch` 预检 | 在创建锁和任何写操作前确认最新完整对照表，拿锁后再核对；Bound local PVC/PV、精确 hostname 亲和（旧 `matchFields` 在创建锁前即拒绝，拿锁后再核对）、可选 oldwork 同 hostname、镜像登记、钥匙、Docker/PV 同数据目录、无旧 k8s Pod。 | 修复预检再试，不能绕过检查；核实 status，镜像登记之外还须确认节点已导入。 |
 | `switch` 停 Docker | 先 `restart=no`，再 stop 并复查确已停止。 | 不启动 Pod；修复 Docker 操作后重跑。 |
 | `switch` 切换/预热 | 原子 owner→k8s，ensureIsolation、create、清除 paused、start；启动前再次核对归属和 Docker 已停。 | 保持 Docker 停止且 restart=no，修复后重跑 switch，或执行 rollback --apply。不存在独立 prewarm 子命令。 |
-| `verify` | 仅一个 Running Pod、预期 local PV 节点；从网关访问 `/api/auth/status`；有配置则 cc-connect 存在；预览钥匙链接正确、非空可读；Docker 不活跃；逐项核对 carried 项，缺失、不匹配或无法读取均 ALARM 并非零退出；缺少对照表时仅报警并跳过逐项核对，其余检查照常执行。switch --apply 自动执行它。 | 保持 Docker 停止，修复后重跑 verify --apply，或回滚。verify 无 --apply 仅被动检查并列出待 exec 项，不能称为完整验证。 |
+| `verify` | 仅一个 Running Pod、读取其所在节点的 hostname 标签并与 local PV 亲和比较（同时校验可选 oldwork）；从网关访问 `/api/auth/status`；有配置则 cc-connect 存在；预览钥匙链接正确、非空可读；Docker 不活跃；逐项核对 carried 项，缺失、不匹配或无法读取均 ALARM 并非零退出；缺少对照表时仅报警并跳过逐项核对，其余检查照常执行。switch --apply 自动执行它。 | 保持 Docker 停止，修复后重跑 verify --apply，或回滚。verify 无 --apply 仅被动检查并列出待 exec 项，不能称为完整验证。 |
 
 `inventory --apply` 要求旧容器运行中且有 Node，使用只读 root 探针盘点所有用户；清空 NODE_OPTIONS，并固定 PATH 为 `/usr/sbin:/usr/bin:/sbin:/bin`。原有可执行文件复制仍以 runtime.uid 执行。默认 dry-run 仅打印 docker diff 和后续探针/文件计划，不生成可用于 switch 的对照表。报告放在宿主 `<ownersFile>.adopt/`（目录模式 0700），按用户代号命名：
 

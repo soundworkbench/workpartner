@@ -166,12 +166,22 @@ export async function runAdopt(options, dependencies) {
         && volume.spec.local?.path, 'PVC must reference this user local PV');
       return volume;
     };
-    const expectedNode = volume => {
+    const expectedHostname = volume => {
       const terms = volume.spec.nodeAffinity?.required?.nodeSelectorTerms;
+      check(!terms?.some(term => term.matchFields?.some(item => item.key === 'metadata.name')),
+        'Legacy node affinity: manually delete the PV/PVC objects (Retain; do not delete data), then rerun pv');
       check(terms?.length === 1, 'PV requires a single expected node');
-      const field = terms[0].matchFields?.find(item => item.key === 'metadata.name');
-      check(field?.operator === 'In' && field.values?.length === 1, 'PV requires an exact node name affinity');
-      return field.values[0];
+      const expression = terms[0].matchExpressions?.find(item => item.key === 'kubernetes.io/hostname');
+      check(expression?.operator === 'In' && expression.values?.length === 1
+        && typeof expression.values[0] === 'string' && expression.values[0].length > 0, 'PV requires an exact kubernetes.io/hostname affinity');
+      return expression.values[0];
+    };
+    const adoptionVolumes = async () => {
+      const data = await boundVolume();
+      const hostname = expectedHostname(data);
+      const oldwork = await boundVolume('oldwork', true);
+      check(!oldwork || expectedHostname(oldwork) === hostname, 'Data and old-work volumes must use the same node');
+      return data;
     };
     const dataMount = container => {
       const mount = container?.Mounts?.find(item => item.Destination === '/data');
@@ -206,11 +216,15 @@ export async function runAdopt(options, dependencies) {
     async function verify() {
       recovery = 'Keep Docker stopped. Repair the failed check and rerun verify --apply, or run rollback --apply.';
       await step('verify Pod and expected node', async () => {
-        const volume = await boundVolume();
+        const volume = await adoptionVolumes();
         const state = await runtime.inspect(slug), pods = await podsFor(slug);
         check(state.running && pods.length === 1 && pods[0].metadata.name === `${name}-0`
           && pods[0].status?.phase === 'Running' && !pods[0].metadata.deletionTimestamp, 'Expected exactly one running workspace Pod');
-        check(pods[0].spec?.nodeName === expectedNode(volume), 'Pod is on the wrong node');
+        const nodeName = pods[0].spec?.nodeName;
+        check(typeof nodeName === 'string' && nodeName.length > 0, 'Pod has no assigned node');
+        const node = await client.get(`/api/v1/nodes/${encodeURIComponent(nodeName)}`);
+        check(node?.metadata?.name === nodeName
+          && node.metadata.labels?.['kubernetes.io/hostname'] === expectedHostname(volume), 'Pod is on the wrong node');
         report.node = pods[0].spec.nodeName;
         report.address = state.address;
       });
@@ -277,6 +291,8 @@ export async function runAdopt(options, dependencies) {
       check(container && path.resolve(dataMount(container)) === data, 'Data root does not match Docker /data');
       const node = await client.get(`/api/v1/nodes/${encodeURIComponent(options.node)}`);
       check(node?.metadata?.name === options.node, 'Node not found');
+      const hostname = node.metadata.labels?.['kubernetes.io/hostname'];
+      check(typeof hostname === 'string' && hostname.length > 0, 'Node requires a non-empty kubernetes.io/hostname label');
       const volumes = [['data', data]];
       try { if ((await fs.stat(oldwork)).isDirectory()) volumes.push(['oldwork', oldwork]); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -291,17 +307,21 @@ export async function runAdopt(options, dependencies) {
         const volume = { apiVersion: 'v1', kind: 'PersistentVolume', metadata: { name: volumeName, labels }, spec: {
           capacity: { storage: size }, volumeMode: 'Filesystem', accessModes, persistentVolumeReclaimPolicy: 'Retain', storageClassName: '',
           local: { path: directory }, claimRef: { namespace: k.namespace, name: claimName },
-          nodeAffinity: { required: { nodeSelectorTerms: [{ matchFields: [{ key: 'metadata.name', operator: 'In', values: [options.node] }] }] } },
+          nodeAffinity: { required: { nodeSelectorTerms: [{ matchExpressions: [{ key: 'kubernetes.io/hostname', operator: 'In', values: [hostname] }] }] } },
         } };
         const claim = { apiVersion: 'v1', kind: 'PersistentVolumeClaim', metadata: { name: claimName, namespace: k.namespace, labels }, spec: {
           volumeMode: 'Filesystem', accessModes, storageClassName: '', volumeName, resources: { requests: { storage: size } },
         } };
         planned.push(['/api/v1/persistentvolumes', volume], [`${core}/persistentvolumeclaims`, claim]);
       }
+      const matchesPlan = (actual, wanted) => {
+        if (actual && wanted.kind === 'PersistentVolume') expectedHostname(actual);
+        return matches(actual, wanted);
+      };
       // Validate the entire plan before the first create, including the optional old-work claim.
       for (const item of planned) {
         item[2] = await client.get(`${item[0]}/${item[1].metadata.name}`);
-        check(!item[2] || matches(item[2], item[1]), 'Existing PV/PVC conflicts with requested data');
+        check(!item[2] || matchesPlan(item[2], item[1]), 'Existing PV/PVC conflicts with requested data');
       }
       report.manifests = planned.map(item => item[1]);
       for (const [route, object, existing] of planned) await mutation(`${existing ? 'retain' : 'create'} ${object.kind} ${object.metadata.name}`, async () => {
@@ -309,7 +329,7 @@ export async function runAdopt(options, dependencies) {
         try { await client.create(route, object); }
         catch (error) {
           if (error.reason !== 'AlreadyExists') throw error;
-          check(matches(await client.get(`${route}/${object.metadata.name}`), object), 'Concurrent PV/PVC conflict');
+          check(matchesPlan(await client.get(`${route}/${object.metadata.name}`), object), 'Concurrent PV/PVC conflict');
         }
       });
     }
@@ -369,10 +389,7 @@ export async function runAdopt(options, dependencies) {
       const decisions = await decisionPreflight();
       recovery = 'Docker ownership is unchanged. Correct preflight checks and rerun switch.';
       const volume = await step('switch preflight: bound PVC and registered image', async () => {
-        const data = await boundVolume();
-        expectedNode(data);
-        const oldwork = await boundVolume('oldwork', true);
-        check(!oldwork || expectedNode(oldwork) === expectedNode(data), 'Data and old-work volumes must use the same node');
+        const data = await adoptionVolumes();
         check(await runtime.imageId(r.nextImage), 'Image is not registered');
         return data;
       });
@@ -488,7 +505,12 @@ export async function runAdopt(options, dependencies) {
       stage = options.command;
       await { pv, inventory, switch: switchUser, rollback, verify, status }[options.command]();
     };
-    if (options.command === 'switch') await decisionPreflight();
+    if (options.command === 'switch') {
+      await decisionPreflight();
+      recovery = 'Docker ownership is unchanged. Correct volume preflight checks and rerun switch.';
+      // Reject unsafe affinities before even creating the operation lock; recheck under lock.
+      await step('switch preflight: volume affinity', adoptionVolumes);
+    }
     stage = 'acquire operation lock';
     recovery = 'If another adoption is active, wait for it. For a stale owners-file .adopt.lock, inspect status before removing the lock and retrying.';
     if (options.apply && !['status', 'verify'].includes(options.command)) await withLock(r.migration.ownersFile, async () => {
