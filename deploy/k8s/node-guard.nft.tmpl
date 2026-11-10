@@ -1,0 +1,32 @@
+# Replace only our table, atomically, including on the first application.
+add table inet workpartner_guard
+delete table inet workpartner_guard
+table inet workpartner_guard {
+    # Configured Pod networks: @POD_CIDRS@
+    # Match interfaces regardless of source address to prevent source spoofing.
+    set node_ipv4 {
+        type ipv4_addr
+        @NODE_IPV4_ELEMENTS@
+    }
+    set node_ipv6 {
+        type ipv6_addr
+        @NODE_IPV6_ELEMENTS@
+    }
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname "cni0" ct state established,related counter accept
+        iifname "cni0" tcp dport { 6443, 10250 } counter accept
+        # IPv6 neighbor discovery uses inet; IPv4 ARP does not traverse this table.
+        iifname "cni0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } counter accept
+        iifname "cni0" counter drop
+        iifname "@TUNNEL_INTERFACE@" ct state new counter drop
+    }
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+        ct state established,related counter accept
+        iifname "cni0" ip daddr @node_ipv4 meta l4proto tcp tcp dport { 6443, 10250 } counter accept
+        iifname "cni0" ip6 daddr @node_ipv6 meta l4proto tcp tcp dport { 6443, 10250 } counter accept
+        iifname "cni0" ip daddr @node_ipv4 counter drop
+        iifname "cni0" ip6 daddr @node_ipv6 counter drop
+    }
+}
