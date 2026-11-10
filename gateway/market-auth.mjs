@@ -1,6 +1,7 @@
 // 桌面与容器共用网关签发的 zpd 身份；每次请求仍核对开通名单。
 import crypto from "node:crypto";
-import { writeContainerTokenFile } from "./runtime/docker.mjs";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 
 /** 签发有效期 180 天的 zpd 令牌。
  * @param key 网关签名密钥。
@@ -36,6 +37,6 @@ export function tokenUser(req, key, users, now = Date.now()) {
 /** Keep synchronous root/uid calls compatible; runtime calls return a Promise. */
 export function writeContainerToken(key, user, root = "/users", uid = 1001) {
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(user.slug)) throw new Error("用户代号无效");
-  if (typeof root === 'string') return writeContainerTokenFile(issueToken(key, user) + "\n", user.slug, root, uid);
+  if (typeof root === 'string') return require('./runtime/docker.mjs').writeContainerTokenFile(issueToken(key, user) + "\n", user.slug, root, uid);
   return root.putFiles(user.slug, [{ path: '.zp-market-token', content: issueToken(key, user) + "\n", mode: 0o600 }], { directoryMode: 0o777 });
 }

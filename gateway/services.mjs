@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { createMigration } from './migration.mjs';
 import { createFeishu } from './feishu.mjs';
 import { issueToken, tokenUser } from './market-auth.mjs';
 import { createNextFeishuPreparation } from '../feishu/next.mjs';
@@ -11,7 +12,7 @@ import { RELAY_PORT } from '../preview/policy.mjs';
 import { createPreview, writeRelayKey } from '../preview/gateway.mjs';
 
 /** Initialize organization-selected services with the gateway's identity and personal container resolver. */
-export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy }) {
+export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration = createMigration(organization) }) {
   const { features, runtime, server } = organization;
   const authenticate = req => tokenUser(req, SESSION_KEY, users());
   const enabled = () => features.feishuAuthorization && process.env.FEISHU_USER_AUTH_ENABLED !== '0';
@@ -23,7 +24,7 @@ export async function createGatewayServices({ organization, runtime: personalRun
     stateDir: path.join(runtime.stateDirectory, 'feishu'), appId: organization.identity.appId,
     secret: () => fs.readFileSync(organization.identity.appSecretFile, 'utf8').trim(),
     publicOrigin: server.publicOrigin, enabled,
-    authenticate, sessionUser: req => userFor(req).user, readUsers: users, projectHost: server.projectHost,
+    authenticate, owns: migration.owns, assertOwned: migration.assertOwned, sessionUser: req => userFor(req).user, readUsers: users, projectHost: server.projectHost,
   }) : undefined;
   const feishuSettings = feishu && createSettingsHandler({
     appearanceStyle: organization.appearance.authorizationStyle,
@@ -36,6 +37,7 @@ export async function createGatewayServices({ organization, runtime: personalRun
     publicHost: server.publicHost, previewHost: server.previewHost, key: SESSION_KEY, users,
     upstream: async slug => {
       const user = users().find(user => user.slug === slug);
+      if (!migration.owns(user)) return {};
       const up = user?.backend === 'aionui' ? await aionui.upstream(user) : await legacy?.upstream?.(slug);
       if (!up) return {};
       return { address: await (user?.backend === 'aionui' ? personalRuntime : legacyRuntime).address(slug, RELAY_PORT, up) };
@@ -48,6 +50,7 @@ export async function createGatewayServices({ organization, runtime: personalRun
     },
   }) : undefined;
   async function prepare(user) {
+    if (!migration.owns(user)) return;
     if (user.backend === 'aionui' && prepareNextFeishu) await prepareNextFeishu(user);
     if (preview && (user.backend === 'aionui' || legacy)) await writeRelayKey(SESSION_KEY, user, user.backend === 'aionui' ? personalRuntime : legacyRuntime);
   }

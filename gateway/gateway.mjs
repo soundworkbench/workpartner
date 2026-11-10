@@ -9,7 +9,8 @@ import net from "node:net";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { createRuntime, createLegacyRuntime } from "./runtime/index.mjs";
-import { docker } from "./runtime/docker.mjs";
+import { createMigration, previewSessionUser } from "./migration.mjs";
+import { tokenUser } from "./market-auth.mjs";
 import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } from "./onboard.mjs";
 import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
@@ -25,10 +26,11 @@ const MODEL_KEY_PREFIX = organization.model.keyPrefix;
 const USERS_FILE = organization.runtime.usersFile;
 const users = readUsers;
 
-const runtime = createRuntime(organization);
-const legacyRuntime = createLegacyRuntime(organization);
+const migration = createMigration(organization);
+const runtime = migration.guardRuntime(createRuntime(organization), users);
+const legacyRuntime = migration.kind === 'k8s' ? undefined : migration.guardRuntime(createLegacyRuntime(organization), users);
 const aionui = createAionui({
-  runtime, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
+  runtime, owns: migration.owns, kind: migration.kind, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
   secretDir: `${organization.runtime.secureDirectory}/aionui`,
 });
 const marketSkills = createMarketSkills({
@@ -53,12 +55,15 @@ function issueSession(who) {
   return `wp_sid=${data}.${sign(data)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`;
 }
 
-const legacy = await gatewayExtension(organization, {
+const loadExtension = migration.kind !== 'k8s' || organization.runtime.k8s?.loadGatewayExtension;
+const docker = migration.kind === 'k8s' ? undefined : (await import('./runtime/docker.mjs')).docker;
+const legacy = loadExtension ? await gatewayExtension(organization, {
   routePrefix: "/_wp", organization, docker, runtime: legacyRuntime, personalRuntime: runtime, SESSION_KEY, users, userFor, cookieOf, page, redirect: (...args) => redirect(...args), MODEL, MODEL_KEY_PREFIX, PUBLIC_HOST,
-});
-const services = await createGatewayServices({ organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy });
+}) : null;
+const services = await createGatewayServices({ organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
+aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
 const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
 
@@ -82,6 +87,7 @@ function page(res, status, title, text, refresh) {
 async function resolve(req) {
   const { who, user } = userFor(req);
   if (!user) return { deny: who };
+  migration.assertOwned(user);
   if (user.backend === "aionui") {
     try { await prepareNextFeishu?.(user); }
     catch (error) { console.error(`[feishu] ${user.slug}: CLI configuration unavailable (${error.code || error.name}); routing to personal container continues`); }
@@ -181,8 +187,10 @@ async function login(req, res, url, host) {
       console.log(`不在试用群 ${who.name}`);
       return redirect(res, "/_wp/pilot", session);
     }
+    const candidate = { ...who, slug: slugFor(who.unionId), backend: 'aionui' };
+    if (!migration.owns(candidate)) return page(res, 503, "工作区迁移中", "请稍后重试。");
     legacy?.clear?.(slugFor(who.unionId)); // 同一人删掉重开时，旧空间的登录凭证不能沿用
-    provision(runtime, who).catch((e) => console.log("开通失败", who.name, e.message));
+    provision(migration.guardRuntime(runtime, users, candidate), who).catch((e) => console.log("开通失败", who.name, e.message));
   }
   return redirect(res, decodeURIComponent(next || "/"), session);
 }
@@ -201,9 +209,14 @@ function welcomeNew(res, who) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    if (migration.forward(req, res, null)) return;
     const url = new URL(req.url, `https://${PUBLIC_HOST}`);
     const host = String(req.headers.host || "").toLowerCase();
-    if (preview?.isPreviewHost(host) && await preview.handle(req, res, url)) return;
+    if (preview?.isPreviewHost(host)) {
+      const user = previewSessionUser(req, { key: SESSION_KEY, host: organization.server.previewHost, users });
+      if (migration.forward(req, res, user)) return;
+      if (await preview.handle(req, res, url)) return;
+    }
     // A preview is untrusted code, even when it is a sibling on the same registrable domain.
     if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) {
       res.writeHead(403); return res.end();
@@ -212,7 +225,13 @@ const server = http.createServer(async (req, res) => {
     if (host !== PUBLIC_HOST && host !== `${PUBLIC_HOST}:443` && !oldHost && host !== new URL(organization.runtime.gatewayOrigin).host) {
       res.writeHead(403); return res.end();
     }
-    if (await legacy?.handle(req, res, url)) return;
+    const user = userFor(req).user || (req.headers.authorization && tokenUser(req, SESSION_KEY, users()));
+    const local = ['/_wp/login', '/_wp/logout', '/_wp/pilot'].includes(url.pathname)
+      || (url.pathname === organization.identity.callbackPath && !String(url.searchParams.get('state') || '').startsWith('feishu-'))
+      || (url.pathname === '/_wp/preparing' && !user)
+      || url.pathname.startsWith('/_wp/preview/');
+    if (!local && migration.forward(req, res, user)) return;
+    if ((!user || migration.owns(user)) && await legacy?.handle(req, res, url)) return;
     if (await preview?.handle(req, res, url)) return;
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
@@ -272,14 +291,21 @@ const server = http.createServer(async (req, res) => {
     });
   } catch (e) {
     console.log("出错", e.message);
+    if (!res.headersSent && e.code === 'WORKSPACE_NOT_OWNED') return page(res, 503, "工作区迁移中", "请稍后重试。");
     if (!res.headersSent) page(res, 200, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。", true);
   }
 });
 
 server.on("upgrade", async (req, socket, head) => {
   try {
-    if (preview?.isPreviewHost(String(req.headers.host || "").toLowerCase())) return await preview.upgrade(req, socket, head);
+    if (migration.forward(req, socket, null, head)) return;
+    if (preview?.isPreviewHost(String(req.headers.host || "").toLowerCase())) {
+      const user = previewSessionUser(req, { key: SESSION_KEY, host: organization.server.previewHost, users });
+      if (migration.forward(req, socket, user, head)) return;
+      return await preview.upgrade(req, socket, head);
+    }
     if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) return socket.destroy();
+    if (migration.forward(req, socket, userFor(req).user || (req.headers.authorization && tokenUser(req, SESSION_KEY, users())), head)) return;
     if (legacy?.upgrade?.(req, socket, head)) return;
     const r = await resolve(req);
     if (!r.cookie) return socket.destroy();
