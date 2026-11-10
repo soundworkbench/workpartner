@@ -106,6 +106,7 @@ test('S10 persistent TCP failure times out before any denial or job runs', async
   } });
   f.c.config.policyTimeoutMs = 10;
   await assert.rejects(s10.run(f.c), /Policy convergence timed out for Pod fixture-node-agent-0/);
+  assert.deepEqual(f.c.evidence.policyTimeout, { slug: 'node-agent', pod: 'fixture-node-agent-0' });
   assert.equal(f.calls.filter(call => call.open === false).length, 0);
   assert.equal(f.jobs.length, 0);
 });

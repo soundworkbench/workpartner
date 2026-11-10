@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { labelObject } from './context.mjs';
 import { outsideRepository, privateDirectory, privateFile } from './artifacts.mjs';
+import { collectPolicyDiagnostics } from './diagnostics.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const shellQuote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
@@ -83,7 +84,7 @@ export function organization(o) {
     runtime: { kind: 'k8s', uid: 1001, nextImage: o.image, nextContainerPrefix: `${p}-`, nextUserLabel: 'workpartner.next-user',
       nextModelKeyFile: '/etc/partner/model.key', nextPort: 25808, nextMemory: 268435456, nanoCpus: 500000000,
       gatewayOrigin: `http://${p}-gateway:18083`, internalOrigin: `http://${p}-gateway:18084`, gatewayPort: 18083, internalPort: 18084,
-      localAddress: '127.0.0.1:18083', secureDirectory: '/e2e-secure', stateDirectory: '/e2e-state', usersFile: '/e2e-state/users.json',
+      localAddress: '127.0.0.1:18085', secureDirectory: '/e2e-secure', stateDirectory: '/e2e-state', usersFile: '/e2e-state/users.json',
       sessionKeyFile: '/e2e-secure/session.key', cookieFile: '/e2e-state/cookies.json',
       migration: { ownersFile: '/e2e-state/owners.json' },
       k8s: { namespace: `${p}-users`, systemNamespace: `${p}-system`, storageClass: `${p}-local`,
@@ -92,7 +93,8 @@ export function organization(o) {
         podStartTimeoutMs: 120000, keepRunningIntervalMs: 0,
         newUserNodeSelector: { 'kubernetes.io/hostname': o.agentNode },
         deploy: { gatewayImage: o.gatewayImage, gatewayNodeSelector: { 'kubernetes.io/hostname': o.serverNode },
-          entry: { mode: 'hostPort', hostIP: '127.0.0.1', hostPort: 18083 },
+          // Keep the production shape: loopback entry port differs from the Pod listener.
+          entry: { mode: 'hostPort', hostIP: '127.0.0.1', hostPort: 18085 },
           // K5 validates these; the fixture replaces all host mounts before apply.
           hostPaths: { organization: '/e2e/organization', secure: '/e2e/secure', state: '/e2e/state', usersFile: '/e2e/users.json' },
           egressExceptCidrs: o.nodeIps.map(ip => `${ip}/32`), modelEgressSelector: { 'workpartner/role': 'model-egress' },
@@ -245,7 +247,6 @@ export async function controller(mode, inputFile) {
     if (object.kind === 'Deployment') {
       const spec = object.spec.template.spec, container = spec.containers[0];
       container.command = ['node', '/app/tools/k8s/e2e/gateway.mjs']; container.args = [];
-      container.ports.forEach(port => { delete port.hostPort; delete port.hostIP; });
       container.volumeMounts = [ { name: 'config', mountPath: '/e2e', readOnly: true }, { name: 'secure', mountPath: '/e2e-secure' }, { name: 'state', mountPath: '/e2e-state' } ];
       spec.volumes = [{ name: 'config', configMap: { name: `${p}-config` } }, { name: 'secure', emptyDir: {} }, { name: 'state', emptyDir: {} }];
       container.readinessProbe = { tcpSocket: { port: 'gateway' }, periodSeconds: 1 };
@@ -327,12 +328,35 @@ export async function controller(mode, inputFile) {
     return get(['pods', '-n', sys, '-l', `${selector},workpartner/role=gateway`]).items.find(pod => !pod.metadata.deletionTimestamp && pod.status.conditions?.some(c => c.type === 'Ready' && c.status === 'True'));
   }
   let gatewayPod = await waitFor(gateway); o.gatewayIp = gatewayPod.status.podIP; save();
+  const probeSource = fs.readFileSync(new URL('./probe.mjs', import.meta.url), 'utf8');
+  const probeScript = probeSource.slice(0, probeSource.indexOf('// The same source'))
+    + '\nconsole.log(JSON.stringify(await probe(JSON.parse(readFileSync(0,"utf8")))));';
   async function scenario(id, phase) {
     console.error(`Running ${id}${phase ? '/' + phase : ''}`);
     const result = kubectl(['exec', '-i', '-n', sys, gatewayPod.metadata.name, '-c', 'gateway', '--', 'node', '/app/tools/k8s/e2e/runner.mjs', id, ...(phase ? [phase] : [])], { input: JSON.stringify(o), acceptFailure: true });
     let data;
     try { data = JSON.parse(result.stdout); } catch { data = { id, phase, status: 'FAIL', error: { name: 'RunnerTransportError' } }; }
     if (result.logPath) data.commandLog = result.logPath;
+    if (data.evidence?.policyTimeout) {
+      data.evidence.policyDiagnostics = await collectPolicyDiagnostics({
+        get: (resource, namespace, selector) => JSON.parse(kubectl(['get', resource, '-n', namespace,
+          ...(selector ? ['-l', selector] : []), '-o', 'json'], { timeout: 5000 }).stdout),
+        probe: (pod, target) => {
+          const result = kubectl(['exec', '-i', '-n', pod.namespace, pod.name, '-c', pod.container,
+            '--', 'node', '--input-type=module', '-e', probeScript],
+          { input: JSON.stringify(target), timeout: 6000 });
+          return JSON.parse(result.stdout);
+        },
+        guard: node => {
+          const rules = command(o.nodeCommand, nodeArguments(o, node), {
+            input: 'set -eu\nnft list table inet workpartner_guard\n', timeout: 5000,
+          }).stdout;
+          const file = `guard-${node}.txt`;
+          privateFile(path.join(o.output, file), rules);
+          return { file, rules };
+        },
+      }, o, data.evidence.policyTimeout.slug).catch(() => ({ errors: [{ step: 'collect policy diagnostics', status: 'unavailable' }] }));
+    }
     state.results.push(data); save(); write(path.join(o.output, 'results.json'), { prefix: p, results: state.results, complete: false });
     labelVolumes();
     if (result.status !== 0 || data.status === 'FAIL') throw new Error(`${id} failed; log: ${result.logPath || path.join(o.output, 'results.json')}`);

@@ -41,7 +41,7 @@ test('help and print-config need no cluster tools', () => {
 
 test('argument parser rejects unsafe or incomplete invocations before mutations', () => {
   for (const more of [['--unknown'], ['--guard'], ['--static-pv-node', 'server'], ['--static-pv-dir', '/tmp'],
-    ['--node-ips', 'not-an-ip'], ['--external-probe', 'probe.test:0'], ['--sample-port', '18083'],
+    ['--node-ips', 'not-an-ip'], ['--external-probe', 'probe.test:0'], ['--sample-port', '18083'], ['--sample-port', '18085'],
     ['--image-id', 'bad'], ['--storage-parameters', '[]'], ['--ssh-node', 'server=-oProxyCommand=bad']]) {
     assert.throws(() => parseArgs([...args, ...more]));
   }
@@ -84,12 +84,14 @@ fs.appendFileSync(process.env.E2E_CALLS, JSON.stringify(a)+'\\n');
 if(a[0]==='--kubeconfig') a=a.slice(2);
 if(a[0]==='api-resources') { console.log(a.includes('--namespaced=true')?'pods\\nsecrets\\nconfigmaps':'namespaces\\npersistentvolumes\\nstorageclasses\\npriorityclasses'); if(process.env.E2E_PARTIAL==='1') { console.error('error: unable to retrieve the complete list of server APIs: metrics.k8s.io/v1beta1: stale GroupVersion discovery'); process.exit(1); } process.exit(0); }
 if(process.env.E2E_RUN==='1') {
- if(a[0]==='apply') { const body=JSON.parse(fs.readFileSync(0,'utf8')); fs.appendFileSync(process.env.E2E_CALLS,JSON.stringify(['applied',...body.items.map(o=>o.metadata.name)])+'\\n'); }
+ if(a[0]==='apply') { const body=JSON.parse(fs.readFileSync(0,'utf8')); fs.appendFileSync(process.env.E2E_CALLS,JSON.stringify(['applied',...body.items.map(o=>o.metadata.name)])+'\\n'); const deployment=body.items.find(o=>o.kind==='Deployment'); if(deployment) fs.appendFileSync(process.env.E2E_CALLS,JSON.stringify(['gateway-ports',deployment.spec.template.spec.containers[0].ports])+'\\n'); }
  if(a[0]==='get' && a[1]==='nodes') { console.log(JSON.stringify({items:['server','agent'].map(name=>({metadata:{name,labels:{'kubernetes.io/hostname':name}},status:{conditions:[{type:'Ready',status:'True'}],addresses:[]}}))})); process.exit(0); }
  if(a[0]==='get' && a[1]==='configmap') { console.log(JSON.stringify({data:{'images.json':JSON.stringify({'images.test/fixture:v1':'sha256:'+'a'.repeat(64)})}})); process.exit(0); }
- if(a[0]==='get' && a[1]==='pods' && a.some(v=>v.includes('workpartner/role=gateway'))) { console.log(JSON.stringify({items:[{metadata:{name:'gateway',uid:String(Date.now())},status:{podIP:'192.0.2.20',conditions:[{type:'Ready',status:'True'}]}}]})); process.exit(0); }
+ if(a[0]==='get' && a[1]==='pods' && a.some(v=>v.includes('workpartner/role=gateway'))) { console.log(JSON.stringify({items:[{metadata:{name:'gateway',namespace:'wp-e2e-offline-system',uid:String(Date.now())},spec:{nodeName:'server'},status:{podIP:'192.0.2.20',conditions:[{type:'Ready',status:'True'}]}}]})); process.exit(0); }
+ if(a[0]==='get' && a[1]==='pods' && a.includes('wp-e2e-offline-users')) { console.log(JSON.stringify({items:['node-server','node-agent'].map((slug,i)=>({metadata:{name:'wp-e2e-offline-'+slug+'-0',namespace:'wp-e2e-offline-users'},spec:{nodeName:i?'agent':'server'}}))})); process.exit(0); }
+ if(a[0]==='exec' && a.includes('--input-type=module')) { const target=JSON.parse(fs.readFileSync(0,'utf8')); console.log(JSON.stringify(target.kind==='http'?{status:200}:{open:true,reason:'connected'})); process.exit(0); }
  const runner=a.indexOf('/app/tools/k8s/e2e/runner.mjs');
- if(runner>=0) { const id=a[runner+1], phase=a[runner+2]; const fail=id===process.env.E2E_FAIL_SCENARIO; console.log(JSON.stringify({id,phase,status:fail?'FAIL':'PASS',evidence:{users:{}}})); if(fail) console.error('runner diagnostic'); process.exit(fail?1:0); }
+ if(runner>=0) { const id=a[runner+1], phase=a[runner+2]; const fail=id===process.env.E2E_FAIL_SCENARIO; console.log(JSON.stringify({id,phase,status:fail?'FAIL':'PASS',evidence:{users:{},...(fail?{policyTimeout:{slug:'node-server'}}:{})}})); if(fail) console.error('runner diagnostic'); process.exit(fail?1:0); }
 }
 if(a[0]==='delete' && a[1]==='storageclass' && process.env.E2E_FAIL==='1') process.exit(1);
 if(a[0]==='get') {
@@ -336,6 +338,10 @@ if(input==='set -eu\\nnft list table inet workpartner_guard\\n') { console.error
     assert.equal(result.status, fail ? 1 : 0, result.stderr);
     const calls = (await fs.readFile(f.log, 'utf8')).trim().split('\n').map(JSON.parse).map(a => a[0] === '--kubeconfig' ? a.slice(2) : a);
     const scene = id => calls.findIndex(a => a.includes('/app/tools/k8s/e2e/runner.mjs') && a.includes(id));
+    const gatewayPorts = calls.find(a => a[0] === 'gateway-ports')[1];
+    assert.equal(gatewayPorts[0].hostPort, 18085);
+    assert.equal(gatewayPorts[0].hostIP, '127.0.0.1');
+    assert.equal(gatewayPorts[0].containerPort, 18083);
     const hosts = calls.findIndex(a => a[0] === 'applied' && a.includes('wp-e2e-offline-host-0'));
     assert.ok(scene('S9') < hosts && hosts < scene('S10'));
     for (let i = 0; i < 2; i++) {
@@ -356,8 +362,21 @@ if(input==='set -eu\\nnft list table inet workpartner_guard\\n') { console.error
     assert.ok(requiredPolicies.every(name => state.policies.some(p => p.metadata.name === name)));
     if (fail) {
       assert.equal(state.results.at(-1).status, 'FAIL');
+      const diagnostics = state.results.at(-1).evidence.policyDiagnostics;
+      assert.equal(diagnostics.gatewayPods[0].name, 'gateway');
+      assert.equal(diagnostics.probes.length, 10);
+      assert.equal(diagnostics.guards.length, 2);
+      assert.ok(diagnostics.guards.every(g => g.status === 'unavailable'));
+      assert.ok(!JSON.stringify(diagnostics).includes('counter diagnostic'));
+      const saved = JSON.parse(await fs.readFile(path.join(output, 'results.json')));
+      assert.deepEqual(saved.results.at(-1).evidence.policyDiagnostics, diagnostics);
+      const slices = calls.findIndex(a => a[0] === 'get' && a[1] === 'endpointslices.discovery.k8s.io');
+      assert.ok(scene('S10') < slices);
+      assert.ok(slices < calls.findIndex(a => a[0] === 'delete' && a[1] === 'pod'));
       assert.match(await fs.readFile(state.results.at(-1).commandLog, 'utf8'), /runner diagnostic/);
       assert.doesNotMatch(result.stderr, /runner diagnostic/);
+    } else {
+      assert.ok(!calls.some(a => a[0] === 'get' && a[1] === 'endpointslices.discovery.k8s.io'));
     }
   }
 });
