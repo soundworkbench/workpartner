@@ -11,13 +11,14 @@ for root in ('image', 'tools'):
     for path in Path(root).rglob('*.py'):
         ast.parse(path.read_bytes(), filename=str(path))
 PY
-bash -n image/bin/start.sh image/build.sh image/agent-baseline/install.sh
+shopt -s nullglob
+bash -n image/bin/*.sh image/build.sh image/agent-baseline/install.sh
+for script in tools/k8s/*.sh; do bash -n "$script"; done
 python3 -I -B tools/wp-seed.test.py image/bin/wp-seed.py
-python3 -I -B image/tests/model-defaults.test.py
-python3 -I -B image/tests/image-inputs.test.py
+for test in image/tests/*.test.py; do python3 -I -B "$test"; done
 python3 -I -B image/agent-baseline/hooks/test_no_blocking_foreground.py
 python3 -I -B image/agent-baseline/hooks/test_no_repeat_poll.py
-node --test tools/core.test.mjs tools/runtime-models.test.mjs tools/identity-cli.test.mjs tools/gateway.test.mjs
+node --test tools/*.test.mjs
 if [ -n "${WORKPARTNER_TEST_IMAGE:-}" ]; then
   # Use the image's configured runtime user and system trust store, without networking.
   docker run --rm -i --network none --entrypoint python3 "$WORKPARTNER_TEST_IMAGE" -I - <<'PY'
