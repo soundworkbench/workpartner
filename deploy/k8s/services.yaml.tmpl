@@ -1,0 +1,28 @@
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {"name": {{gatewayName}}, "namespace": {{systemNamespace}}, "labels": {{partOf}}},
+  "spec": {"clusterIP": "None", "selector": {{gatewayLabels}}, "ports": {{gatewayServicePorts}}}
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {"name": {{governingService}}, "namespace": {{namespace}}, "labels": {{partOf}}},
+  "spec": {
+    "clusterIP": "None",
+    "selector": {{userLabels}},
+    "ports": [{"name": "workspace", "protocol": "TCP", "port": {{nextPort}}, "targetPort": {{nextPort}}}]
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {"name": {{modelName}}, "namespace": {{systemNamespace}}, "labels": {{partOf}}},
+  "spec": {
+    "type": "ClusterIP",
+    "selector": {{modelEgressSelector}},
+    "ports": [{"name": "model", "protocol": "TCP", "port": {{modelPort}}, "targetPort": {{modelPort}}}]
+  }
+}

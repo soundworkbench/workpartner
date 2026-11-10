@@ -1,0 +1,80 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {"name": "workpartner-default-deny", "namespace": {{namespace}}, "labels": {{partOf}}},
+  "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []}
+}
+---
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {"name": "workpartner-user-egress", "namespace": {{namespace}}, "labels": {{partOf}}},
+  "spec": {
+    "podSelector": {"matchLabels": {{userLabels}}},
+    "policyTypes": ["Egress"],
+    "egress": [
+      {
+        "to": [{
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+          "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}
+        }],
+        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]
+      },
+      {
+        "to": [{
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{systemNamespace}}}},
+          "podSelector": {"matchLabels": {{gatewayLabels}}}
+        }],
+        "ports": [{"protocol": "TCP", "port": {{gatewayPort}}}, {"protocol": "TCP", "port": {{internalPort}}}]
+      },
+      {
+        "to": [{
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{systemNamespace}}}},
+          "podSelector": {"matchLabels": {{modelEgressSelector}}}
+        }],
+        "ports": [{"protocol": "TCP", "port": {{modelPort}}}]
+      },
+      {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": {{egressExceptCidrs}}}}]}
+    ]
+  }
+}
+---
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {"name": "workpartner-user-ingress", "namespace": {{namespace}}, "labels": {{partOf}}},
+  "spec": {
+    "podSelector": {"matchLabels": {{userLabels}}},
+    "policyTypes": ["Ingress"],
+    "ingress": [{
+      "from": [{
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{systemNamespace}}}},
+        "podSelector": {"matchLabels": {{gatewayLabels}}}
+      }],
+      "ports": [{"protocol": "TCP", "port": {{nextPort}}}, {"protocol": "TCP", "port": 3092}]
+    }]
+  }
+}
+---
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {"name": "workpartner-model-ingress", "namespace": {{systemNamespace}}, "labels": {{partOf}}},
+  "spec": {
+    "podSelector": {"matchLabels": {{modelEgressSelector}}},
+    "policyTypes": ["Ingress"],
+    "ingress": [{
+      "from": [
+        {
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{namespace}}}},
+          "podSelector": {"matchLabels": {{userLabels}}}
+        },
+        {
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": {{systemNamespace}}}},
+          "podSelector": {"matchLabels": {{gatewayLabels}}}
+        }
+      ],
+      "ports": [{"protocol": "TCP", "port": {{modelPort}}}]
+    }]
+  }
+}

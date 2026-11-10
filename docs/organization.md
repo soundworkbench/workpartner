@@ -9,6 +9,7 @@
 | `identity` | Provider, application identity, secret file reference and admission policy |
 | `model` | Your model endpoint, key policy and agent defaults |
 | `runtime` | Image, network, container names, limits and host data paths |
+| `runtime.k8s.gatewayResources` | Optional gateway CPU and memory for the Kubernetes manifest renderer: `{"cpu":"500m","memory":"512Mi"}`. Each omitted field keeps that default. Values are positive Kubernetes resource quantity strings; requests and limits use the same values to retain Guaranteed QoS. |
 | `appearance` | Neutral or custom assets and interface copy |
 | `image` | Optional skills and instruction templates |
 | `bridge` | Optional organization-owned messaging bridge template |
