@@ -280,6 +280,8 @@ docker build -f tools/k8s/fixtures/e2e-image/gateway.Dockerfile \
 
 ### k3d 两节点
 
+**不要在跑着其他服务的宿主上启动 k3d**：它会加载 `br_netfilter`、修改网桥，可能影响同机服务。优先使用下节的 GitHub 托管一次性虚拟机；本地操作仅限可丢弃的专用测试虚拟机。
+
 K3S_IMAGE 必填，选与目标集群同一小版本且含 nft 的节点镜像。up 建一个 server、一个 agent，关闭 traefik，导入两个已构建镜像，导出 JSON kubeconfig，不改默认 context，不覆盖已有 kubeconfig。使用新的随机前缀和仓库外目录：
 
 ```bash
@@ -314,6 +316,21 @@ bash tools/k8s/e2e-k3d.sh down --prefix "$cluster"
 ```
 
 POD_CIDRS 从节点 spec.podCIDR(s) 获取；EXTERNAL_PROBE 是部署方控制的可达外网 TCP 端点，如 `probe.example.test:443`（需替换为实际测试配置）。节点名与 Docker 容器名不同则加 `--ssh-node NODE=CONTAINER`。k3d 已导入镜像，此处不用 --distribute；自定义 node-command 接收 `NODE sh -s`，stdin 为脚本。循环失败时保留当前 prefix，恢复清理的 RESULT_DIRECTORY 为 `$run_dir/run-$iteration`；每次 prefix 也记录在对应 state.json 中。
+
+### 在 GitHub Actions 上跑
+
+在 Actions 中选择 **K8 k3d end-to-end → Run workflow**（`.github/workflows/e2e-k3d.yml`）。仅手动触发，push/PR 不自动执行；使用 `ubuntu-24.04` 托管的一次性虚拟机、90 分钟 job 超时和 `contents: read`，无需配置 secrets，也不发布镜像。
+
+- `k3s_image`：默认 `rancher/k3s:v1.37.2-k3s1`，使用明确 tag，并与目标集群小版本一致。workflow 固定 kubectl `v1.37.2`、k3d `v5.8.3`，变更 k3s 小版本时须同时审阅 kubectl 兼容性。工具从指定版本的官方发布地址下载，使用 workflow env 中固定的 SHA256 严格校验，并与同版本官方校验文件交叉比对；任一不一致即失败。更新版本须同时更新固定摘要；action 固定提交 SHA。
+- `external_probe`：必填，无凭据的公网 TCP `host:port`，由操作者控制且可从测试 Pod 访问。init 拒绝 RFC1918、回环、链路本地和 CGNAT 的字面量 IPv4 地址；IPv6 输入仍不受现有探针解析器支持，私网 IPv6（`::1`、`fe80::/10`、`fc00::/7`）也会提前拒绝。主机名不会在 init 阶段解析，操作者仍须确保其指向公网。不要填私网、节点地址或含身份信息的端点；缺失时不能把 S10 外网检查算作通过。运行参数和证据应适合公开仓库，不使用内部系统信息。
+
+workflow 安装 Node 24，按上述三个 Dockerfile 构建单平台镜像，统一用 `docker.io/library/...:<随机前缀>` 标签。节点镜像从所选 k3s 镜像派生，以独立目录补齐 nft 及动态库，保留原 k3s 版本和入口；无需节点镜像内有包管理器。启动后核对两个节点的 hostname 标签、Pod CIDR 和实际 `flannel.1` 接口，接口使用 `/sys/class/net/flannel.1` 检查，创建节点内的静态卷测试父目录，并在两节点分别执行 `crictl images -o json` 和 `ctr -n k8s.io images ls -q`，失败即停止。随后等待 kube-system 的所有 deployment 和所有 APIService 达到 Available，避免启动期间的 discoveryWarnings。
+
+同一集群连续执行两轮，每轮使用不同前缀，均带 `--guard`、`--distribute`、静态卷参数和外网探针。本地 k3d 示例使用 up 已导入的镜像，因此省略 `--distribute`；CI 仍显式启用它，以覆盖 K6 的分发、镜像 ID 校验、登记和 pin/unpin 流程。`ci-node-command.sh` 将 nft/目录操作转成 `docker exec -i`；仅在本次脚本进程的 PATH 中安装 `ci-ssh.sh` 为 `ssh`，将 K6 的镜像导入、校验、pin/unpin 转成节点容器命令，保留导入的二进制 stdin。k3d 节点使用独立二进制，适配器仅精确改写命令开头的 `'k3s' 'crictl' ` → `'crictl' `、`'k3s' 'ctr' ` → `'ctr' `，后续参数保持原样；已知 `'df' ` 前缀原样放行，未知前缀一律拒绝，不修改 K6。它只接受本次两个节点和 K6 的固定调用格式，不需要 SSH 服务或钥匙。
+
+每轮执行后均有 `if: always()` 的显式 `e2e.sh --cleanup`（每次超时 10 分钟），之后独立执行 `e2e-k3d.sh down`。完整性检查要求两轮 `complete=true`、S1–S13（包括 S9/S13 的全部阶段）及清理通过；任一 FAIL、顶层或嵌套 SKIP、遗漏场景/阶段、清理警告或残留都会使 job 失败。前置步骤失败时，summary 将未执行项标为 MISSING/INVALID，不会误报通过。runner 硬终止可能来不及执行 always 步骤或上传，最终由一次性虚拟机回收资源。
+
+job summary 展示两轮逐场景/阶段结果；下载 `k3d-e2e-<run_id>-<run_attempt>` artifact 查看 `results.json`、`cleanup.json`、命令日志和 guard 计数器，保留 7 天。artifact 使用白名单，不包含 kubeconfig、state.json 或组织配置；不要向该公开 CI 输入真实集群凭据。它只能证明该次 k3d 运行，真实集群验收仍按下节执行。
 
 ### 真实集群临时命名空间
 

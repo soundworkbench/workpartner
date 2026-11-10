@@ -1,0 +1,103 @@
+name: K8 k3d end-to-end
+on:
+  workflow_dispatch:
+    inputs:
+      k3s_image:
+        description: 'Tagged k3s base image (same minor version as the target cluster)'
+        required: true
+        default: rancher/k3s:v1.37.2-k3s1
+        type: string
+      external_probe:
+        description: 'Public TCP probe host:port under your control, without credentials'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      K3S_BASE_IMAGE: ${{ inputs.k3s_image }}
+      EXTERNAL_PROBE: ${{ inputs.external_probe }}
+      KUBECTL_VERSION: v1.37.2
+      KUBECTL_SHA256: c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4
+      K3D_VERSION: v5.8.3
+      K3D_SHA256: dbaa79a76ace7f4ca230a1ff41dc7d8a5036a8ad0309e9c54f9bf3836dbe853e
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set isolated run directory
+        run: echo "CI_E2E_DIR=$RUNNER_TEMP/k3d-e2e" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Prepare isolated run directories
+        run: bash tools/k8s/e2e/ci-k3d.sh init
+      - name: Install versioned tools and verify SHA256
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh install 2>&1 | tee "$CI_E2E_DIR/logs/install.log"
+      - name: Build workspace, gateway and nft-enabled k3s images
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh build 2>&1 | tee "$CI_E2E_DIR/logs/build.log"
+      - name: Start server and agent
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh up 2>&1 | tee "$CI_E2E_DIR/logs/up.log"
+      - name: Run S1-S13 (first pass)
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh run 1 2>&1 | tee "$CI_E2E_DIR/logs/run-1.log"
+      - name: Restore and clean first pass
+        if: always()
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$CI_E2E_DIR/logs"
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh cleanup 1 2>&1 | tee "$CI_E2E_DIR/logs/cleanup-1.log"
+      - name: Run S1-S13 (second pass)
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh run 2 2>&1 | tee "$CI_E2E_DIR/logs/run-2.log"
+      - name: Restore and clean second pass
+        if: always()
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$CI_E2E_DIR/logs"
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh cleanup 2 2>&1 | tee "$CI_E2E_DIR/logs/cleanup-2.log"
+      - name: Delete disposable cluster
+        if: always()
+        timeout-minutes: 2
+        run: |
+          mkdir -p "$CI_E2E_DIR/logs"
+          set -o pipefail
+          bash tools/k8s/e2e/ci-k3d.sh down 2>&1 | tee "$CI_E2E_DIR/logs/down.log"
+      - name: Summarize and require every scenario and cleanup to pass
+        if: always()
+        run: node tools/k8s/e2e/ci-results.mjs "$CI_E2E_DIR/run-1" "$CI_E2E_DIR/run-2"
+      - name: Upload results and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: k3d-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          # Allowlist: never upload kubeconfig, state.json or organization files.
+          path: |
+            ${{ runner.temp }}/k3d-e2e/logs/*.log
+            ${{ runner.temp }}/k3d-e2e/run-*/results.json
+            ${{ runner.temp }}/k3d-e2e/run-*/cleanup.json
+            ${{ runner.temp }}/k3d-e2e/run-*/command-*.log
+            ${{ runner.temp }}/k3d-e2e/run-*/guard-*.txt
