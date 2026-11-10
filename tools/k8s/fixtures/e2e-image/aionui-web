@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+const { randomBytes } = require('node:crypto');
+if (process.argv[2] !== 'resetpass') process.exit(2);
+console.log(`new password: ${randomBytes(18).toString('hex')}`);
