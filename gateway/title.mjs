@@ -16,7 +16,7 @@ export function createChatTitles({ baseUrl, keyFor, enabled = true, fetcher = fe
     return response.json();
   }
   async function conversation(r, id, updates, signal) {
-    const result = await json(`http://${r.up.ip}:${r.port}/api/conversations/${encodeURIComponent(id)}`, {
+    const result = await json(`http://${r.up.address.host}:${r.up.address.port}/api/conversations/${encodeURIComponent(id)}`, {
       method: updates ? 'PATCH' : 'GET',
       signal,
       headers: { cookie: r.cookie, 'content-type': 'application/json' },

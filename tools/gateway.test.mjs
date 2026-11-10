@@ -7,12 +7,12 @@ import path from 'node:path';
 import http from 'node:http';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { organizationData, nextModelConfig } from '../gateway/organization/resolve.mjs';
 import { issueToken, tokenUser } from '../gateway/market-auth.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 
-async function fixture(t, { disabled = false } = {}) {
+async function fixture(t, { disabled = false, extension = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-services-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = organizationData({});
@@ -31,6 +31,25 @@ async function fixture(t, { disabled = false } = {}) {
   fs.writeFileSync(path.join(dir, 'secure/model-user1.key'), 'fixture-model-key');
   const user = { slug: 'user1', unionId: 'fixture-union', name: 'Fixture user', backend: 'aionui' };
   fs.writeFileSync(org.runtime.usersFile, JSON.stringify([user]));
+  if (extension) {
+    org.extensions.gatewayModule = './extension.mjs';
+    fs.writeFileSync(path.join(dir, 'extension.mjs'), `
+import fs from 'node:fs';
+import { writeContainerToken } from ${JSON.stringify(pathToFileURL(path.join(root, 'gateway/market-auth.mjs')).href)};
+export function createGatewayExtension({ docker, runtime, personalRuntime, SESSION_KEY, users, organization }) {
+  return { internal: async (req, res) => {
+    if (req.url !== '/compatibility') return false;
+    const result = await docker('POST', '/containers/compat/exec', { Cmd: ['fixture'] }, 25000);
+    const root = organization.directory + '/legacy';
+    const returned = writeContainerToken(SESSION_KEY, users()[0], root, organization.runtime.uid);
+    const token = fs.readFileSync(root + '/' + users()[0].slug + '/.zp-market-token', 'utf8');
+    res.end(JSON.stringify({ status: result.status, buffer: Buffer.isBuffer(result.body), body: result.body.toString(),
+      synchronous: returned === undefined, token, runtime: typeof runtime.exec, personalRuntime: typeof personalRuntime.exec }));
+    return true;
+  } };
+}
+`);
+  }
   const calls = [], upstreamHits = [];
   let conversation = { id: 'new-chat', name: 'Initial', extra: { backend: 'codex' } };
   const upstream = http.createServer(async (req, res) => {
@@ -92,7 +111,7 @@ globalThis.fetch = async (url, init) => {
   const ports = {};
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Gateway startup timed out: ' + output)), 5000);
-    child.on('message', msg => { ports[msg.kind] = msg.port; if (ports.gateway && (disabled || ports.internal)) { clearTimeout(timer); resolve(); } });
+    child.on('message', msg => { ports[msg.kind] = msg.port; if (ports.gateway && ((disabled && !extension) || ports.internal)) { clearTimeout(timer); resolve(); } });
     child.once('exit', code => { clearTimeout(timer); reject(new Error('Gateway exited ' + code + ': ' + output)); });
   });
   const request = (url, { method = 'GET', headers = {}, body, internal = false } = {}) => new Promise((resolve, reject) => {
@@ -174,4 +193,17 @@ test('organization switches disable integrations without loading private code or
   }
   assert.ok(!fs.existsSync(f.org.runtime.stateDirectory));
   assert.ok(!fs.existsSync(f.org.runtime.nextDirectory));
+});
+
+test('existing organization extensions retain Docker and synchronous token dependencies', async t => {
+  const f = await fixture(t, { disabled: true, extension: true });
+  const result = await f.request('/compatibility', { internal: true });
+  assert.equal(result.status, 200);
+  const { token, ...compatibility } = JSON.parse(result.body);
+  assert.deepEqual(compatibility, { status: 201, buffer: true, body: '{"Id":"command"}', synchronous: true,
+    runtime: 'function', personalRuntime: 'function' });
+  assert.deepEqual(tokenUser({ headers: { authorization: `Bearer ${token.trim()}` } }, 'fixture-session-key', [f.user]), f.user);
+  assert.deepEqual(f.calls.find(call => call.path === '/containers/compat/exec'), {
+    method: 'POST', path: '/containers/compat/exec', body: { Cmd: ['fixture'] },
+  });
 });

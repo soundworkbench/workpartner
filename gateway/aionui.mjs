@@ -57,23 +57,11 @@ export function upgradeHead(req, headers) {
 
 const sleepFor = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Docker 日志（无 TTY）每段带 8 字节头：类型、3 字节空、4 字节长度。
-function demux(buf) {
-  let text = "";
-  for (let i = 0; i + 8 <= buf.length;) { const n = buf.readUInt32BE(i + 4); text += buf.subarray(i + 8, i + 8 + n).toString(); i += 8 + n; }
-  return text;
-}
-
 /**
- * @param o.docker (method, path, body) => {status, body}，Docker 接口
- * @param o.self 网关自己的容器名或 ID（加入每人网络用）
- * @param o.modelContainer 模型出口容器名（加入每人网络用）
- * @param o.modelConfig Read current non-secret model defaults/catalog; changes use the idle rebuild policy.
- * @param o.image 每人镜像；o.uid 容器用户
- * @param o.dataDir 网关内看到的每人数据根目录；o.hostData 同一目录在宿主上的路径
- * @param o.secretDir 网关内存放 AionUi 口令的目录（只网关读）
- * @param o.hostSecure 宿主上的钥匙目录；o.secureDir 网关内的同一目录；o.keyPrefix 模型钥匙文件名前缀
- * @param o.usersDir 网关内的 旧版后端 每人数据根目录；o.hostUsers 同一目录在宿主上的路径（旧文件只读挂到 /data/old-work）
+ * @param o.runtime Personal runtime for lifecycle, storage and endpoint resolution.
+ * @param o.modelConfig Current non-secret model defaults and catalog.
+ * @param o.image Target personal image reference.
+ * @param o.secretDir Gateway-only password directory.
  * @param o.maxJobs 不同人同时进行的开通/启动/重置任务上限（默认 2），超出时 upstream 返回 null，页面稍后自动刷新重试
  * @param o.resetBackoffMs 同一人两次口令重置之间的最短间隔（默认 60 秒）
  * @param o.waitTimeoutMs 等一次性重置容器退出的上限（默认 60 秒）
@@ -85,8 +73,7 @@ function demux(buf) {
  * @param o.now 当前毫秒数（测试用）
  */
 export function createAionui(o) {
-  const { docker, sleep = sleepFor, log = console.log, now = Date.now } = o;
-  const names = (slug) => nextNames(slug, o.containerPrefix);
+  const { runtime, sleep = sleepFor, log = console.log, now = Date.now } = o;
   const maxJobs = o.maxJobs ?? 2;
   const resetBackoffMs = o.resetBackoffMs ?? 60000;
   const waitTimeoutMs = o.waitTimeoutMs ?? 60000;
@@ -95,7 +82,6 @@ export function createAionui(o) {
   const maxDeferMs = o.maxDeferMs ?? 30 * 60000;
   const newRoundGapMs = o.newRoundGapMs ?? 10 * 60000;
   const topTimeoutMs = o.topTimeoutMs ?? 5000;
-  const port = o.port || AIONUI_PORT;
   const sessions = new Map();     // slug -> cookie 文本
   const joined = new Map();       // slug -> 上次确认网关和模型出口 在其网络里的时间
   const jobs = new Map();         // slug -> 进行中的开通、启动或重置
@@ -106,63 +92,20 @@ export function createAionui(o) {
   const lastBusyAt = new Map();   // slug -> 最近一次查到忙的时间；与这次间隔超过 newRoundGapMs 说明中间没人访问，算新一轮
   const forcePending = new Map(); // slug -> 判定强制重建的时间：任务已满还没起任务；有空位时直接重建、不再重查；超过 newRoundGapMs 作废，回到正常判断
 
-  const inspect = async (p) => {
-    const r = await docker("GET", p);
-    if (r.status === 404) return null;
-    if (r.status !== 200) throw new Error(`Docker 返回 ${r.status}：${p}`);
-    return JSON.parse(r.body);
-  };
-
   async function ensureNetwork(slug) {
-    const { network } = names(slug);
-    let net = await inspect(`/networks/${network}`);
-    if (!net) {
-      const r = await docker("POST", "/networks/create", {
-        Name: network, Driver: "bridge", CheckDuplicate: true, EnableIPv6: false,
-        Options: { "com.docker.network.bridge.name": `wpn-${crypto.createHash("sha256").update(network).digest("hex").slice(0, 11)}` },
-        Labels: { [o.userLabel || "workpartner.next-user"]: slug },
-      });
-      if (r.status !== 201 && r.status !== 409) throw new Error(`建网络失败：${r.status}`);
-      net = await inspect(`/networks/${network}`);
-    }
-    const members = Object.entries(net.Containers || {});
-    for (const who of [o.self, o.modelContainer].filter(Boolean)) {
-      if (members.some(([id, c]) => id.startsWith(who) || c.Name === who)) continue;
-      const r = await docker("POST", `/networks/${network}/connect`, { Container: who });
-      if (r.status !== 200) throw new Error(`把 ${who} 接入 ${network} 失败：${r.status}`);
-    }
+    await runtime.ensureIsolation(slug);
     joined.set(slug, now());
   }
 
   async function create(user, modelConfig) {
-    const { slug } = user;
-    const { container, network } = names(slug);
-    const key = `${o.keyPrefix}${slug}.key`;
-    if (!fs.existsSync(path.join(o.secureDir, key))) throw new Error(`没有 ${slug} 的模型钥匙`);
-    const data = path.join(o.dataDir, slug);
-    fs.mkdirSync(data, { recursive: true });
-    fs.chownSync(data, o.uid, o.uid);
-    const oldWork = o.hostUsers && fs.existsSync(path.join(o.usersDir, slug, "work"))
-      ? [`${o.hostUsers}/${slug}/work:/data/old-work:ro`] : [];
-    const r = await docker("POST", `/containers/create?name=${container}`, {
-      Image: o.image, User: `${o.uid}:${o.uid}`, Hostname: container,
-      Env: [`${o.modelBaseEnvironment || "MODEL_BASE_URL"}=${o.modelBaseUrl}`, `PARTNER_USER_NAME=${user.name || ""}`,
-        ...(modelConfig ? [`WORKPARTNER_MODEL_CONFIG=${modelConfig}`] : [])],
-      Labels: { [o.userLabel || "workpartner.next-user"]: slug },
-      HostConfig: {
-        Binds: [`${o.hostData}/${slug}:/data`, `${o.hostSecure}/${key}:${o.modelKeyFile || "/etc/partner/model.key"}:ro`, ...oldWork],
-        NetworkMode: network, RestartPolicy: { Name: "unless-stopped" },
-        Memory: o.memory, NanoCpus: o.nanoCpus, PidsLimit: o.pidsLimit,
-      },
-    });
-    if (r.status !== 201) throw new Error(`建容器失败：${r.status} ${String(r.body).slice(0, 200)}`);
-    log(`新版工作伙伴容器已建 ${user.name || ""}（${slug}）`);
+    await runtime.create(user, { modelConfig });
+    log(`新版工作伙伴容器已建 ${user.name || ""}（${user.slug}）`);
   }
 
   // 等 AionUi 接口能答话（不需要登录的状态接口）。
-  async function waitReady(ip) {
+  async function waitReady(address) {
     for (let i = 0; i < 60; i++) {
-      const status = await call(ip, "GET", "/api/auth/status").then((r) => r.status, () => 0);
+      const status = await call(address, "GET", "/api/auth/status").then((r) => r.status, () => 0);
       if (status && status < 500) return true;
       await sleep(1000);
     }
@@ -174,25 +117,13 @@ export function createAionui(o) {
   // 重置 AionUi 的 admin 口令并存到网关侧（口令不写日志）。AionUi 运行时独占数据目录，
   // 所以在本人容器停着的时候，用同一镜像、同一数据目录、无网络的一次性容器执行 resetpass。
   async function resetPassword(slug) {
-    const once = `${names(slug).container}-resetpass`;
-    await docker("DELETE", `/containers/${once}?force=1`);
-    const r = await docker("POST", `/containers/create?name=${once}`, {
-      Image: o.image, User: `${o.uid}:${o.uid}`, Entrypoint: ["/opt/aionui/aionui-web"], Cmd: ["resetpass", "--data-dir", "/data/aionui-data"],
-      HostConfig: { Binds: [`${o.hostData}/${slug}:/data`], NetworkMode: "none" },
+    const result = await runtime.runOnce(slug, {
+      entrypoint: ["/opt/aionui/aionui-web"], cmd: ["resetpass", "--data-dir", "/data/aionui-data"], timeoutMs: waitTimeoutMs,
     });
-    if (r.status !== 201) throw new Error(`建口令重置容器失败：${r.status}`);
-    try {
-      await docker("POST", `/containers/${once}/start`);
-      let timer;
-      const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("口令重置超时")), waitTimeoutMs); });
-      try { await Promise.race([docker("POST", `/containers/${once}/wait`), timeout]); } finally { clearTimeout(timer); }
-      const pass = demux((await docker("GET", `/containers/${once}/logs?stdout=1&stderr=1`)).body).match(/new password:\s*(\S+)/i)?.[1];
-      if (!pass) throw new Error("AionUi 没有返回新口令");
-      fs.mkdirSync(o.secretDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(passFile(slug), pass, { mode: 0o600 });
-    } finally {
-      await docker("DELETE", `/containers/${once}?force=1`);
-    }
+    const pass = result.logs.match(/new password:\s*(\S+)/i)?.[1];
+    if (!pass) throw new Error("AionUi 没有返回新口令");
+    fs.mkdirSync(o.secretDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(passFile(slug), pass, { mode: 0o600 });
   }
 
   // 容器、网络、口令都就绪后返回地址；需要开通、启动或重置口令时在后台进行，期间返回 null（页面显示“正在准备”）。
@@ -206,36 +137,35 @@ export function createAionui(o) {
 
   async function resolveUpstream(user) {
     const { slug } = user;
-    const { container, network } = names(slug);
-    const info = await inspect(`/containers/${container}/json`);
+    const info = await runtime.inspect(slug);
     const hasPass = fs.existsSync(passFile(slug));
     const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
-    let stale = !!info && info.Config.Image !== o.image;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
-    if (info && !stale) {
+    let stale = info.exists && info.image !== o.image;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
+    if (info.exists && !stale) {
       // 标签可原名重建；目标镜像不可用时仍按镜像名判断，不据此删除容器。
       let target;
-      try { target = await inspect(`/images/${encodeURIComponent(o.image)}/json`); }
+      try { target = await runtime.imageId(o.image); }
       catch (e) { log(`查新版工作伙伴目标镜像失败（${e.message}），仍按镜像名判断`); }
-      stale = !!target?.Id && info.Image !== target.Id;
+      stale = !!target && info.imageId !== target;
     }
-    if (info && modelConfig && !(info.Config.Env || []).includes(`WORKPARTNER_MODEL_CONFIG=${modelConfig}`)) stale = true;
+    if (info.exists && modelConfig && !(info.env || []).includes(`WORKPARTNER_MODEL_CONFIG=${modelConfig}`)) stale = true;
     if (!stale) { busySince.delete(slug); lastBusyAt.delete(slug); forcePending.delete(slug); }
     let forced = false;
     let current = null;   // 旧容器仍可用时的地址
-    if (info?.State.Running && hasPass) {
+    if (info.running && hasPass) {
       if (!joined.has(slug) || now() - joined.get(slug) >= recheckMs) await ensureNetwork(slug);
-      const ip = info.NetworkSettings.Networks[network]?.IPAddress;
+      const address = info.address;
       // 重建会打断正在进行的对话：有对话在处理就这次不重建，继续用旧容器，下次请求再查。
-      if (ip) current = { name: container, ip, port, imageId: info.Image };
-      if (stale && ip) {
+      if (address) current = { name: info.name, address, imageId: info.imageId };
+      if (stale && address) {
         if (forcePending.has(slug) && now() - forcePending.get(slug) > newRoundGapMs) forcePending.delete(slug);
         if (forcePending.has(slug)) forced = true;
         else {
-          const verdict = await processing(slug, ip);
+          const verdict = await processing(slug, address);
           if (verdict === true) stale = false; else forced = verdict === "force";
         }
       }
-      if (ip && !stale) return current;
+      if (address && !stale) return current;
     }
     if (jobs.size >= maxJobs) {
       // 已强制但任务已满：先用旧容器（照常可用），强制标记保留到有空位时再重建
@@ -248,23 +178,20 @@ export function createAionui(o) {
     const job = (async () => {
       await ensureNetwork(slug);
       if (stale) {
-        if (info.State.Running) await docker("POST", `/containers/${container}/stop?t=10`);
-        await docker("DELETE", `/containers/${container}?force=1`);
+        if (info.running) await runtime.stop(slug);
+        await runtime.remove(slug);
       }
-      if (!info || stale) await create(user, modelConfig);
+      if (!info.exists || stale) await create(user, modelConfig);
       if (needReset) {
-        if (info?.State.Running && !stale) await docker("POST", `/containers/${container}/stop?t=10`);
+        if (info.running && !stale) await runtime.stop(slug);
         lastReset.set(slug, now());
         await resetPassword(slug);
       }
-      const cur = await inspect(`/containers/${container}/json`);
-      if (!cur.State.Running) {
-        const r = await docker("POST", `/containers/${container}/start`);
-        if (r.status !== 204 && r.status !== 304) throw new Error(`启动容器失败：${r.status}`);
-      }
+      const cur = await runtime.inspect(slug);
+      if (!cur.running) await runtime.start(slug);
       sessions.delete(slug);
-      const ip = (await inspect(`/containers/${container}/json`)).NetworkSettings.Networks[network]?.IPAddress;
-      if (!ip || !await waitReady(ip)) throw new Error("AionUi 没有就绪");
+      const address = await runtime.address(slug);
+      if (!address || !await waitReady(address)) throw new Error("AionUi 没有就绪");
     })().catch((e) => { joined.delete(slug); log(`新版工作伙伴准备失败 ${slug}：${e.message}`); })
       .finally(() => jobs.delete(slug));
     jobs.set(slug, job);
@@ -280,10 +207,10 @@ export function createAionui(o) {
   // 连续观察到忙超过 maxDeferMs（is_processing 卡住或进程不退出）就不再推迟，强制重建。
   // 上限只计连续观察：与上次查到忙间隔超过 newRoundGapMs（默认 10 分钟）说明中间没人访问，当新一轮；到上限前每次都照常查当前状态。
   // 返回 true：忙，继续用旧容器；"force"：忙但已到上限，强制重建；false：空闲，重建。
-  async function processing(slug, ip) {
+  async function processing(slug, address) {
     const t = now();
     if (t < (busyUntil.get(slug) ?? 0)) return true;
-    const web = await aionuiBusy(slug, ip);
+    const web = await aionuiBusy(slug, address);
     const bridge = await bridgeBusy(slug);
     if (!web && !bridge) {
       busyUntil.delete(slug); busySince.delete(slug); lastBusyAt.delete(slug);
@@ -301,10 +228,10 @@ export function createAionui(o) {
     return true;
   }
 
-  async function aionuiBusy(slug, ip) {
+  async function aionuiBusy(slug, address) {
     try {
       const get = async (p) => {
-        const r = await call(ip, "GET", p);
+        const r = await call(address, "GET", p);
         if (r.status !== 200) throw new Error(`${p} 返回 ${r.status}`);
         return JSON.parse(r.body).data;
       };
@@ -322,13 +249,8 @@ export function createAionui(o) {
     try {
       let timer;
       const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("超时")), topTimeoutMs); });
-      const r = await Promise.race([docker("GET", `/containers/${names(slug).container}/top?ps_args=${encodeURIComponent("-eo pid,ppid,args")}`, undefined, topTimeoutMs), timeout])
+      const procs = await Promise.race([runtime.processes(slug, topTimeoutMs), timeout])
         .finally(() => clearTimeout(timer));
-      if (r.status !== 200) throw new Error(`top 返回 ${r.status}`);
-      const { Titles, Processes } = JSON.parse(r.body);
-      const [iPid, iPpid, iArgs] = ["PID", "PPID", "COMMAND"].map((k) => Titles.findIndex((x) => x.toUpperCase() === k));
-      if (iPid < 0 || iPpid < 0 || iArgs < 0) throw new Error("top 输出缺列");
-      const procs = Processes.map((p) => ({ pid: p[iPid], ppid: p[iPpid], args: p[iArgs] }));
       const roots = new Set(procs.filter((p) => /(^|\/)cc-connect$/.test(p.args.split(/\s+/)[0])).map((p) => p.pid));
       return procs.some((p) => roots.has(p.ppid));
     } catch (e) {
@@ -337,9 +259,9 @@ export function createAionui(o) {
     }
   }
 
-  function call(ip, method, p, body, headers = {}) {
+  function call(address, method, p, body, headers = {}) {
     return new Promise((resolve, reject) => {
-      const q = http.request({ host: ip, port, path: p, method, timeout: 10000,
+      const q = http.request({ ...address, path: p, method, timeout: 10000,
         headers: body ? { "content-type": "application/json", ...headers } : headers }, (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
@@ -353,7 +275,7 @@ export function createAionui(o) {
 
   // 返回 {status, cookie}；网络错误或超时抛出。
   async function login(up, pass) {
-    const r = await call(up.ip, "POST", "/login", { username: "admin", password: pass });
+    const r = await call(up.address, "POST", "/login", { username: "admin", password: pass });
     const cookie = (r.headers["set-cookie"] || []).map((c) => c.split(";")[0]).filter((c) => c.includes("=")).join("; ");
     return { status: r.status, cookie: r.status === 200 && cookie ? cookie : null };
   }

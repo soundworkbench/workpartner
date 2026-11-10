@@ -50,15 +50,7 @@ export async function identify(code, onboard, host = PUBLIC_HOST) {
 
 export const slugFor = (unionId) => "u" + crypto.createHash("sha256").update(unionId).digest("hex").slice(0, 8);
 
-async function dockerExec(docker, container, cmd) {
-  const created = JSON.parse((await docker("POST", `/containers/${container}/exec`, { AttachStdout: true, AttachStderr: true, Cmd: cmd })).body);
-  const out = (await docker("POST", `/exec/${created.Id}/start`, { Detach: false, Tty: false })).body;
-  let text = "";
-  for (let i = 0; i + 8 <= out.length;) { const n = out.readUInt32BE(i + 4); text += out.subarray(i + 8, i + 8 + n).toString(); i += 8 + n; }
-  return text;
-}
-
-async function modelKey(docker, slug) {
+async function modelKey(runtime, slug) {
   const file = `${organization.runtime.secureDirectory}/${KEY_PREFIX}${slug}.key`;
   if (fs.existsSync(file)) return;
   if (KEY_POOL) {
@@ -72,7 +64,7 @@ async function modelKey(docker, slug) {
   const settings = organization.model.provision;
   if (!settings) throw new Error("请先在钥匙池准备模型钥匙");
   const name = `${organization.runtime.containerPrefix}${slug}`;
-  const exec = (...args) => dockerExec(docker, settings.container, [...settings.command, ...args]);
+  const exec = (...args) => runtime.execNamed(settings.container, [...settings.command, ...args], { createTimeout: 0, timeout: 0 }).then(result => result.logs);
   const key = (await exec("add", name)).match(new RegExp(settings.keyPattern))?.[0];
   if (!key) throw new Error("模型服务没有返回钥匙");
   fs.writeFileSync(file, key, { mode: 0o400 });
@@ -87,13 +79,13 @@ const running = new Map();
 export const provisioning = (unionId) => running.has(slugFor(unionId));
 
 // 开通一个人；同一人重复触发只跑一次。已有名单记录原样返回，不切换旧用户。
-export function provision(docker, { unionId, name }) {
+export function provision(runtime, { unionId, name }) {
   const slug = slugFor(unionId);
   if (!running.has(slug)) {
     running.set(slug, (async () => {
       const existing = readUsers().find((user) => user.unionId === unionId);
       if (existing) return existing;
-      await modelKey(docker, slug);
+      await modelKey(runtime, slug);
       if (!fs.readFileSync(`${organization.runtime.secureDirectory}/${KEY_PREFIX}${slug}.key`, "utf8").trim()) throw new Error("模型钥匙尚未准备好");
       const list = readUsers().filter((x) => x.slug !== slug);
       const row = { slug, name, unionId, backend: "aionui", since: new Date().toISOString() };
