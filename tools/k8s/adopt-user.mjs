@@ -8,7 +8,7 @@ import { list, matches, publishedLinks, readOwners, requireValue as check, valid
 
 import { inventoryProbe, parseInventoryProbe, inventoryPaths, inventoryDocument, saveInventory, prepareInventoryDirectory, readDecisions, verificationProbe, verificationRows } from './adopt-inventory.mjs';
 
-import { readinessTimeout, waitForReady } from './adopt-wait.mjs';
+import { readinessTimeout, safeErrorFields, waitForReady } from './adopt-wait.mjs';
 
 const commands = new Set(['pv', 'inventory', 'switch', 'rollback', 'verify', 'status']);
 const publishedDefault = '/run/workpartner/published';
@@ -90,7 +90,7 @@ async function defaultCommand(program, args) {
     return { ...result, exitCode: 0 };
   } catch (error) {
     if (Number.isInteger(error.code)) return { exitCode: error.code, stdout: error.stdout || '' };
-    throw new Error('Command unavailable or timed out');
+    throw error;
   }
 }
 
@@ -225,7 +225,7 @@ export async function runAdopt(options, dependencies) {
     }
 
     async function gatewayExec(argv, timeout, remaining) {
-      check(k.systemNamespace || client.namespace, 'Missing system namespace');
+      check(k.systemNamespace || client.namespace, 'Missing system namespace', { retry: false });
       const gateways = await list(client, `/api/v1/namespaces/${k.systemNamespace || client.namespace}/pods?labelSelector=${encodeURIComponent('workpartner/role=gateway')}`);
       const gateway = gateways.find(pod => pod.status?.phase === 'Running' && !pod.metadata.deletionTimestamp);
       check(gateway, 'Gateway Pod unavailable');
@@ -239,10 +239,25 @@ export async function runAdopt(options, dependencies) {
       await readyStep('prepare gateway published files', async remaining => {
         if (!options.apply) return say('DRY-RUN planned gateway exec: internal prepare');
         const port = r.internalPort ?? 3091;
-        check(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid gateway internal port');
-        const script = 'const http=require("node:http");const [port,slug]=process.argv.slice(1);const q=http.request({host:"127.0.0.1",port,path:"/internal/adopt/prepare/"+encodeURIComponent(slug),method:"POST",timeout:15000},r=>{r.resume();process.exitCode=r.statusCode===204?0:1});q.on("timeout",()=>q.destroy());q.on("error",()=>{process.exitCode=1});q.end();';
+        check(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid gateway internal port', { retry: false });
+        const script = `const http=require("node:http");
+const [port,slug]=process.argv.slice(1);
+let reported=false;
+const report=(line,ok=false)=>{if(reported)return;reported=true;process.stdout.write(line+"\\n");process.exitCode=ok?0:1};
+const q=http.request({host:"127.0.0.1",port,path:"/internal/adopt/prepare/"+encodeURIComponent(slug),method:"POST",timeout:15000},r=>{
+  report("HTTP "+r.statusCode,r.statusCode===204);r.destroy();
+});
+q.on("timeout",()=>q.destroy(Object.assign(new Error(),{code:"ETIMEDOUT"})));
+q.on("error",e=>report("ERROR "+(typeof e.code==="string"&&/^[A-Z][A-Z0-9_]{1,63}$/.test(e.code)?e.code:"EIO")));
+q.end();`;
         const result = await gatewayExec(['node', '-e', script, String(port), slug], 20000, remaining);
-        check(result.exitCode === 0, 'Gateway internal prepare failed (check gateway ownership and internal listener)');
+        // Accept exactly one diagnostic line, never arbitrary stdout/stderr.
+        const response = typeof result.stdout === 'string' && /^(?:HTTP ([1-5][0-9]{2})|ERROR ([A-Z][A-Z0-9_]{1,63}))\n?$/.exec(result.stdout);
+        const status = response?.[1] && Number(response[1]);
+        check(![404, 405, 403].includes(status),
+          `Gateway internal prepare route missing or refused (HTTP ${status}): upgrade the gateway first / check the internal listener`, { retry: false });
+        const fields = safeErrorFields({ status, code: response?.[2] || (!status ? 'EPREPARESTATUS' : undefined), exitCode: result.exitCode });
+        check(status === 204 && result.exitCode === 0, `Gateway internal prepare failed${fields} (check gateway ownership and internal listener)`);
       });
     }
 
@@ -257,7 +272,7 @@ export async function runAdopt(options, dependencies) {
         check(typeof nodeName === 'string' && nodeName.length > 0, 'Pod has no assigned node');
         const node = await client.get(`/api/v1/nodes/${encodeURIComponent(nodeName)}`);
         check(node?.metadata?.name === nodeName
-          && node.metadata.labels?.['kubernetes.io/hostname'] === expectedHostname(volume), 'Pod is on the wrong node');
+          && node.metadata.labels?.['kubernetes.io/hostname'] === expectedHostname(volume), 'Pod is on the wrong node', { retry: false });
         if (options.apply) check(pods[0].status?.conditions?.some(condition => condition.type === 'Ready' && condition.status === 'True'), 'Workspace Pod is not Ready');
         report.node = pods[0].spec.nodeName;
         report.address = state.address;
@@ -283,7 +298,8 @@ export async function runAdopt(options, dependencies) {
         if (organization.features?.feishuAuthorization !== false) required.push('.zp-market-token', '.wp-feishu-cli.json');
         if (!required.length) return;
         const secret = await client.get(`${core}/secrets/${name}-published`);
-        check(required.every(key => typeof secret?.data?.[key] === 'string' && Buffer.from(secret.data[key], 'base64').length > 0), 'Published Secret keys are missing or empty');
+        const missing = required.filter(key => typeof secret?.data?.[key] !== 'string' || Buffer.from(secret.data[key], 'base64').length === 0);
+        check(missing.length === 0, `Published Secret keys are missing or empty: ${missing.join(', ')}`);
         const script = 'dir=$1; shift; for file do test -L "/data/$file" && test "$(readlink "/data/$file")" = "$dir/$file" && test -s "/data/$file" && test -r "/data/$file" || exit 1; done';
         const result = await runtime.exec(slug, ['sh', '-c', script, 'verify', published, ...required], { timeout: Math.min(10000, remaining()) });
         check(result.exitCode === 0, 'Published file links are invalid, empty or unreadable');
@@ -492,7 +508,7 @@ export async function runAdopt(options, dependencies) {
       });
       await preparePublished();
       if (options.apply) await verify();
-      else say('DRY-RUN verify after start: Pod/node, gateway status, cc-connect, preview link, Docker stopped');
+      else say('DRY-RUN verify after start: Pod/node, gateway status, cc-connect, published keys/links, Docker stopped');
     }
 
     async function rollback() {
@@ -570,7 +586,7 @@ export async function runAdopt(options, dependencies) {
   } catch (error) {
     // Upstream errors may contain tokens, command output, or Secret data.
     report.exitCode = 1; report.failedStage = stage;
-    say(`FAILED at ${stage}${error.code === 'AdoptCheckFailed' ? `: ${error.message}` : ''}. NEXT: ${recovery}`);
+    say(`FAILED at ${stage}${error?.code === 'AdoptCheckFailed' ? `: ${error.message}` : safeErrorFields(error)}. NEXT: ${recovery}`);
     return report;
   }
 }

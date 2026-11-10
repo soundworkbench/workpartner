@@ -516,8 +516,8 @@ await import(${JSON.stringify(pathToFileURL(path.join(root, 'gateway/gateway.mjs
 assert.equal(globalThis.extensionLoaded, process.env.TEST_EXTENSION === '1' ? true : undefined);
 const data = Buffer.from(JSON.stringify({ u: 'fixture-union', n: 'Fixture', e: Date.now() / 1000 + 600 })).toString('base64url');
 const cookie = 'wp_sid=' + data + '.' + crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
-async function request(url, extra = {}) {
-  const req = new PassThrough(); Object.assign(req, { url, method: 'GET', headers: { host: 'workspace.example.test', cookie, ...extra } });
+async function request(url, extra = {}, method = 'GET') {
+  const req = new PassThrough(); Object.assign(req, { url, method, headers: { host: 'workspace.example.test', cookie, ...extra } });
   const res = new PassThrough(); let status, body = '', headers;
   res.writeHead = (value, fields) => { status = value; headers = fields; }; res.setHeader = () => {};
   res.on('data', chunk => { body += chunk; });
@@ -566,6 +566,12 @@ assert.equal((await request('/_wp/logout')).status, 200);
 assert.equal((await request('/_wp/callback')).status, 200);
 fs.writeFileSync(${JSON.stringify(org.runtime.migration.ownersFile)}, JSON.stringify({ version: 1, default: 'k8s', users: {} }));
 assert.equal((await request('/_wp/me')).status, 200);
+// The public unknown-route entry must not dispatch the internal prepare handler.
+const missing = await request('/unregistered-route', { cookie: '' }, 'POST');
+const prepare = await request('/internal/adopt/prepare/user1', { cookie: '' }, 'POST');
+assert.notEqual(prepare.status, 204);
+assert.equal(prepare.status, missing.status);
+assert.equal(prepare.body, missing.body);
 `;
   for (const enabled of [false, true]) {
     org.runtime.k8s.loadGatewayExtension = enabled;

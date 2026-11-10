@@ -407,9 +407,11 @@ slug=fixture-user
 
 `verify --apply` 与 `switch --apply` 自动验证使用相同的有界重试：每项就绪检查默认最多 **180 秒**，失败后每 **5 秒**重试（最后一次等待不超过剩余时间）。可用 `--ready-timeout 300` 改为每项 300 秒；接受大于 0、至多 86400 的秒数。总耗时可能包含多个检查各自的等待。Pod Ready、网关 AionUi 状态、有配置的 cc-connect、发布文件和 carried 项均等待启动完成；逐项对照表格式错误仍直接失败。输出包含 `WAIT ... attempt N`、成功的 `READY ... attempt N`，最终失败包含尝试次数和最后原因。暂时缺少 carried 项不会立即输出 ALARM，只在最终失败时输出。无 `--apply` 不等待、不 exec、不触发 prepare。
 
-切换启动后（包括已迁移用户重复执行 switch），工具在网关 Pod 的 `gateway` 容器内执行 Node，请求 **内部监听端口** `runtime.internalPort`（默认 3091）的 `POST /internal/adopt/prepare/<slug>`。此路由只在内部 listener 注册，公共入口不注册；仅接受 loopback 连接，不能从用户 Pod 或其他网络客户端触发。处理器从当前用户表查找 aionui 用户，确认本实例为 k8s 且当前归属属于它，再复用 `prepare(user)`；内部触发强制刷新 CLI 配置/令牌，绕过常规一天缓存。成功返回空的 204，方法/来源/用户/归属不符返回 4xx，准备失败返回空的 503，不返回凭据或底层错误。网关需先更新到包含此处理器的版本；工具不会重启网关或修改用户 Pod spec。prepare 本身使用相同重试预算。
+永久错误立即失败，不消耗全部等待预算：prepare 的 HTTP 404 / 405 / 403 会提示先升级网关或检查内部 listener；缺少 system namespace、无效的网关内部端口、Pod 所在节点与 PV 不符也立即停止。prepare 的 HTTP 409 / 503、连接拒绝（`ECONNREFUSED`）或重置（`ECONNRESET`）则在相同预算内重试。失败输出保留尝试次数，以及最后的 HTTP 状态或错误码；非预期异常只附加校验过的 HTTP 状态、错误码或 exec/kubectl 退出码，不输出异常消息、响应正文、Secret 数据或环境变量值。
 
-prepare 写入 `<c>-published` Secret 后，verify 等待已启用功能的键非空：预览为 `.zp-preview-relay-key`，Feishu 授权为 `.zp-market-token` 和 `.wp-feishu-cli.json`。随后在 Pod 检查相应 `/data/<文件名>` 为指向 `runtime.k8s.publishedDirectory`（默认 `/run/workpartner/published`）的链接，目标非空且可读；这一步允许 kubelet 延迟投射 Secret。只读验证不调用 prepare，缺文件时可重新运行 `switch --apply` 触发填充。输出不包含 Secret 值。
+切换启动后（包括已迁移用户重复执行 switch），工具在网关 Pod 的 `gateway` 容器内执行 Node，请求 **内部监听端口** `runtime.internalPort`（默认 3091）的 `POST /internal/adopt/prepare/<slug>`。此路由只在内部 listener 注册，公共入口不注册；仅接受 loopback 对端，拒绝用户 Pod 或其他客户端的直接网络连接。**`kubectl port-forward` 到网关 Pod 的内部端口也属于可接受的 loopback 访问**，需要 `pods/portforward` 权限；它只能刷新已归属 k8s 的用户文件，不执行归属切换，且不返回内容。处理器从当前用户表查找 aionui 用户，确认本实例为 k8s 且当前归属属于它，再复用 `prepare(user)`；内部触发强制刷新 CLI 配置/令牌，绕过常规一天缓存。成功返回空的 204，方法/来源/用户/归属不符返回 4xx，准备失败返回空的 503，不返回凭据或底层错误。网关需先更新到包含此处理器的版本；工具不会重启网关或修改用户 Pod spec。prepare 本身使用相同重试预算。
+
+prepare 写入 `<c>-published` Secret 后，verify 等待已启用功能的键非空：预览为 `.zp-preview-relay-key`，Feishu 授权为 `.zp-market-token` 和 `.wp-feishu-cli.json`。等待超时会列出缺失或为空的键名，只列名称，不列值。随后在 Pod 检查相应 `/data/<文件名>` 为指向 `runtime.k8s.publishedDirectory`（默认 `/run/workpartner/published`）的链接，目标非空且可读；这一步允许 kubelet 延迟投射 Secret。只读验证不调用 prepare，缺文件时可重新运行 `switch --apply` 触发填充。输出不包含 Secret 值。
 
 `inventory --apply` 要求旧容器运行中且有 Node，使用只读 root 探针盘点所有用户；清空 NODE_OPTIONS，并固定 PATH 为 `/usr/sbin:/usr/bin:/sbin:/bin`。原有可执行文件复制仍以 runtime.uid 执行。默认 dry-run 仅打印 docker diff 和后续探针/文件计划，不生成可用于 switch 的对照表。报告放在宿主 `<ownersFile>.adopt/`（目录模式 0700），按用户代号命名：
 
@@ -434,7 +436,7 @@ prepare 写入 `<c>-published` Secret 后，verify 等待已启用功能的键�
 
 映射不匹配 `/opt/partner-next-other` 等相似名称，也不替代人工 carried/dropped 决策。显式 `target.path`、`target.executable`、`target.port` 可覆盖默认值。
 
-生成决策表时，旧启动脚本产生的 docker diff 目录项 `/usr`、`/usr/local`、`/usr/local/bin`、`/root` 和 `/root/.gitconfig`，以及 root `.gitconfig` 点文件项，预填 `dropped` 和生成原因。`curl`、`sleep` 瞬时进程与交互式 `claude`（无 `-p` / `--print`，只记录交互模式布尔值，不记录参数）进程预填 `dropped` 和重启/瞬时原因。规则只匹配这些已知项目，不按整个 `/usr` 或 `/root` 子树丢弃：自定义可执行文件、凭据、服务目录及其他进程仍保持未决。预填行可人工改写；重新盘点重新生成默认决策。
+生成决策表时，旧启动脚本产生的 docker diff 目录项 `/usr`、`/usr/local`、`/usr/local/bin`、`/root` 和 `/root/.gitconfig`，以及 root `.gitconfig` 点文件项，预填 `dropped` 和生成原因。`curl`、`sleep` 瞬时进程与交互式 `claude`（无 `-p` / `--print`，只记录交互模式布尔值，不记录参数）进程预填 `dropped` 和重启/瞬时原因。若 `/proc/<pid>/cmdline` 只有一个 argv 元素，进程标题可能已被重写、原参数不可见，不能据此判断 `claude` 为交互式：该项保持未决，须人工决定 carried/dropped。规则只匹配这些已知项目，不按整个 `/usr` 或 `/root` 子树丢弃：自定义可执行文件、凭据、服务目录及其他进程仍保持未决。预填行可人工改写；重新盘点重新生成默认决策。
 
 每一项都须填写 `decision: "carried"` 并在 `method` 写明恢复方式，或 `decision: "dropped"` 并在 `reason` 写明放弃原因，包括不存在的点文件、进程、会话和 docker diff 条目。不可删除行来跳过核对。例如服务目录条目保留生成的 `id/kind/source`，将其余字段改为：
 
