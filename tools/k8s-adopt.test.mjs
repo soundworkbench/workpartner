@@ -58,11 +58,11 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
   let pods = migrated ? [pod()] : [];
   const volume = { metadata: { name: `workspaces-${name}-data` }, spec: {
     local: { path: directory }, claimRef: { name: `${name}-data`, namespace: 'workspaces' },
-    nodeAffinity: { required: { nodeSelectorTerms: [{ matchFields: [{ key: 'metadata.name', operator: 'In', values: ['node-a'] }] }] } },
+    nodeAffinity: { required: { nodeSelectorTerms: [{ matchExpressions: [{ key: 'kubernetes.io/hostname', operator: 'In', values: ['fixture-hostname'] }] }] } },
   } };
   objects.set(`${core}/persistentvolumeclaims/${name}-data`, { spec: { volumeName: volume.metadata.name }, status: { phase: 'Bound' } });
   objects.set(`/api/v1/persistentvolumes/${volume.metadata.name}`, volume);
-  objects.set('/api/v1/nodes/node-a', { metadata: { name: 'node-a' } });
+  objects.set('/api/v1/nodes/node-a', { metadata: { name: 'node-a', labels: { 'kubernetes.io/hostname': 'fixture-hostname' } } });
   if (oldwork) {
     const old = path.join(root, 'users/user1/work');
     await fs.mkdir(old, { recursive: true });
@@ -93,7 +93,7 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
         value.apiVersion = 'v1'; value.kind = route.includes('/persistentvolumeclaims/') ? 'PersistentVolumeClaim' : 'PersistentVolume';
         if (value.spec.storageClassName === '') delete value.spec.storageClassName;
         if (value.spec.claimRef) Object.assign(value.spec.claimRef, { uid: 'claim-uid', kind: 'PersistentVolumeClaim', apiVersion: 'v1' });
-        for (const term of value.spec.nodeAffinity?.required?.nodeSelectorTerms ?? []) term.matchExpressions = [];
+        for (const term of value.spec.nodeAffinity?.required?.nodeSelectorTerms ?? []) term.matchFields = [];
       }
       return value;
     },
@@ -267,13 +267,81 @@ test('pv retains matching PV/PVC on rerun after API omits empty storageClassName
   const [volume, claim, old] = result.manifests;
   assert.equal(volume.spec.local.path, f.directory); assert.equal(volume.spec.persistentVolumeReclaimPolicy, 'Retain');
   assert.deepEqual(volume.spec.claimRef, { namespace: 'workspaces', name: `${name}-data` });
-  assert.deepEqual(volume.spec.nodeAffinity.required.nodeSelectorTerms[0].matchFields[0].values, ['node-a']);
+  assert.deepEqual(volume.spec.nodeAffinity.required.nodeSelectorTerms, [{
+    matchExpressions: [{ key: 'kubernetes.io/hostname', operator: 'In', values: ['fixture-hostname'] }],
+  }]);
+  assert.deepEqual(old.spec.nodeAffinity, volume.spec.nodeAffinity);
   assert.equal(claim.spec.volumeName, volume.metadata.name); assert.equal(claim.spec.storageClassName, '');
   assert.deepEqual(old.spec.accessModes, ['ReadOnlyMany']);
   assert.equal(old.spec.local.path, path.join(f.root, 'users/user1/work'));
   f.events.length = 0;
   assert.equal((await f.run('pv', true, options)).exitCode, 0);
   assert.ok(!f.events.some(event => event.startsWith('create ')));
+});
+
+for (const hostname of [undefined, '']) {
+  test(`pv rejects ${hostname === undefined ? 'missing' : 'empty'} hostname label before creating objects`, async t => {
+    const f = await fixture(t);
+    f.objects.get('/api/v1/nodes/node-a').metadata.labels = { 'kubernetes.io/hostname': hostname };
+    f.objects.delete(`${core}/persistentvolumeclaims/${name}-data`);
+    f.objects.delete(`/api/v1/persistentvolumes/workspaces-${name}-data`);
+    assert.equal((await f.run('pv', true, { node: 'node-a', 'data-root': f.root })).exitCode, 1);
+    assert.match(f.logs.at(-1), /kubernetes\.io\/hostname/);
+    assert.equal(f.snapshots.length, 0);
+    assert.ok(!f.events.some(event => event.startsWith('create ')));
+  });
+}
+
+for (const command of ['pv', 'switch', 'verify']) for (const suffix of ['data', 'oldwork']) {
+  test(`${command} rejects legacy ${suffix} affinity without writes`, async t => {
+    const f = await fixture(t, { migrated: command === 'verify', oldwork: suffix === 'oldwork' });
+    if (command === 'pv') {
+      f.objects.delete(`${core}/persistentvolumeclaims/${name}-data`);
+      f.objects.delete(`/api/v1/persistentvolumes/workspaces-${name}-data`);
+      assert.equal((await f.run('pv', true, { node: 'node-a', 'data-root': f.root })).exitCode, 0);
+    }
+    const route = `/api/v1/persistentvolumes/workspaces-${name}-${suffix}`;
+    if (!f.objects.has(route)) {
+      const old = structuredClone(f.volume);
+      old.metadata.name = `workspaces-${name}-oldwork`;
+      old.spec.claimRef.name = `${name}-oldwork`;
+      f.objects.set(route, old);
+      f.objects.set(`${core}/persistentvolumeclaims/${name}-oldwork`, { spec: { volumeName: old.metadata.name }, status: { phase: 'Bound' } });
+    }
+    f.objects.get(route).spec.nodeAffinity.required.nodeSelectorTerms = [{
+      matchFields: [{ key: 'metadata.name', operator: 'In', values: ['node-a'] }],
+    }];
+    if (command === 'pv' && suffix === 'oldwork') {
+      f.objects.delete(`${core}/persistentvolumeclaims/${name}-data`);
+      f.objects.delete(`/api/v1/persistentvolumes/workspaces-${name}-data`);
+    }
+    f.events.length = 0; f.snapshots.length = 0;
+    const before = await fs.readFile(f.ownersFile, 'utf8');
+    let lockOpened = false;
+    const open = fs.open;
+    t.mock.method(fs, 'open', async (filename, ...args) => {
+      if (filename === `${f.ownersFile}.adopt.lock`) lockOpened = true;
+      return open(filename, ...args);
+    });
+    const result = await f.run(command, true, { node: 'node-a', 'data-root': f.root });
+    if (command === 'switch') assert.equal(lockOpened, false);
+    assert.equal(result.exitCode, 1);
+    assert.match(f.logs.at(-1), /Legacy node affinity.*manually.*PV\/PVC.*Retain.*data.*rerun pv/);
+    assert.equal(f.snapshots.length, 0);
+    assert.ok(!f.events.some(event => /^(create |runtime (create|start|stop)|docker (--restart|stop|start))/.test(event)));
+    assert.equal(await fs.readFile(f.ownersFile, 'utf8'), before);
+    f.assertSafe();
+  });
+}
+
+test('verify compares the scheduled node hostname label, not its metadata name', async t => {
+  const f = await fixture(t, { migrated: true });
+  assert.equal((await f.run('verify', false)).exitCode, 0, f.logs.join('\n'));
+  f.objects.get('/api/v1/nodes/node-a').metadata.labels['kubernetes.io/hostname'] = 'different-hostname';
+  assert.equal((await f.run('verify', false)).exitCode, 1);
+  assert.match(f.logs.at(-1), /wrong node/);
+  delete f.objects.get('/api/v1/nodes/node-a').metadata.labels;
+  assert.equal((await f.run('verify', false)).exitCode, 1);
 });
 
 test('pv validates all existing bindings before writing; a conflicting old-work PVC leaves data PV untouched', async t => {
@@ -526,7 +594,9 @@ test('apply refuses an existing operation lock and does not remove another proce
   const f = await fixture(t);
   await fs.writeFile(`${f.ownersFile}.adopt.lock`, 'held');
   assert.equal((await f.run('switch')).exitCode, 1);
-  assert.equal(f.events.length, 0); assert.equal(await fs.readFile(`${f.ownersFile}.adopt.lock`, 'utf8'), 'held');
+  assert.ok(f.events.every(event => event.startsWith('get ')));
+  assert.equal(f.snapshots.length, 0);
+  assert.equal(await fs.readFile(`${f.ownersFile}.adopt.lock`, 'utf8'), 'held');
   assert.equal((await f.run('switch', false)).exitCode, 0);
 });
 
@@ -953,7 +1023,7 @@ for (const conflict of ['storageClassName', 'local path', 'claimRef', 'node affi
     if (conflict === 'storageClassName') spec.storageClassName = 'another-class';
     if (conflict === 'local path') spec.local.path = '/another/data';
     if (conflict === 'claimRef') spec.claimRef.namespace = 'another-namespace';
-    if (conflict === 'node affinity') spec.nodeAffinity.required.nodeSelectorTerms[0].matchFields[0].values = ['node-b'];
+    if (conflict === 'node affinity') spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values = ['different-hostname'];
     f.events.length = 0;
     assert.equal((await f.run('pv', true, options)).exitCode, 1);
     assert.ok(!f.events.some(event => event.startsWith('create ')));
