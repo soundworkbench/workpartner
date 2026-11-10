@@ -49,6 +49,7 @@ if ! instructions_error=$(python3 -I /opt/workpartner/bin/wp-sync-instructions.p
 fi
 
 . /opt/workpartner/bin/wp-init-hooks.sh
+wp_ensure_srv_directory
 wp_init_hooks
 
 cd /data/work

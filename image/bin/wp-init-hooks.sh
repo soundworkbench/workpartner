@@ -1,5 +1,16 @@
 #!/bin/bash
 # Source this file, then call wp_init_hooks [data-directory].
+wp_ensure_srv_directory() {
+  local data_dir=${1:-/data}
+  local srv_dir="$data_dir/srv"
+  if [ -L "$srv_dir" ] || { [ -e "$srv_dir" ] && [ ! -d "$srv_dir" ]; }; then
+    printf '[wp-init] warning: %s is a symlink or not a directory; leaving unchanged and continuing\n' "$srv_dir" >&2
+  elif ! mkdir -p -- "$srv_dir"; then
+    printf '[wp-init] warning: cannot create directory %s; continuing\n' "$srv_dir" >&2
+  fi
+  return 0
+}
+
 wp_link_published_files() {
   local data_dir=$1 published_dir=${WORKPARTNER_PUBLISHED_DIR:-}
   [ -n "$published_dir" ] || return 0
