@@ -38,8 +38,11 @@ class InputsTest(unittest.TestCase):
                 self.assertEqual(current['model'], 'personal')
                 self.assertEqual(current['permissions'], {'allow': ['Read']})
                 bash = next(entry for entry in current['hooks']['PreToolUse'] if entry['matcher'] == 'Bash')
-                self.assertEqual(len(bash['hooks']), 3)
+                self.assertEqual(len(bash['hooks']), 4)
                 self.assertEqual(bash['hooks'][0]['command'], 'personal-hook')
+                for hook, filename in zip(bash['hooks'][1:], (
+                        'no-long-sleep.py', 'no-blocking-foreground.py', 'no-repeat-poll.py')):
+                    self.assertTrue(hook['command'].endswith('/' + filename), hook['command'])
                 self.assertTrue((root / 'hooks/no-long-sleep.py').is_file())
 
     def upstream(self, path, files):
