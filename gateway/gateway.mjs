@@ -8,7 +8,7 @@ import http from "node:http";
 import net from "node:net";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { createRuntime } from "./runtime/index.mjs";
+import { createRuntime, createLegacyRuntime } from "./runtime/index.mjs";
 import { docker } from "./runtime/docker.mjs";
 import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } from "./onboard.mjs";
 import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
@@ -26,9 +26,7 @@ const USERS_FILE = organization.runtime.usersFile;
 const users = readUsers;
 
 const runtime = createRuntime(organization);
-const legacyRuntime = createRuntime(organization, {
-  containerPrefix: organization.runtime.containerPrefix, dataDir: organization.runtime.usersDirectory,
-});
+const legacyRuntime = createLegacyRuntime(organization);
 const aionui = createAionui({
   runtime, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
   secretDir: `${organization.runtime.secureDirectory}/aionui`,
@@ -96,7 +94,7 @@ async function resolve(req) {
   }
   if (!legacy?.resolve) return { missing: user };
   const result = await legacy.resolve(req, user);
-  if (result.up) result.up = { ...result.up, address: await legacyRuntime.address(user.slug, result.port, result.up) };
+  if (result.up) return { ...result, up: { ...result.up, address: await legacyRuntime.address(user.slug, result.port, result.up) } };
   return result;
 }
 

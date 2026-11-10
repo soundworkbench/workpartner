@@ -40,12 +40,18 @@ export function writeContainerTokenFile(content, slug, root, uid) {
   } finally { fs.rmSync(temp, { force: true }); }
 }
 
-function output(value) {
+function output(value, strict = false) {
   const buffer = Buffer.from(value || ''), stdout = [], stderr = [], logs = [];
   for (let offset = 0; offset < buffer.length;) {
-    if (offset + 8 > buffer.length) throw new Error('Truncated runtime output');
+    if (offset + 8 > buffer.length) {
+      if (strict) throw new Error('Truncated runtime output');
+      break;
+    }
     const size = buffer.readUInt32BE(offset + 4);
-    if (offset + 8 + size > buffer.length) throw new Error('Truncated runtime output');
+    if (offset + 8 + size > buffer.length) {
+      if (strict) throw new Error('Truncated runtime output');
+      break;
+    }
     const chunk = buffer.subarray(offset + 8, offset + 8 + size);
     (buffer[offset] === 2 ? stderr : stdout).push(chunk);
     logs.push(chunk);
@@ -119,7 +125,7 @@ export function createDockerRuntime(o = {}) {
       env: info.Config?.Env || [], name: names(slug).container, address: host ? { host, port } : null };
   }
 
-  async function execNamed(container, cmd, { stdin, detached = false, env, user, timeout = 30000, createTimeout = 10000, maxOutputBytes } = {}) {
+  async function execNamed(container, cmd, { stdin, detached = false, env, user, timeout = 30000, createTimeout = 10000, maxOutputBytes, strictOutput = false } = {}) {
     if (detached && stdin !== undefined) throw new Error('Detached exec cannot receive stdin');
     const created = await request('POST', `/containers/${container}/exec`, {
       ...(user !== undefined ? { User: String(user) } : {}), ...(env ? { Env: env } : {}),
@@ -133,7 +139,7 @@ export function createDockerRuntime(o = {}) {
     if (maxOutputBytes !== undefined && Buffer.byteLength(started.body || '') > maxOutputBytes) throw new Error('Runtime output too large');
     if (detached) return { exitCode: null, stdout: '', stderr: '', logs: '' };
     const inspected = await request('GET', `/exec/${id}/json`, undefined, [200], 10000, maxOutputBytes);
-    return { exitCode: JSON.parse(inspected.body).ExitCode, ...output(started.body) };
+    return { exitCode: JSON.parse(inspected.body).ExitCode, ...output(started.body, strictOutput || maxOutputBytes !== undefined) };
   }
 
   async function runOnce(slug, spec) {

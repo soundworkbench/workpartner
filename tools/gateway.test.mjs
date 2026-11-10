@@ -5,17 +5,92 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { fork } from 'node:child_process';
+import { fork, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { organizationData, nextModelConfig } from '../gateway/organization/resolve.mjs';
 import { issueToken, tokenUser } from '../gateway/market-auth.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 
+function fixtureOrganization(t) {
+  const baseline = structuredClone(organizationData({}));
+  t.after(() => assert.deepEqual(organizationData({}), baseline, 'fixtures must not mutate shared organization defaults'));
+  // organizationData shares omitted nested fields with its cached defaults.
+  return structuredClone(baseline);
+}
+
+test('gateway preserves a reused extension result and refreshes its upstream address on each request', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-legacy-resolve-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const org = fixtureOrganization(t);
+  org.publicHost = 'workspace.example.test';
+  org.model.baseUrl = 'http://models.example.test/v1';
+  for (const key of Object.keys(org.features)) org.features[key] = false;
+  Object.assign(org.runtime, { gatewayPort: 0, uid: process.getuid(),
+    sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json') });
+  org.extensions.gatewayModule = './extension.mjs';
+  fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
+  fs.writeFileSync(org.runtime.usersFile, JSON.stringify([{ slug: 'person', unionId: 'fixture-union', backend: 'legacy' }]));
+  fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+  fs.writeFileSync(path.join(dir, 'extension.mjs'), `
+export const up = { ip: 'old-host' };
+export const cached = { up, port: 9000, cookie: 'legacy-session', backend: 'legacy' };
+export const seen = [];
+export let context;
+export function createGatewayExtension(options) {
+  context = options;
+  return { handle: async () => false, resolve: async () => cached, prepared: async result => { seen.push(result); } };
+}
+`);
+  const script = `
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import http from 'node:http';
+let server;
+const logs = [];
+console.log = (...args) => logs.push(args.join(' '));
+const listen = http.Server.prototype.listen;
+http.Server.prototype.listen = function () { server = this; return this; };
+await import(${JSON.stringify(pathToFileURL(path.join(root, 'gateway/gateway.mjs')).href)});
+http.Server.prototype.listen = listen;
+const { up, cached, seen, context } = await import(${JSON.stringify(pathToFileURL(path.join(dir, 'extension.mjs')).href)});
+const data = Buffer.from(JSON.stringify({ u: 'fixture-union', n: 'Fixture', e: Math.floor(Date.now() / 1000) + 600 })).toString('base64url');
+const mac = crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
+const handle = server.listeners('request')[0];
+for (const host of ['old-host', 'new-host']) {
+  up.ip = host;
+  let status, location, response, ended = false;
+  await handle({ method: 'GET', url: '/_wp/preparing', headers: { host: 'workspace.example.test', cookie: 'wp_sid=' + data + '.' + mac } },
+    { writeHead(code, headers) { status = code; location = headers.location; }, end(body) { response = body; ended = true; } });
+  assert.equal(status, 302, JSON.stringify({ logs, response }));
+  assert.equal(location, '/?zp-welcome=1');
+  assert.equal(ended, true);
+}
+assert.equal(seen.length, 2);
+assert.deepEqual(seen.map(result => result.up.address), [{ host: 'old-host', port: 9000 }, { host: 'new-host', port: 9000 }]);
+assert.equal(cached.up, up, 'the extension retains its original upstream object');
+assert.deepEqual(up, { ip: 'new-host' });
+for (const result of seen) {
+  assert.notEqual(result, cached);
+  assert.notEqual(result.up, up);
+  assert.equal(result.cookie, 'legacy-session');
+  assert.equal(result.backend, 'legacy');
+}
+assert.deepEqual(Object.keys(context.runtime).sort(), ['address', 'exec', 'putFiles', 'readFile', 'remove', 'removeFiles', 'stop']);
+await assert.rejects(context.runtime.address('person'), /Legacy runtime does not support.*existing/i);
+assert.equal(typeof context.personalRuntime.create, 'function');
+assert.equal(typeof context.personalRuntime.inspect, 'function');
+`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
+});
+
 async function fixture(t, { disabled = false, extension = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-services-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const org = organizationData({});
+  const org = fixtureOrganization(t);
   org.publicHost = 'workspace.example.test';
   org.model.baseUrl = 'http://models.example.test/v1';
   org.features.feishuAuthorization = true;
