@@ -345,6 +345,7 @@ exec ''' + shlex.quote(timeout) + ' --foreground --kill-after=0.2s 1s "$@"\n')
             self.write(app / 'bin/wp-init-hooks.sh', helper)
             self.write(data / '.zp-init.d/00-order.sh', '''
 [ -f "$STATE/baseline" ] || exit 91
+[ -d "$HOME/srv" ] && [ ! -L "$HOME/srv" ] || exit 93
 touch "$STATE/hooks"
 ''')
             service = '''#!/bin/bash

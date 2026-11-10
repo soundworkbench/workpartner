@@ -8,6 +8,9 @@ ARG CLAUDE_CODE_VERSION=2.1.319
 ARG PLAYWRIGHT_VERSION=1.61.1
 USER root
 
+# Keep service paths on the data volume; refuse to discard existing image content.
+RUN rmdir /srv && ln -s /data/srv /srv
+
 # 中文字体：镜像已有 Noto Sans/Serif CJK；补文泉驿微米黑/正黑，以及 Office 常用西文字体的等宽替代。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates python3 curl git ripgrep ffmpeg librsvg2-bin openssh-client iproute2 util-linux fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
