@@ -1,0 +1,20 @@
+# Substitute the placeholders with node-local configuration before installation.
+# SCRIPT_PATH is absolute; keep the nft template in the same repository layout.
+# Use reload: restart removes the table before applying it again.
+# Ordering alone is fail-open for k3s; operators decide whether to add RequiredBy.
+[Unit]
+Description=Workpartner node network guard
+After=network-pre.target nftables.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+Before=network.target k3s.service k3s-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@SCRIPT_PATH@ apply --pod-cidr @POD_CIDRS@ --tunnel-interface @TUNNEL_INTERFACE@ --node-ips @NODE_IPS@
+ExecReload=@SCRIPT_PATH@ apply --pod-cidr @POD_CIDRS@ --tunnel-interface @TUNNEL_INTERFACE@ --node-ips @NODE_IPS@
+ExecStop=@SCRIPT_PATH@ remove
+
+[Install]
+WantedBy=multi-user.target
