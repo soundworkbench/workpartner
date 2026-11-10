@@ -209,9 +209,19 @@ export const scenarios = [
   } },
   { id: 'S10', title: 'Two-node network matrix', async run(c) {
     const rows = [], gateway = new URL(c.org.runtime.gatewayOrigin), model = new URL(c.org.model.baseUrl);
+    const allowedTargets = [
+      { host: gateway.hostname, port: c.org.runtime.gatewayPort, open: true, label: 'gateway HTTP' },
+      { host: gateway.hostname, port: c.org.runtime.internalPort, open: true, label: 'gateway internal' },
+      { host: model.hostname, port: +model.port, open: true, label: 'model egress' },
+    ];
+    const externalTargets = c.config.externalProbe ? [{ ...c.config.externalProbe, open: true, label: 'external' }] : [];
     await waitForPolicy(c, ['node-server', 'node-agent'], async slug => {
       const dns = await c.from(slug, { kind: 'dns', host: gateway.hostname });
       assert.deepEqual([...new Set(dns)], [c.config.gatewayIp]);
+      // Retry only allowed traffic; denials remain single-shot matrix assertions.
+      for (const target of [...allowedTargets, ...externalTargets]) {
+        assert.equal((await c.from(slug, target)).open, true, `${slug}: ${target.label}`);
+      }
     });
     for (const slug of ['node-server', 'node-agent']) {
       const dns = await c.from(slug, { kind: 'dns', host: gateway.hostname });
@@ -220,9 +230,7 @@ export const scenarios = [
       const other = await c.pod(slug === 'node-server' ? 'node-agent' : 'node-server');
       const cni = await c.from(slug, { kind: 'route' });
       const targets = [
-        { host: gateway.hostname, port: c.org.runtime.gatewayPort, open: true, label: 'gateway HTTP' },
-        { host: gateway.hostname, port: c.org.runtime.internalPort, open: true, label: 'gateway internal' },
-        { host: model.hostname, port: +model.port, open: true, label: 'model egress' },
+        ...allowedTargets,
         { host: c.config.gatewayIp, port: c.config.samplePort, open: false, label: 'gateway other listening port' },
         ...[25808, 3092].map(port => ({ host: other.status.podIP, port, open: false, label: 'other user' })),
         ...c.config.nodeIps.flatMap(host => [22, 6443, 10250, c.config.samplePort].map(port => ({ host, port, open: false, label: 'node' }))),
@@ -231,7 +239,7 @@ export const scenarios = [
         { host: '169.254.169.254', port: 80, open: false, label: 'metadata' },
         { ...c.config.privateProbe, open: false, label: 'private sample' },
       ];
-      if (c.config.externalProbe) targets.push({ ...c.config.externalProbe, open: true, label: 'external' });
+      targets.push(...externalTargets);
       await checkMatrix(c, slug, targets, rows);
       const pod = await c.pod(slug);
       for (const port of [25808, 3092]) {
