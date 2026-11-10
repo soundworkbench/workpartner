@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { runAdopt, parseArgs, main } from './k8s/adopt-user.mjs';
-import { matches, readOwners, writeOwner } from './k8s/adopt-state.mjs';
+import { matches, readOwners, writeOwner, requireValue as check } from './k8s/adopt-state.mjs';
 import { inventoryPaths, inventoryDocument, saveInventory, collectInventory, verificationProbe, verificationRows, inventoryProbe } from './k8s/adopt-inventory.mjs';
 import { imageMappings, mappedItem, defaultDecision } from './k8s/adopt-mappings.mjs';
 import { waitForReady } from './k8s/adopt-wait.mjs';
@@ -140,7 +140,33 @@ async function fixture(t, { migrated = false, oldwork = false } = {}) {
         assert.equal(await f.owner(), 'k8s');
         await record('gateway prepare');
         if (f.onPrepare) await f.onPrepare();
-        return { exitCode: f.prepareHealthy === false ? 1 : 0 };
+        if (f.prepareThrown) throw f.prepareThrown;
+        if (f.prepareResult) return f.prepareResult;
+        let stdout = '';
+        const process = { argv: ['node', ...argv.slice(-2)], exitCode: 0, stdout: { write: text => { stdout += text; } } };
+        const handlers = {};
+        const request = {
+          on(event, handler) { handlers[event] = handler; return this; },
+          destroy(error) { handlers.error(error ?? Object.assign(new Error(secret), { code: 'ECONNRESET' })); },
+          end() {
+            if (f.prepareError === 'timeout') handlers.timeout();
+            else if (f.prepareError) handlers.error(Object.assign(new Error(secret), { code: f.prepareError }));
+            else respond({ statusCode: f.prepareStatus ?? (f.prepareHealthy === false ? 503 : 204),
+              resume() {}, destroy() { f.prepareResponseClosed = true; }, body: secret });
+          },
+        };
+        let respond;
+        vm.runInNewContext(argv[2], { process, require(module) {
+          assert.equal(module, 'node:http');
+          return { request(options, callback) {
+            assert.equal(options.method, 'POST');
+            assert.equal(options.path, '/internal/adopt/prepare/user1');
+            respond = callback; return request;
+          } };
+        } });
+        assert.ok(!stdout.includes(secret));
+        f.prepareOutput = stdout;
+        return { exitCode: process.exitCode, stdout, stderr: secret };
       }
       await record('gateway status'); assert.deepEqual(argv.slice(-2), ['192.0.2.10', '25808']);
       assert.match(argv[2], /\/api\/auth\/status/); return { exitCode: f.gatewayHealthy ? 0 : 1, stderr: secret };
@@ -1349,11 +1375,12 @@ for (const crontabTool of [true, false]) test(`container probe enumerates cron, 
     ['/proc/42/cmdline', '/srv/example-service/run\0--token\0hidden-process-secret\0--password=hidden-password\0'],
     ['/proc/43/cmdline', '/usr/local/bin/claude\0hidden-interactive-prompt\0'],
     ['/proc/44/cmdline', 'claude\0--print\0hidden-automation-prompt\0'],
+    ['/proc/45/cmdline', 'claude\0'],
     ['/proc/net/tcp', 'header\n0: 00000000:1F90 00000000:0000 0A\n'],
     ['/home/user1/.gitconfig', secret], ['/home/user1/.git-credentials', secret], ['/home/user1/.netrc', secret],
     ['/data/.cc-connect/config.toml', secret], ['/srv/example-service/bot-config.json', secret],
   ]);
-  const directories = new Set(['/etc', '/etc/cron.d', '/var/spool/cron', '/var/spool/cron/crontabs', '/proc', '/proc/42', '/proc/43', '/proc/44', '/proc/net', '/srv', '/srv/example-service', '/opt', '/opt/example', '/root', '/home/user1', '/home/user1/.ssh', '/home/user1/.config', '/home/user1/.config/gh', '/data', '/data/.cc-connect']);
+  const directories = new Set(['/etc', '/etc/cron.d', '/var/spool/cron', '/var/spool/cron/crontabs', '/proc', '/proc/42', '/proc/43', '/proc/44', '/proc/45', '/proc/net', '/srv', '/srv/example-service', '/opt', '/opt/example', '/root', '/home/user1', '/home/user1/.ssh', '/home/user1/.config', '/home/user1/.config/gh', '/data', '/data/.cc-connect']);
   const absent = () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); };
   const reads = [];
   const metadata = p => {
@@ -1402,6 +1429,8 @@ for (const crontabTool of [true, false]) test(`container probe enumerates cron, 
   assert.ok(reads.includes('/etc/cron.d/example'));
   assert.equal(defaultDecision(result.items.find(item => item.pid === 43)).decision, 'dropped');
   assert.equal(defaultDecision(result.items.find(item => item.pid === 44)).decision, '');
+  assert.equal(result.items.find(item => item.pid === 45).interactive, undefined);
+  assert.equal(defaultDecision(result.items.find(item => item.pid === 45)).decision, '');
   assert.equal(inventoryProbe[0], 'node');
 });
 
@@ -1535,7 +1564,7 @@ test('timeout reports attempt count and final safe reason, with default and cust
 
 test('readiness timeout bounds a stuck attempt and never logs upstream exception values', async () => {
   const logs = [];
-  await assert.rejects(waitForReady('stuck', () => new Promise(() => {}), { timeoutMs: 10, log: line => logs.push(line) }), /Timed out after 1 attempts.*unavailable or timed out/);
+  await assert.rejects(waitForReady('stuck', () => new Promise(() => {}), { timeoutMs: 10, log: line => logs.push(line) }), /Timed out after 1 attempts.*unavailable or timed out.*ETIMEDOUT/);
   let time = 0;
   await assert.rejects(waitForReady('unsafe', async () => { throw new Error(secret); }, {
     timeoutMs: 5000, log: line => logs.push(line), now: () => time, sleep: async ms => { time += ms; },
@@ -1570,8 +1599,125 @@ test('prepare failures retry with safe timeout and leave Docker stopped under k8
   const result = await f.run('switch', true, { 'ready-timeout': '10' });
   assert.equal(result.failedStage, 'prepare gateway published files');
   assert.match(f.logs.at(-1), /Timed out after 2 attempts.*Gateway internal prepare failed/);
+  assert.match(f.logs.at(-1), /HTTP 503/);
   assert.equal(await f.owner(), 'k8s'); assert.equal(f.container.State.Running, false);
   assert.ok(!f.events.includes('gateway status'));
+  f.assertSafe();
+});
+
+for (const status of [404, 405, 403]) test(`prepare HTTP ${status} fails immediately with upgrade guidance`, async t => {
+  const f = await fixture(t);
+  f.prepareStatus = status;
+  f.onPoll = () => assert.fail('Permanent failure must not poll');
+  const result = await f.run('switch');
+  assert.equal(result.failedStage, 'prepare gateway published files');
+  assert.match(f.logs.at(-1), /Failed after 1 attempts/);
+  assert.ok(f.logs.at(-1).includes(`Gateway internal prepare route missing or refused (HTTP ${status}): upgrade the gateway first / check the internal listener`));
+  assert.equal(f.events.filter(event => event === 'gateway prepare').length, 1);
+  assert.equal(f.prepareOutput, `HTTP ${status}\n`);
+  assert.equal(f.prepareResponseClosed, true, 'a permanent status must not wait for the response body');
+  assert.equal(await f.owner(), 'k8s');
+  assert.equal(f.container.State.Running, false);
+  f.assertSafe();
+});
+
+test('prepare HTTP 409 then 204 retries and completes switch', async t => {
+  const f = await fixture(t);
+  f.prepareStatus = 409;
+  f.onPoll = elapsed => { assert.equal(elapsed, 5000); f.prepareStatus = 204; };
+  const result = await f.run('switch');
+  assert.equal(result.exitCode, 0, f.logs.join('\n'));
+  assert.ok(f.logs.some(line => /attempt 1 failed:.*HTTP 409/.test(line)));
+  assert.ok(f.logs.includes('READY prepare gateway published files: attempt 2'));
+  assert.equal(f.prepareOutput, 'HTTP 204\n');
+  assert.equal(f.prepareResponseClosed, true);
+  f.assertSafe();
+});
+
+for (const [error, code] of [['ECONNREFUSED', 'ECONNREFUSED'], ['ECONNRESET', 'ECONNRESET'], ['timeout', 'ETIMEDOUT']]) {
+  test(`prepare ${error} retries and reports the last error code`, async t => {
+    const f = await fixture(t);
+    f.prepareError = error;
+    const result = await f.run('switch', true, { 'ready-timeout': '10' });
+    assert.equal(result.failedStage, 'prepare gateway published files');
+    assert.equal(f.events.filter(event => event === 'gateway prepare').length, 2);
+    assert.match(f.logs.at(-1), new RegExp(`Timed out after 2 attempts.*${code}`));
+    assert.equal(f.prepareOutput, `ERROR ${code}\n`);
+    f.assertSafe();
+  });
+}
+
+test('prepare invalid output exposes only the exec exit code', async t => {
+  const f = await fixture(t);
+  f.prepareResult = { exitCode: 137, stdout: `HTTP 404\n${secret}`, stderr: secret };
+  const result = await f.run('switch', true, { 'ready-timeout': '10' });
+  assert.equal(result.failedStage, 'prepare gateway published files');
+  assert.match(f.logs.at(-1), /Timed out after 2 attempts.*exit code 137/);
+  assert.ok(!f.logs.at(-1).includes('HTTP 404'));
+  f.assertSafe();
+});
+
+test('non-retryable checks retain reason and stop at attempt one', async () => {
+  const logs = [];
+  await assert.rejects(waitForReady('permanent', () => check(false, 'Permanent fixture check', { retry: false }), {
+    timeoutMs: 180000, log: line => logs.push(line), sleep: () => assert.fail('Must not poll'),
+  }), error => {
+    assert.equal(error.retry, false);
+    assert.match(error.message, /Failed after 1 attempts: Permanent fixture check/);
+    return true;
+  });
+  assert.ok(logs.some(line => /attempt 1 failed: Permanent fixture check/.test(line)));
+});
+
+for (const failure of ['namespace', 'port', 'node']) test(`${failure} configuration failure is non-retryable`, async t => {
+  const f = await fixture(t, { migrated: true });
+  if (failure === 'namespace') {
+    delete f.organization.runtime.k8s.systemNamespace;
+    delete f.dependencies.client.namespace;
+  } else if (failure === 'port') f.organization.runtime.internalPort = 0;
+  else f.objects.get('/api/v1/nodes/node-a').metadata.labels['kubernetes.io/hostname'] = 'different-node';
+  f.onPoll = () => assert.fail('Must not poll');
+  const result = await f.run(failure === 'port' ? 'switch' : 'verify');
+  assert.equal(result.exitCode, 1);
+  assert.match(f.logs.at(-1), /Failed after 1 attempts/);
+  assert.match(f.logs.at(-1), /Missing system namespace|Invalid gateway internal port|Pod is on the wrong node/);
+  f.assertSafe();
+});
+
+test('unexpected failures report only validated status, error code and exec exit code', async () => {
+  for (const [fields, expected] of [
+    [{ status: 503, code: 'ECONNRESET', exitCode: 137 }, 'Check unavailable or timed out (HTTP 503, code ECONNRESET, exit code 137)'],
+    [{ statusCode: 403, code: 1 }, 'Check unavailable or timed out (HTTP 403, exit code 1)'],
+    [{ status: secret, statusCode: 999, code: `EIO\n${secret}`, exitCode: secret }, 'Check unavailable or timed out'],
+  ]) {
+    let time = 0;
+    const logs = [];
+    const error = Object.assign(new Error(secret), { stdout: secret, stderr: secret, body: secret, env: { TOKEN: secret }, ...fields });
+    await assert.rejects(waitForReady('unexpected', () => { throw error; }, {
+      timeoutMs: 10000, now: () => time, sleep: async ms => { time += ms; }, log: line => logs.push(line),
+    }), failure => {
+      assert.equal(failure.message, `Timed out after 2 attempts (10s): ${expected}`);
+      return true;
+    });
+    assert.ok(!logs.join('\n').includes(secret));
+  }
+});
+
+test('unexpected prepare exec failures retain safe fields through the final report', async t => {
+  const f = await fixture(t);
+  f.prepareThrown = Object.assign(new Error(secret), { status: 503, code: 'ECONNRESET', exitCode: 137, stdout: secret, stderr: secret });
+  const result = await f.run('switch', true, { 'ready-timeout': '10' });
+  assert.equal(result.failedStage, 'prepare gateway published files');
+  assert.match(f.logs.at(-1), /Timed out after 2 attempts.*HTTP 503, code ECONNRESET, exit code 137/);
+  f.assertSafe();
+});
+
+test('absent published Secret lists all required key names', async t => {
+  const f = await fixture(t, { migrated: true });
+  f.objects.delete(`${core}/secrets/${name}-published`);
+  const result = await f.run('verify', true, { 'ready-timeout': '5' });
+  assert.equal(result.failedStage, 'verify published keys and links');
+  assert.ok(f.logs.at(-1).includes('Published Secret keys are missing or empty: .zp-preview-relay-key, .zp-market-token, .wp-feishu-cli.json'));
   f.assertSafe();
 });
 
@@ -1580,7 +1726,7 @@ for (const missing of ['.zp-market-token', '.wp-feishu-cli.json', '.zp-preview-r
   f.objects.get(`${core}/secrets/${name}-published`).data[missing] = '';
   const result = await f.run('verify', true, { 'ready-timeout': '5' });
   assert.equal(result.failedStage, 'verify published keys and links');
-  assert.match(f.logs.at(-1), /Published Secret keys are missing or empty/);
+  assert.ok(f.logs.at(-1).includes(`Published Secret keys are missing or empty: ${missing}`));
   assert.ok(!f.events.includes('gateway prepare')); assert.ok(!f.events.includes('preview link'));
   f.assertSafe();
 });

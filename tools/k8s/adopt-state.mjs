@@ -3,8 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 export const validSlug = value => typeof value === 'string' && /^[a-z][a-z0-9-]{1,30}$/.test(value);
-export function requireValue(condition, message) {
-  if (!condition) throw Object.assign(new Error(message), { code: 'AdoptCheckFailed' });
+export function requireValue(condition, message, { retry = true } = {}) {
+  if (!condition) throw Object.assign(new Error(message), { code: 'AdoptCheckFailed', retry });
 }
 
 export async function readOwners(filename, { allowInvalidSlugs = false } = {}) {

@@ -113,7 +113,8 @@ export function collectInventory() {
         if (config && path.isAbsolute(config) && /\.(?:toml|json|ya?ml|ini|conf)$/i.test(config) && stat(config)?.isFile()) add('bot-config', { path: config });
       }
       if (argv.length) add('process', { pid: Number(pid), command: hiddenCommand(argv[0]), executable: /^[\w/.-]+$/.test(argv[0]) ? argv[0] : '[redacted]',
-        ...(path.basename(argv[0]) === 'claude' ? { interactive: !argv.slice(1).some(arg => arg === '-p' || arg === '--print' || arg.startsWith('--print=')) } : {}),
+        // A rewritten process title can hide the original flags; one argv is undecided.
+        ...(path.basename(argv[0]) === 'claude' && argv.length > 1 ? { interactive: !argv.slice(1).some(arg => arg === '-p' || arg === '--print' || arg.startsWith('--print=')) } : {}),
       });
     } catch (e) { if (!['ENOENT', 'ESRCH'].includes(e.code)) problem('process-list'); }
   }
