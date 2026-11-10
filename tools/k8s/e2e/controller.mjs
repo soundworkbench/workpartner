@@ -22,6 +22,29 @@ export const nodeArguments = (o, node) => [...(o.nodeCommand === 'ssh' ? ['-o', 
 export async function recordOnly(warnings, step, fn) {
   try { await fn(); } catch (error) { warnings.push({ step, ...(error.logPath ? { log: error.logPath } : { error: error.name }) }); }
 }
+export async function waitForListener(kubectl, { namespace, pod, node, port }, {
+  timeoutMs = 30000, intervalMs = 500, now = () => performance.now(), sleep = delay,
+} = {}) {
+  const end = now() + timeoutMs;
+  const code = `const s=require('node:net').connect(${port},'127.0.0.1',()=>{s.destroy()});s.setTimeout(1000,()=>{s.destroy();process.exit(1)});s.on('error',()=>process.exit(1))`;
+  let logPath;
+  while (now() < end) {
+    try {
+      const result = kubectl(['exec', '-n', namespace, pod, '--', 'node', '-e', code], {
+        acceptFailure: true, timeout: Math.max(1, Math.min(5000, Math.ceil(end - now()))),
+      });
+      if (result.status === 0 && !result.error) return;
+      logPath = result.logPath || logPath;
+    } catch (error) {
+      logPath = error.logPath || logPath;
+    }
+    const remaining = end - now();
+    if (remaining > 0) await sleep(Math.min(intervalMs, remaining));
+  }
+  const error = new Error(`TCP listener not ready after ${timeoutMs}ms on node ${node}, port ${port} (pod ${namespace}/${pod})${logPath ? `; log: ${logPath}` : ''}`);
+  error.logPath = logPath;
+  throw error;
+}
 export function execute(bin, args, { input = '', acceptFailure = false, timeout = 1200000, env = process.env, cwd, output } = {}) {
   // File descriptors also work in sandboxes where child-process pipe polling is restricted.
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-e2e-command-'));
@@ -299,6 +322,7 @@ export async function controller(mode, inputFile) {
   for (const [ns, name] of [[sys, `${p}-model`], [o.probeNamespace, o.probeName]]) {
     kubectl(['wait', '--for=condition=Ready', `pod/${name}`, '-n', ns, '--timeout=120s']);
   }
+  await waitForListener(kubectl, { namespace: sys, pod: `${p}-model`, node: o.serverNode, port: 18082 });
   function gateway() {
     return get(['pods', '-n', sys, '-l', `${selector},workpartner/role=gateway`]).items.find(pod => !pod.metadata.deletionTimestamp && pod.status.conditions?.some(c => c.type === 'Ready' && c.status === 'True'));
   }
@@ -320,7 +344,9 @@ export async function controller(mode, inputFile) {
         { hostNetwork: true, dnsPolicy: 'ClusterFirstWithHostNet', nodeSelector: { 'kubernetes.io/hostname': node } })));
       for (let i = 0; i < 2; i++) kubectl(['wait', '--for=condition=Ready', `pod/${p}-host-${i}`, '-n', sys, '--timeout=120s']);
       // A live listener on each host makes the sampled node-port denials meaningful.
-      for (let i = 0; i < 2; i++) kubectl(['exec', '-n', sys, `${p}-host-${i}`, '--', 'node', '-e', `const s=require('node:net').connect(${o.samplePort},'127.0.0.1',()=>{s.destroy()});s.on('error',()=>process.exit(1))`]);
+      for (const [i, node] of [o.serverNode, o.agentNode].entries()) {
+        await waitForListener(kubectl, { namespace: sys, pod: `${p}-host-${i}`, node, port: o.samplePort });
+      }
       return await fn();
     } finally {
       // Preserve the scenario error; namespace cleanup will retry failed deletions.
