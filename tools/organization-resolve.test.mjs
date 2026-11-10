@@ -19,6 +19,18 @@ const hosts = {
   projectHost: 'project.example.com',
 };
 
+test('organization validates optional runtime.k8s.dnsNdots as an integer from 1 to 15', t => {
+  for (const dnsNdots of [undefined, 1, 4, 15]) {
+    const org = resolveOrganization(fixture(t, { runtime: { k8s: { dnsNdots } } }));
+    assert.equal(org.runtime.k8s.dnsNdots, dnsNdots);
+    if (dnsNdots === undefined) assert.equal(Object.hasOwn(org.runtime.k8s, 'dnsNdots'), false);
+  }
+  for (const dnsNdots of [null, 0, 16, -1, 1.5, '4', true, [], {}]) {
+    assert.throws(() => resolveOrganization(fixture(t, { runtime: { k8s: { dnsNdots } } })),
+      /runtime\.k8s\.dnsNdots must be an integer from 1 to 15/);
+  }
+});
+
 test('organization JSON supplies optional hosts without deployment environment overrides', t => {
   const environment = fixture(t, hosts);
   assert.deepEqual(resolveOrganization(environment).server, {

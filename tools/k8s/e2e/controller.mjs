@@ -79,16 +79,20 @@ export function execute(bin, args, { input = '', acceptFailure = false, timeout 
 }
 export function organization(o) {
   const p = o.prefix;
+  const systemNamespace = `${p}-system`, clusterDomain = o.clusterDomain ?? 'cluster.local';
+  const serviceHost = name => `${name}.${systemNamespace}.svc.${clusterDomain}`;
+  const gatewayHost = serviceHost(`${p}-gateway`);
   return { schemaVersion: 1, organizationId: p, displayName: 'E2E', identity: { appSecretFile: '/e2e-secure/identity.secret' },
-    model: { baseUrl: `http://${p}-model:18082`, nextBaseUrl: '', keyPrefix: `${p}-key-`, baseEnvironment: 'MODEL_BASE_URL' },
+    model: { baseUrl: `http://${serviceHost(`${p}-model`)}:18082`, nextBaseUrl: '', keyPrefix: `${p}-key-`, baseEnvironment: 'MODEL_BASE_URL' },
     runtime: { kind: 'k8s', uid: 1001, nextImage: o.image, nextContainerPrefix: `${p}-`, nextUserLabel: 'workpartner.next-user',
       nextModelKeyFile: '/etc/partner/model.key', nextPort: 25808, nextMemory: 268435456, nanoCpus: 500000000,
-      gatewayOrigin: `http://${p}-gateway:18083`, internalOrigin: `http://${p}-gateway:18084`, gatewayPort: 18083, internalPort: 18084,
+      gatewayOrigin: `http://${gatewayHost}:18083`, internalOrigin: `http://${gatewayHost}:18084`, gatewayPort: 18083, internalPort: 18084,
       localAddress: '127.0.0.1:18085', secureDirectory: '/e2e-secure', stateDirectory: '/e2e-state', usersFile: '/e2e-state/users.json',
       sessionKeyFile: '/e2e-secure/session.key', cookieFile: '/e2e-state/cookies.json',
       migration: { ownersFile: '/e2e-state/owners.json' },
-      k8s: { namespace: `${p}-users`, systemNamespace: `${p}-system`, storageClass: `${p}-local`,
-        imageConfigMap: `${p}-images`, governingService: `${p}-users`, clusterDomain: o.clusterDomain,
+      k8s: { namespace: `${p}-users`, systemNamespace, storageClass: `${p}-local`,
+        imageConfigMap: `${p}-images`, governingService: `${p}-users`, clusterDomain,
+        dnsNdots: gatewayHost.split('.').length - 1,
         dataVolumeSize: '64Mi', memoryRequest: '64Mi', cpuRequest: '20m', inspectCacheMs: 0, terminationGraceSeconds: 3,
         podStartTimeoutMs: 120000, keepRunningIntervalMs: 0,
         newUserNodeSelector: { 'kubernetes.io/hostname': o.agentNode },

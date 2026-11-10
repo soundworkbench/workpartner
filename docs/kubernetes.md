@@ -30,6 +30,7 @@
 | `systemNamespace` | 客户端命名空间 | 集群内取 ServiceAccount namespace；JSON kubeconfig 取当前 context namespace，未写则 `default`。离线渲染无 ServiceAccount 时必须显式配置；渲染要求与用户命名空间不同。 |
 | `systemContainer` | `execNamed(name)` 的 `name` | 系统 Pod 中的目标容器名，非空 DNS label；部署网关容器名为 `gateway`，Pod 名由 Deployment 生成。K7 验证网关时局部覆盖为 `gateway`。 |
 | `clusterDomain` | `cluster.local` | 用户 Pod DNS 搜索域追加 `<systemNamespace>.svc.<clusterDomain>`。 |
+| `dnsNdots` | 未设置 | 可选整数 1–15，为用户 Pod 和一次性 job Pod 设置 DNS `ndots` 选项；未设置时不生成 `options`，保留集群默认行为。 |
 | `apiTimeoutMs` | `10000` | API 请求超时，毫秒，正有限数。 |
 | `inCluster` | `true` | 使用挂载的 ServiceAccount；也接受 `{server, namespaceFile, tokenFile, caFile}`，各成员可省略。详见下文。 |
 | `kubeconfigJson` | 无 | 已展开 JSON kubeconfig 的字符串或对象，不是文件路径。设置后运行时优先使用它。不要把含凭据的配置提交到仓库。 |
@@ -72,9 +73,11 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 | `identity.appSecretFile` | `/secure/identity-app.secret` | 渲染器要求位于 secure 或 state 目录内。 |
 | `runtime.hostData` / `hostSecure` / `hostConfig` | resolver 回退为 `""` | Docker 宿主路径；K7 钥匙目录优先 `--host-secure`，其次非空 hostSecure，再 secureDirectory；不代替 deploy.hostPaths。 |
 | `model.keyPrefix` / `baseEnvironment` | `model-` / `MODEL_BASE_URL` | 网关从 `<secureDirectory>/<keyPrefix><slug>.key` 读取钥匙；通过指定环境变量传入模型 URL。 |
-| `model.baseUrl` / `nextBaseUrl` | `""` / `""` | 部署必须设置模型地址；K5 用 baseUrl 建 Service，非空 nextBaseUrl 必须同主机同端口。 |
-| `runtime.gatewayOrigin` / `internalOrigin` | `http://workpartner-gateway:3090` / `http://workpartner-gateway:3091` | 必须同一个短 Service 主机名，端口分别等于 gatewayPort、internalPort。 |
+| `model.baseUrl` / `nextBaseUrl` | `""` / `""` | 部署必须设置模型地址；K5 用 baseUrl 建 Service，非空 nextBaseUrl 必须指向同一个 Service 和同一个端口。 |
+| `runtime.gatewayOrigin` / `internalOrigin` | `http://workpartner-gateway:3090` / `http://workpartner-gateway:3091` | 必须指向同一个 Service，可用短名或 systemNamespace 中的 FQDN，端口分别等于 gatewayPort、internalPort。 |
 | `runtime.gatewayPort` / `internalPort` / `localAddress` | `3090` / `3091` / IPv4 回环地址的 3080 端口（具体值见 `gateway/organization/default.json`） | 入口及内部服务端口、宿主隧道目标。hostPort 配置与 localAddress 不一致时渲染器警告，不能忽略。 |
+
+用户 Pod 的短名或不带末尾点且点数少于 `ndots` 的 FQDN 会先遍历 DNS 搜索列表（包括节点的宿主搜索域），可能导致解析缓慢。要让 `gatewayOrigin` / `internalOrigin` / 模型 base URL 中的 FQDN 先按绝对名称查询，请使用 systemNamespace 中的 `<name>.<systemNamespace>.svc.<clusterDomain>`，并将 `runtime.k8s.dnsNdots` 设置为该 FQDN 的点数或更小的有效值。
 
 ### 部署渲染配置
 
@@ -127,7 +130,7 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 }
 ```
 
-Service 仍叫 `model-egress`，对外端口仍为模型 URL 的 4000；无 selector，由同系统命名空间的 IPv4 EndpointSlice 指向 `192.0.2.10:4100`。目标端口可以不同于 Service 端口；baseUrl 与非空 nextBaseUrl 的主机和端口仍必须一致。实现遵循 Kubernetes 的 [无 selector Service 与 EndpointSlice 关联方式](https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors)。
+Service 仍叫 `model-egress`，对外端口仍为模型 URL 的 4000；无 selector，由同系统命名空间的 IPv4 EndpointSlice 指向 `192.0.2.10:4100`。目标端口可以不同于 Service 端口；baseUrl 与非空 nextBaseUrl 仍必须指向同一个 Service 和同一个端口。实现遵循 Kubernetes 的 [无 selector Service 与 EndpointSlice 关联方式](https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors)。
 
 用户出站策略单独放行 `192.0.2.10/32` 的 TCP 4100；原有私网及 `egressExceptCidrs` 排除项保持不变。实际出口落在被排除的私网段内时，也仅增加该地址/端口的例外。固定出口模式不生成模型 Pod 入站策略。
 
@@ -270,7 +273,7 @@ selector 模式生成的 `workpartner-model-ingress` 允许用户 Pod 和网关 
 | 静态 PV | `<namespace>-<c>-data`、`<namespace>-<c>-oldwork`；集群级，最长 253 字符，精确绑定 claim 和节点 metadata.name。动态 PV 名由 provisioner 决定。 |
 | 模型钥匙 / 发布 Secret | `<c>-model-key`（键 `model.key`）/ `<c>-published`。 |
 | 一次性维护 Pod | `<c>-<name>`，name 默认 `resetpass`，完整名称需为 DNS label。 |
-| 网关 Deployment / ServiceAccount / headless Service | systemNamespace 中，名称取 gatewayOrigin 的短主机名；Pod 名由控制器生成，容器名为 `gateway`。 |
+| 网关 Deployment / ServiceAccount / headless Service | systemNamespace 中，名称取 gatewayOrigin 的 Service 短名（FQDN 去掉命名空间和域名后缀）；Pod 名由控制器生成，容器名为 `gateway`。 |
 | 其他 Service | governingService 位于用户 namespace；模型 Service 名取 model.baseUrl；clusterIP 入口为 `<gateway>-entry`，原 headless Service 保留用于预览来源验证。 |
 | 固定模型 EndpointSlice | 仅 endpoint 模式生成，与模型 Service 同名、同系统 namespace，通过 `kubernetes.io/service-name` 标签关联。 |
 | RBAC / PriorityClass | Role 和 RoleBinding 分别为用户 namespace 的 `workpartner-users`、系统 namespace 的 `workpartner-system`；网关 PriorityClass 为 `<systemNamespace>-gateway`，值 1000000。 |

@@ -104,6 +104,25 @@ function fixture(t, options = {}) {
 }
 const writes = c => c.calls.filter(([method]) => ['create', 'patch', 'remove'].includes(method));
 
+test('user and job Pods set ndots only when explicitly configured', async t => {
+  for (const dnsNdots of [undefined, 1, 4, 15]) await t.test(String(dnsNdots), async t => {
+    const { runtime, client } = fixture(t, { dnsNdots, clusterDomain: 'cluster.invalid' });
+    await runtime.create({ slug: 'person' });
+    await runtime.runOnce('person');
+    const user = client.objects.get(stsPath).spec.template.spec;
+    const job = client.calls.find(([method, route]) => method === 'create' && route === `${core}/pods`)[2].spec;
+    for (const pod of [user, job]) {
+      assert.deepEqual(pod.dnsConfig.searches, ['system.svc.cluster.invalid']);
+      if (dnsNdots === undefined) {
+        assert.equal(Object.hasOwn(pod.dnsConfig, 'options'), false);
+        assert.equal(JSON.stringify(pod.dnsConfig), '{"searches":["system.svc.cluster.invalid"]}');
+      } else {
+        assert.deepEqual(pod.dnsConfig.options, [{ name: 'ndots', value: String(dnsNdots) }]);
+      }
+    }
+  });
+});
+
 test('create builds the complete StatefulSet, PVC and Secret contract', async t => {
   const { runtime, client } = fixture(t, { systemNamespace: 'control', clusterDomain: 'example.test',
     userLabel: 'example.test/user', modelBaseEnvironment: 'CUSTOM_BASE', modelBaseUrl: 'https://model.example.test/v1',

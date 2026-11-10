@@ -15,6 +15,8 @@ export interface Organization {
     migration?: { ownersFile?: string; peerOrigin?: string };
     k8s?: {
       namespace?: string; systemNamespace?: string; systemContainer?: string; clusterDomain?: string;
+      /** Optional resolver ndots (integer 1–15); omitted preserves cluster defaults. */
+      dnsNdots?: number;
       storageClass?: string; dataVolumeSize?: string; newUserNodeSelector?: Record<string, string>;
       memoryRequest?: string; cpuRequest?: string; userPriorityClass?: string;
       userResources?: Record<string, { memory?: string | number; cpu?: string | number }>;
