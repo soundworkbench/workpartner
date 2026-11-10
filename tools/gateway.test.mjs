@@ -282,3 +282,364 @@ test('existing organization extensions retain Docker and synchronous token depen
     method: 'POST', path: '/containers/compat/exec', body: { Cmd: ['fixture'] },
   });
 });
+
+async function migrationGateway(t, { kind, ownersFile, peerOrigin, extension = false }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-migration-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const org = fixtureOrganization(t);
+  org.publicHost = 'workspace.example.test';
+  org.model.baseUrl = 'http://models.example.test/v1';
+  org.features.feishuAuthorization = true;
+  org.features.preview = true;
+  org.identity.admission = 'unrestricted';
+  org.identity.appId = 'fixture-app';
+  org.identity.appSecretFile = path.join(dir, 'identity.secret');
+  Object.assign(org.runtime, { kind, gatewayPort: 0, internalPort: 0, uid: process.getuid(),
+    migration: { ownersFile, peerOrigin }, k8s: { keepRunningIntervalMs: 0, loadGatewayExtension: extension },
+    sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'),
+    secureDirectory: path.join(dir, 'secure'), stateDirectory: path.join(dir, 'state') });
+  const user = { slug: 'user1', unionId: 'fixture-union', name: 'Fixture user', backend: 'aionui' };
+  fs.writeFileSync(org.runtime.usersFile, JSON.stringify([user]));
+  fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
+  fs.writeFileSync(org.identity.appSecretFile, 'fixture-secret');
+  org.extensions.gatewayModule = './extension.mjs';
+  fs.writeFileSync(path.join(dir, 'extension.mjs'), `export function createGatewayExtension() { process.send({ extension: true }); return null; }`);
+  fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+  fs.writeFileSync(path.join(dir, 'runtime.mjs'), `
+const runtime = Object.fromEntries(['ensureIsolation', 'create', 'start', 'stop', 'restart', 'remove', 'exec', 'execNamed', 'processes', 'runOnce', 'putFiles', 'removeFiles'].map(name => [name, async (...args) => { process.send({ write: { name, slug: args[0]?.slug || args[0] } }); return {}; }]));
+runtime.readFile = async () => { throw Object.assign(new Error('Missing'), { code: 'ENOENT' }); };
+runtime.inspect = async () => ({ exists: false, replicas: null, annotations: {} });
+export const createRuntime = () => runtime;
+export const createLegacyRuntime = () => runtime;
+`);
+  fs.writeFileSync(path.join(dir, 'preload.mjs'), `
+import { registerHooks } from 'node:module';
+import http from 'node:http';
+registerHooks({ resolve(specifier, context, next) {
+  if (specifier === './runtime/index.mjs' && context.parentURL?.endsWith('/gateway/gateway.mjs')) return { url: ${JSON.stringify(pathToFileURL(path.join(dir, 'runtime.mjs')).href)}, shortCircuit: true };
+  return next(specifier, context);
+}, load(url, context, next) {
+  if (${JSON.stringify(kind)} === 'k8s' && url.endsWith('/runtime/docker.mjs')) throw new Error('Docker transport loaded in k8s mode');
+  return next(url, context);
+} });
+const listen = http.Server.prototype.listen;
+http.Server.prototype.listen = function(...args) {
+  const kind = typeof args.at(-1) === 'function' ? 'gateway' : 'internal';
+  this.once('listening', () => process.send({ kind, port: this.address().port }));
+  return listen.apply(this, args);
+};
+globalThis.fetch = async (url, init) => {
+  const result = value => ({ ok: true, json: async () => value });
+  if (String(url).endsWith('/user_info')) return result({ code: 0, data: { union_id: init.headers.authorization === 'Bearer personal-access' ? 'fixture-union' : 'new-union', name: 'Fixture user' } });
+  if (String(url).endsWith('/tenant_access_token/internal')) return result({ tenant_access_token: 'fixture-tenant' });
+  if (String(url).endsWith('/scopes')) return result({ data: { scopes: [{ scope_type: 'user', grant_status: 1, scope_name: 'read:example' }] } });
+  return result({ access_token: JSON.parse(init.body).code === 'personal' ? 'personal-access' : 'fixture-access', refresh_token: 'fixture-refresh', expires_in: 7200 });
+};
+`);
+  const child = fork(path.join(root, 'gateway/gateway.mjs'), [], { execArgv: ['--import', path.join(dir, 'preload.mjs')],
+    env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir, PREVIEW_HOST: 'preview.example.test' }, silent: true });
+  const writes = [], ports = {}; let output = '', loadedExtension = false;
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { output += chunk; });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill(); await once(child, 'exit'); } });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Migration gateway startup timed out: ' + output)), 5000);
+    child.on('message', message => {
+      if (message.write) writes.push(message.write);
+      if (message.extension) loadedExtension = true;
+      if (message.kind) ports[message.kind] = message.port;
+      if (ports.gateway && ports.internal) { clearTimeout(timer); resolve(); }
+    });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`Migration gateway exited ${code}: ${output}`)); });
+  });
+  const request = (url, { method = 'GET', headers = {}, body, internal = false } = {}) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: ports[internal ? 'internal' : 'gateway'], path: url, method,
+      headers: { host: org.publicHost, ...headers } }, res => {
+      const chunks = []; res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString() }));
+    });
+    req.on('error', reject); req.end(body);
+  });
+  return { org, user, request, writes, ports, loadedExtension, output: () => output };
+}
+
+test('two migration gateways preserve HTTP and WebSocket requests, local entry routes and live ownership', { timeout: 15000 }, async t => {
+  const crypto = await import('node:crypto');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-owners-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const ownersFile = path.join(dir, 'owners.json');
+  const assign = owner => {
+    fs.writeFileSync(ownersFile + '.tmp', JSON.stringify({ version: 1, default: owner, users: {} }));
+    fs.renameSync(ownersFile + '.tmp', ownersFile);
+  };
+  assign('docker');
+  const seen = [], sockets = new Set();
+  const peer = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    seen.push({ url: req.url, method: req.method, headers: req.headers, body: Buffer.concat(chunks).toString() });
+    res.writeHead(201, { 'set-cookie': ['peer=one; HttpOnly', 'peer2=two'], 'x-peer': 'fixture' }); res.end('peer response');
+  });
+  peer.on('upgrade', (req, socket, head) => {
+    seen.push({ url: req.url, headers: req.headers });
+    const accept = crypto.createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    if (head.length) socket.write(head);
+    socket.on('data', data => socket.write(data));
+  });
+  peer.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  peer.listen(0, '127.0.0.1'); await once(peer, 'listening');
+  t.after(() => { for (const socket of sockets) socket.destroy(); return new Promise(resolve => peer.close(resolve)); });
+  const k8s = await migrationGateway(t, { kind: 'k8s', ownersFile, peerOrigin: `http://127.0.0.1:${peer.address().port}` });
+  const docker = await migrationGateway(t, { kind: 'docker', ownersFile, peerOrigin: `http://127.0.0.1:${k8s.ports.gateway}` });
+  assert.equal(k8s.loadedExtension, false);
+  assert.equal(docker.loadedExtension, true);
+  const data = Buffer.from(JSON.stringify({ u: k8s.user.unionId, n: 'Fixture user', e: Date.now() / 1000 + 600 })).toString('base64url');
+  const cookie = `wp_sid=${data}.${crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url')}`;
+  const headers = { cookie, authorization: 'Bearer fixture-header', origin: 'https://workspace.example.test', 'x-custom': 'preserved' };
+  const response = await k8s.request('/api/example?x=1', { method: 'POST', headers, body: 'streamed request' });
+  assert.equal(response.status, 201); assert.equal(response.body, 'peer response');
+  assert.deepEqual(response.headers['set-cookie'], ['peer=one; HttpOnly', 'peer2=two']);
+  assert.equal(seen.at(-1).url, '/api/example?x=1');
+  assert.equal(seen.at(-1).method, 'POST');
+  assert.equal(seen.at(-1).body, 'streamed request');
+  for (const [key, value] of Object.entries({ ...headers, host: 'workspace.example.test', 'x-workpartner-delegated': '1' })) assert.equal(seen.at(-1).headers[key], value);
+  const upgrade = (gateway, host = 'workspace.example.test', session = cookie) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: gateway.ports.gateway, path: '/socket?x=1', headers: {
+      ...headers, host, cookie: session, origin: `https://${host}`, connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-key': 'Zml4dHVyZS13ZWJzb2NrZXQ=', 'sec-websocket-version': '13',
+    } });
+    req.on('upgrade', (res, socket, head) => {
+      assert.equal(res.statusCode, 101);
+      if (head.length) { socket.destroy(); resolve(head.toString()); return; }
+      socket.once('data', chunk => { socket.destroy(); resolve(chunk.toString()); });
+      socket.write('fixture echo');
+    });
+    req.on('response', res => reject(new Error(`Upgrade rejected: ${res.statusCode}`)));
+    req.on('error', reject); req.end();
+  });
+  assert.equal(await upgrade(k8s), 'fixture echo');
+  assert.equal(seen.at(-1).headers.host, 'workspace.example.test');
+  assert.equal(seen.at(-1).headers.cookie, cookie);
+  assert.equal(seen.at(-1).headers['x-custom'], 'preserved');
+  assert.equal(seen.at(-1).headers['x-workpartner-delegated'], '1');
+  let count = seen.length;
+  assert.equal((await k8s.request('/api/example', { headers: { ...headers, 'x-workpartner-delegated': '1' } })).status, 502);
+  for (const route of ['/_wp/login', '/_wp/logout', '/_wp/callback']) {
+    assert.notEqual((await k8s.request(route, { headers })).body, 'peer response');
+  }
+  assert.equal(seen.length, count);
+  assert.equal((await k8s.request('/_wp/callback?state=feishu-fixture&code=fixture', { headers })).status, 201);
+  assert.equal(seen.length, ++count, 'authorization callbacks delegate to the owner');
+  assert.equal((await k8s.request('/_wp/preparing', { headers })).status, 201);
+  assert.equal(seen.length, ++count, 'listed users preparing their workspace delegate to the owner');
+  const newData = Buffer.from(JSON.stringify({ u: 'new-union', n: 'New user', e: Date.now() / 1000 + 600 })).toString('base64url');
+  const newCookie = `wp_sid=${newData}.${crypto.createHmac('sha256', 'fixture-session-key').update(newData).digest('base64url')}`;
+  const preparing = await k8s.request('/_wp/preparing', { headers: { cookie: newCookie } });
+  assert.equal(preparing.status, 200); assert.match(preparing.body, /工作伙伴待开通/);
+  assert.equal(seen.length, count, 'unlisted users stay at the entry gateway');
+  const onboarding = await k8s.request('/_wp/callback?state=fixture&code=fixture', { headers: { cookie: 'wp_state=fixture|1|%2F_wp%2Fpreparing' } });
+  assert.equal(onboarding.status, 503); assert.match(onboarding.body, /工作区迁移中/);
+  assert.equal((await k8s.request('/token', { method: 'POST', internal: true, headers: { authorization: 'Bearer ' + issueToken('fixture-session-key', k8s.user) } })).status, 403);
+  const open = await k8s.request('/_wp/preview/open?port=8080&path=%2F', { headers });
+  const start = await k8s.request(new URL(open.headers.location).pathname + new URL(open.headers.location).search, { headers: { host: 'preview.example.test' } });
+  assert.equal(start.status, 302); assert.equal(seen.length, count);
+  const authorizeUrl = new URL(start.headers.location);
+  const authorize = await k8s.request(authorizeUrl.pathname + authorizeUrl.search, { headers });
+  const redeemUrl = new URL(authorize.headers.location);
+  const redeem = await k8s.request(redeemUrl.pathname + redeemUrl.search, { headers: { host: 'preview.example.test', cookie: start.headers['set-cookie'][0].split(';')[0] } });
+  assert.equal(redeem.status, 302); assert.equal(seen.length, count);
+  const previewCookie = redeem.headers['set-cookie'][0].split(';')[0];
+  assert.equal((await k8s.request('/preview-app', { headers: { host: 'preview.example.test', cookie: previewCookie } })).status, 201);
+  assert.equal(seen.at(-1).headers.cookie, previewCookie); assert.equal(seen.at(-1).headers.host, 'preview.example.test');
+  assert.equal(await upgrade(k8s, 'preview.example.test', previewCookie), 'fixture echo');
+  assert.equal((await k8s.request('/preview-app', { headers: { host: 'preview.example.test', cookie: previewCookie, 'x-workpartner-delegated': '1' } })).status, 502);
+  for (const route of ['/_wp/market/skills', '/_wp/aionui/feishu/status', '/_wp/feishu/status']) await k8s.request(route, { headers });
+  assert.deepEqual(k8s.writes, [], 'a foreign user never prepares or writes through the runtime');
+  assign('k8s'); count = seen.length;
+  assert.equal((await k8s.request('/_wp/me', { headers })).status, 200);
+  assert.equal((await docker.request('/_wp/me', { headers })).status, 200, 'the second gateway delegates to the new owner');
+  assert.equal(seen.length, count);
+  const connect = await docker.request('/_wp/feishu/connect?return=settings&display=popup', { headers });
+  assert.equal(connect.status, 302);
+  const state = new URL(connect.headers.location).searchParams.get('state');
+  assert.match(state, /^feishu-/);
+  const connected = await docker.request('/_wp/callback?state=' + state + '&code=personal', {
+    headers: { cookie: cookie + '; ' + connect.headers['set-cookie'][0].split(';')[0] },
+  });
+  assert.equal(connected.status, 302, connected.body);
+  assert.match(connected.headers.location, /feishu\/done\?display=popup$/);
+  const desktopHeaders = { authorization: 'Bearer ' + issueToken('fixture-session-key', docker.user) };
+  const desktopToken = await docker.request('/_wp/feishu/desktop-token', { method: 'POST', headers: desktopHeaders });
+  assert.equal(desktopToken.status, 200, desktopToken.body);
+  assert.equal(JSON.parse(desktopToken.body).user_access_token, 'personal-access');
+  const desktopStatus = await docker.request('/_wp/feishu/desktop-status', { method: 'POST', headers: desktopHeaders });
+  assert.equal(desktopStatus.status, 200); assert.equal(JSON.parse(desktopStatus.body).connected, true);
+  assert.equal((await docker.request('/_wp/feishu/desktop-status', { method: 'POST', headers: { authorization: 'Bearer ' + issueToken('wrong-key', docker.user) } })).status, 401);
+  assert.equal((await docker.request('/token', { method: 'POST', internal: true, headers: desktopHeaders })).status, 403);
+  const before = docker.writes.length;
+  await docker.request('/api/example', { headers: { ...headers, 'x-workpartner-delegated': '1' } });
+  assert.equal(docker.writes.length, before);
+});
+
+test('k8s gateway startup, local entry routes and ownership guards work without Docker and honor extension opt-in', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-migration-routing-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const org = fixtureOrganization(t);
+  org.publicHost = 'workspace.example.test'; org.model.baseUrl = 'http://models.example.test/v1';
+  for (const key of Object.keys(org.features)) org.features[key] = false;
+  Object.assign(org.runtime, { kind: 'k8s', gatewayPort: 0, k8s: { keepRunningIntervalMs: 0 },
+    migration: { ownersFile: path.join(dir, 'owners.json') },
+    usersFile: path.join(dir, 'users.json'), sessionKeyFile: path.join(dir, 'session.key') });
+  org.extensions.gatewayModule = './extension.mjs';
+  fs.writeFileSync(path.join(dir, 'extension.mjs'), `export function createGatewayExtension() { globalThis.extensionLoaded = true; return null; }`);
+  fs.writeFileSync(org.runtime.usersFile, JSON.stringify([{ slug: 'user1', unionId: 'fixture-union', backend: 'aionui' }]));
+  fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
+  fs.writeFileSync(org.runtime.migration.ownersFile, JSON.stringify({ version: 1, default: 'docker', users: {} }));
+  fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+  const script = `
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import { PassThrough } from 'node:stream';
+import crypto from 'node:crypto';
+import { registerHooks } from 'node:module';
+const fake = 'data:text/javascript,' + encodeURIComponent('export const createRuntime = () => new Proxy({}, { get() { return () => { throw new Error("Unexpected runtime call"); }; } }); export const createLegacyRuntime = () => { throw new Error("Legacy runtime must not be created"); };');
+registerHooks({ resolve(specifier, context, next) {
+  if (specifier === './runtime/index.mjs' && context.parentURL?.endsWith('/gateway/gateway.mjs')) return { url: fake, shortCircuit: true };
+  return next(specifier, context);
+}, load(url, context, next) {
+  if (url.endsWith('/runtime/docker.mjs')) throw new Error('Docker transport must not be imported');
+  return next(url, context);
+} });
+const logs = []; console.error = (...args) => logs.push(args.join(' '));
+let server;
+http.Server.prototype.listen = function() { server = this; return this; };
+await import(${JSON.stringify(pathToFileURL(path.join(root, 'gateway/gateway.mjs')).href)});
+assert.equal(globalThis.extensionLoaded, process.env.TEST_EXTENSION === '1' ? true : undefined);
+const data = Buffer.from(JSON.stringify({ u: 'fixture-union', n: 'Fixture', e: Date.now() / 1000 + 600 })).toString('base64url');
+const cookie = 'wp_sid=' + data + '.' + crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
+async function request(url, extra = {}) {
+  const req = new PassThrough(); Object.assign(req, { url, method: 'GET', headers: { host: 'workspace.example.test', cookie, ...extra } });
+  const res = new PassThrough(); let status, body = '', headers;
+  res.writeHead = (value, fields) => { status = value; headers = fields; }; res.setHeader = () => {};
+  res.on('data', chunk => { body += chunk; });
+  const done = new Promise(resolve => res.on('end', () => resolve({ status, body, headers })));
+  await server.listeners('request')[0](req, res); req.end();
+  return done;
+}
+if (process.env.TEST_PEER) {
+  const seen = [];
+  http.request = (options, callback) => {
+    seen.push(options); const up = new PassThrough(); up.resume();
+    queueMicrotask(() => { const reply = new PassThrough(); reply.statusCode = 201; reply.headers = {}; callback(reply); reply.end('peer response'); });
+    return up;
+  };
+  for (const route of ['/_wp/callback?state=feishu-fixture', '/_wp/preparing']) {
+    assert.equal((await request(route)).status, 201); assert.equal(seen.at(-1).path, route);
+  }
+  const tokenData = Buffer.from(JSON.stringify({ u: 'fixture-union', e: Date.now() / 1000 + 600 })).toString('base64url');
+  const token = 'zpd.' + tokenData + '.' + crypto.createHmac('sha256', 'fixture-session-key').update('zpd.' + tokenData).digest('base64url');
+  for (const route of ['/_wp/feishu/desktop-token', '/_wp/feishu/desktop-status']) {
+    assert.equal((await request(route, { cookie: '', authorization: 'Bearer ' + token })).status, 201);
+    assert.equal(seen.at(-1).headers.authorization, 'Bearer ' + token);
+    assert.equal(seen.at(-1).headers['x-workpartner-delegated'], '1');
+  }
+  const count = seen.length;
+  assert.equal((await request('/_wp/login')).status, 302);
+  assert.equal((await request('/_wp/callback?state=login')).status, 200);
+  assert.equal((await request('/_wp/preparing', { cookie: '' })).status, 302);
+  assert.equal(seen.length, count);
+  process.exit(0);
+}
+if (process.env.TEST_OWNERS_FAILURE) {
+  for (const route of ['/', '/_wp/login', '/_wp/callback?state=fixture', '/_wp/callback?state=feishu-fixture', '/_wp/preparing']) {
+    const result = await request(route); assert.equal(result.status, 503, route); assert.match(result.body, /工作区迁移中/);
+  }
+  assert.equal((await request('/', { 'x-workpartner-delegated': '1' })).status, 503);
+  assert.ok(logs.some(line => line.includes('Owners file unavailable')), JSON.stringify(logs));
+  process.exit(0);
+}
+for (const route of ['/', '/api/example', '/_wp/market/skills', '/_wp/aionui/feishu/status', '/_wp/preparing']) {
+  const result = await request(route); assert.equal(result.status, 503, route); assert.match(result.body, /工作区迁移中/);
+}
+assert.equal((await request('/', { 'x-workpartner-delegated': '1' })).status, 502);
+assert.equal((await request('/_wp/login')).status, 302);
+assert.equal((await request('/_wp/logout')).status, 200);
+assert.equal((await request('/_wp/callback')).status, 200);
+fs.writeFileSync(${JSON.stringify(org.runtime.migration.ownersFile)}, JSON.stringify({ version: 1, default: 'k8s', users: {} }));
+assert.equal((await request('/_wp/me')).status, 200);
+`;
+  for (const enabled of [false, true]) {
+    org.runtime.k8s.loadGatewayExtension = enabled;
+    fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+    fs.writeFileSync(org.runtime.migration.ownersFile, JSON.stringify({ version: 1, default: 'docker', users: {} }));
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir, TEST_EXTENSION: enabled ? '1' : '0' },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
+  }
+  org.runtime.migration.peerOrigin = 'http://peer.test';
+  fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+  fs.writeFileSync(org.runtime.migration.ownersFile, JSON.stringify({ version: 1, default: 'docker', users: {} }));
+  const peerResult = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir, TEST_EXTENSION: '1', TEST_PEER: '1' },
+  });
+  assert.equal(peerResult.status, 0, peerResult.stdout + peerResult.stderr + (peerResult.error?.message || ''));
+  for (const invalid of [false, true]) {
+    if (invalid) fs.writeFileSync(org.runtime.migration.ownersFile, '{broken');
+    else fs.unlinkSync(org.runtime.migration.ownersFile);
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir, TEST_EXTENSION: '1', TEST_OWNERS_FAILURE: '1' },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
+  }
+});
+
+test('configured missing or invalid ownership returns 503 without provisioning or runtime writes', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-owners-failure-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const invalid of [false, true]) {
+    const ownersFile = path.join(dir, invalid ? 'invalid.json' : 'missing.json');
+    if (invalid) fs.writeFileSync(ownersFile, '{broken');
+    const gateway = await migrationGateway(t, { kind: 'k8s', ownersFile, peerOrigin: 'http://peer.invalid' });
+    for (const route of ['/', '/_wp/login', '/_wp/callback?state=fixture&code=fixture', '/_wp/callback?state=feishu-fixture', '/_wp/preparing']) {
+      const response = await gateway.request(route);
+      assert.equal(response.status, 503, route); assert.match(response.body, /工作区迁移中/);
+    }
+    const token = await gateway.request('/token', { method: 'POST', internal: true,
+      headers: { authorization: 'Bearer ' + issueToken('fixture-session-key', gateway.user) } });
+    assert.equal(token.status, 503);
+    assert.deepEqual(gateway.writes, []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(gateway.org.runtime.usersFile)), [gateway.user]);
+    assert.match(gateway.output(), /Owners file unavailable/);
+  }
+});
+
+test('without migration forwarding, previews, internal tokens and keep-running preserve main behavior', async t => {
+  const { createAionui } = await import('../gateway/aionui.mjs');
+  const f = await fixture(t);
+  assert.equal(f.org.runtime.migration, undefined);
+  const cookie = await f.login(), headers = { cookie, 'x-workpartner-delegated': '1' };
+  const page = await f.request('/api/example', { headers });
+  assert.equal(page.status, 200); assert.equal(page.body, 'workspace response');
+  assert.equal(f.upstreamHits.at(-1).path, '/api/example');
+  assert.equal((await f.request('/app', { headers: { host: 'preview.example.test' } })).status, 401);
+  const open = await f.request('/_wp/preview/open?port=8080&path=%2F', { headers });
+  assert.equal(open.status, 302); assert.equal(new URL(open.headers.location).host, 'preview.example.test');
+  assert.ok(fs.existsSync(path.join(f.org.runtime.nextDirectory, 'user1/.zp-preview-relay-key')));
+  const connect = await f.request('/_wp/feishu/connect', { headers });
+  const state = new URL(connect.headers.location).searchParams.get('state');
+  const callback = await f.request('/_wp/callback?code=personal&state=' + state,
+    { headers: { cookie: cookie + '; ' + connect.headers['set-cookie'][0].split(';')[0] } });
+  assert.equal(callback.status, 302);
+  const token = await f.request('/token', { method: 'POST', internal: true,
+    headers: { authorization: 'Bearer ' + issueToken('fixture-session-key', f.user) } });
+  assert.equal(token.status, 200); assert.equal(JSON.parse(token.body).user_access_token, 'fixture-access');
+  let inspections = 0;
+  for (const kind of [undefined, 'docker']) {
+    const aionui = createAionui({ kind, runtime: { async inspect() { inspections++; return { exists: true, running: false }; },
+      async start() { assert.fail('Docker must not run the keep-running worker'); } } });
+    t.after(() => aionui.close());
+    await aionui.keepRunning(() => [f.user]); aionui.startKeepRunning(() => [f.user], 1);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(inspections, 0, 'Docker inspect fields may be undefined and no keep-running timer starts');
+});

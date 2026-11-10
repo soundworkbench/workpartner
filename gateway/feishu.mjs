@@ -14,7 +14,7 @@ const expiredCookie = "zp_feishu=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-A
  * @param options Gateway state directory, app id/secret reader, public origin, enable switch and identity readers.
  * @returns Public handler, internal token handler and periodic refresh operation; no timer is owned by this service.
  */
-export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, authenticate, sessionUser, readUsers, projectHost = "", callbackPath = "/_wp/callback", fetcher = fetch, now = Date.now }) {
+export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, authenticate, sessionUser, readUsers, projectHost = "", callbackPath = "/_wp/callback", fetcher = fetch, now = Date.now, owns = () => true, assertOwned }) {
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(stateDir, 0o700);
   const pending = new Map();
@@ -62,6 +62,7 @@ export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, a
       expiresAt: now() + data.expires_in * 1000, refreshExpiresAt: data.refresh_token_expires_in ? now() + data.refresh_token_expires_in * 1000 : previous?.refreshExpiresAt ?? null };
   }
   async function refresh(id, value) {
+    if (!ownsId(id)) throw failure(403, "工作区迁移中，请稍后重试");
     if (value.refreshExpiresAt !== null && value.refreshExpiresAt <= now()) throw failure(409, "飞书授权已到期，请重新连接");
     let data;
     try { data = await exchange({ grant_type: "refresh_token", refresh_token: value.refreshToken }); }
@@ -101,11 +102,19 @@ export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, a
     return { enabled: enabled(), connected: Boolean(enabled() && value?.state === "connected" && (value.refreshExpiresAt === null || value.refreshExpiresAt > now())), revoking: value?.state === "revoking", name: readUsers().find(user => user.unionId === id)?.name, authorizedAt: value?.authorizedAt };
   };
   const disconnect = (id) => serial(id, async () => {
+    if (!ownsId(id)) throw failure(403, "工作区迁移中，请稍后重试");
     for (const [state, entry] of pending) if (entry.user === id) pending.delete(state);
     const value = load(id);
     if (value) await revoke(id, value);
     return { connected: false };
   });
+  const ensureOwned = user => {
+    if (assertOwned) return assertOwned(user);
+    if (!owns(user)) throw failure(403, "工作区迁移中，请稍后重试");
+  };
+  const ownsId = id => owns() || owns(readUsers().find(user => user.unionId === id));
+  const canMaintain = (id, value) => ownsId(id)
+    || (value.state === 'revoking' && !readUsers().some(user => user.unionId === id));
   const connectUrl = `${publicOrigin}/_wp/feishu/connect`;
   async function token(req, res) {
     try {
@@ -113,17 +122,20 @@ export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, a
       ensureEnabled();
       const user = authenticate(req);
       if (!user) throw failure(401, "工作伙伴登录已失效，请重新登录");
+      ensureOwned(user);
       await serial(user.unionId, async () => {
+        ensureOwned(user);
         let value = load(user.unionId);
         if (!value || value.state !== "connected") return json(res, 409, { error: "not_authorized", message: "需要授权飞书", authorization_url: connectUrl });
         if (value.expiresAt <= now() + 5 * 60000) value = await refresh(user.unionId, value);
         ensureEnabled();
+        ensureOwned(user);
         json(res, 200, { user_access_token: value.accessToken, expires_at: Math.floor(value.expiresAt / 1000), app_id: appId });
       });
     } catch (error) { json(res, error.status || 503, { error: "authorization_unavailable", message: error.status ? error.message : "暂时无法读取飞书授权", authorization_url: connectUrl }); }
   }
   async function handle(req, res, url) {
-    const callback = url.pathname === "/_wp/callback" && String(url.searchParams.get("state") || "").startsWith("feishu-");
+    const callback = url.pathname === callbackPath && String(url.searchParams.get("state") || "").startsWith("feishu-");
     if (!callback && !url.pathname.startsWith("/_wp/feishu/")) return false;
     // 公网只给桌面版显式入口；容器使用另一个仅内部网络可达的监听端口。
     if (url.pathname === "/_wp/feishu/desktop-token") { await token(req, res); return true; }
@@ -131,12 +143,14 @@ export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, a
       if (["/_wp/feishu/desktop-status", "/_wp/feishu/desktop-disconnect", "/_wp/feishu/desktop-config"].includes(url.pathname)) {
         const user = authenticate(req);
         if (!user) throw failure(401, "工作伙伴登录已失效，请重新登录");
+        ensureOwned(user);
         if (req.method !== "POST") throw failure(405, "请使用 POST");
         json(res, 200, url.pathname.endsWith("desktop-config") ? { meegle_host: projectHost } : url.pathname.endsWith("desktop-status") ? status(user.unionId) : await disconnect(user.unionId));
         return true;
       }
       const user = sessionUser(req);
       if (!user) { redirect(res, `/_wp/login?next=${encodeURIComponent("/_wp/feishu/")}`); return true; }
+      ensureOwned(user);
       const suffix = url.pathname.slice("/_wp/feishu/".length);
       if (suffix === "done" && req.method === "GET") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'" });
@@ -149,6 +163,7 @@ export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, a
         if (!entry || entry.until <= now() || entry.user !== user.unionId || cookie(req, "zp_feishu") !== state || !url.searchParams.get("code")) throw failure(400, "飞书授权未完成或已过期，请重新连接");
         ensureEnabled();
         await serial(user.unionId, async () => {
+          ensureOwned(user);
           const old = load(user.unionId);
           if (old?.state === "revoking") throw failure(409, "上一次断开尚未完成，请先重试断开");
           const tok = await exchange({ grant_type: "authorization_code", code: url.searchParams.get("code"), redirect_uri: `${publicOrigin}${callbackPath}` });
@@ -181,9 +196,10 @@ export function createFeishu({ stateDir, appId, secret, publicOrigin, enabled, a
       const record = JSON.parse(fs.readFileSync(path.join(stateDir, entry), "utf8"));
       if (typeof record.userId !== "string" || path.basename(file(record.userId)) !== entry) throw new Error("飞书授权记录无效");
       const id = record.userId;
+      if (!canMaintain(id, record)) continue;
       await serial(id, async () => {
         const value = load(id);
-        if (!value) return;
+        if (!value || !canMaintain(id, value)) return;
         if (value.state === "revoking") await revoke(id, value);
         else if (value.state === "connected" && enabled() && readUsers().some((u) => u.unionId === id) && value.expiresAt <= now() + 5 * 60000) await refresh(id, value);
       }).catch((error) => { /* 暂时失败留待下轮；领取令牌仍明确报告错误。 */ });
