@@ -397,14 +397,20 @@ slug=fixture-user
 | `inventory` | 全用户 cron、服务目录、进程、端口、会话、凭据文件元数据及机器人配置路径，写 JSON/文本和逐项对照表；docker diff；--apply 时仅从运行容器把 `/usr/local/bin` 下新增/修改且本人可读的普通可执行文件复制到 `/data/.zp-init.d/bin`，UID 为 runtime.uid。符号链接只报告目标，其他修改仅报告。 | 检查报告、手动转写支持的补丁，再重跑。需要 root 才能还原或涉及身份分流且不能用 PATH 覆盖的补丁按规格停止迁移。不会自动转换所有补丁。 |
 | `switch` 预检 | 在创建锁和任何写操作前确认最新完整对照表，拿锁后再核对；Bound local PVC/PV、精确 hostname 亲和（旧 `matchFields` 在创建锁前即拒绝，拿锁后再核对）、可选 oldwork 同 hostname、镜像登记、钥匙、Docker/PV 同数据目录、无旧 k8s Pod。 | 修复预检再试，不能绕过检查；核实 status，镜像登记之外还须确认节点已导入。 |
 | `switch` 停 Docker | 先 `restart=no`，再 stop 并复查确已停止。 | 不启动 Pod；修复 Docker 操作后重跑。 |
-| `switch` 切换/预热 | 原子 owner→k8s，ensureIsolation、create、清除 paused、start；启动前再次核对归属和 Docker 已停。 | 保持 Docker 停止且 restart=no，修复后重跑 switch，或执行 rollback --apply。不存在独立 prewarm 子命令。 |
-| `verify` | 仅一个 Running Pod、读取其所在节点的 hostname 标签并与 local PV 亲和比较（同时校验可选 oldwork）；从网关访问 `/api/auth/status`；有配置则 cc-connect 存在；预览钥匙链接正确、非空可读；Docker 不活跃；逐项核对 carried 项，缺失、不匹配或无法读取均 ALARM 并非零退出；缺少对照表时仅报警并跳过逐项核对，其余检查照常执行。switch --apply 自动执行它。 | 保持 Docker 停止，修复后重跑 verify --apply，或回滚。verify 无 --apply 仅被动检查并列出待 exec 项，不能称为完整验证。 |
+| `switch` 切换/预热 | 原子 owner→k8s，ensureIsolation、create、清除 paused、start；启动前再次核对归属和 Docker 已停；通过网关内部 prepare 触发发布文件写入，然后等待验证。 | 保持 Docker 停止且 restart=no，修复后重跑 switch，或执行 rollback --apply。不存在独立 prewarm 子命令。 |
+| `verify` | 仅一个 Running 且 Ready 的 Pod、读取其所在节点的 hostname 标签并与 local PV 亲和比较（同时校验可选 oldwork）；从网关访问 `/api/auth/status`；有配置则 cc-connect 存在；已启用功能对应的 published Secret 键非空，Pod 内各链接正确、非空可读；Docker 不活跃；逐项核对 carried 项，缺失、不匹配或无法读取均 ALARM 并非零退出；缺少对照表时仅报警并跳过逐项核对，其余检查照常执行。switch --apply 自动执行它。 | 保持 Docker 停止，修复后重跑 verify --apply，或回滚。verify 无 --apply 仅被动检查并列出待 exec 项，不能称为完整验证。 |
+
+`verify --apply` 与 `switch --apply` 自动验证使用相同的有界重试：每项就绪检查默认最多 **180 秒**，失败后每 **5 秒**重试（最后一次等待不超过剩余时间）。可用 `--ready-timeout 300` 改为每项 300 秒；接受大于 0、至多 86400 的秒数。总耗时可能包含多个检查各自的等待。Pod Ready、网关 AionUi 状态、有配置的 cc-connect、发布文件和 carried 项均等待启动完成；逐项对照表格式错误仍直接失败。输出包含 `WAIT ... attempt N`、成功的 `READY ... attempt N`，最终失败包含尝试次数和最后原因。暂时缺少 carried 项不会立即输出 ALARM，只在最终失败时输出。无 `--apply` 不等待、不 exec、不触发 prepare。
+
+切换启动后（包括已迁移用户重复执行 switch），工具在网关 Pod 的 `gateway` 容器内执行 Node，请求 **内部监听端口** `runtime.internalPort`（默认 3091）的 `POST /internal/adopt/prepare/<slug>`。此路由只在内部 listener 注册，公共入口不注册；仅接受 loopback 连接，不能从用户 Pod 或其他网络客户端触发。处理器从当前用户表查找 aionui 用户，确认本实例为 k8s 且当前归属属于它，再复用 `prepare(user)`；内部触发强制刷新 CLI 配置/令牌，绕过常规一天缓存。成功返回空的 204，方法/来源/用户/归属不符返回 4xx，准备失败返回空的 503，不返回凭据或底层错误。网关需先更新到包含此处理器的版本；工具不会重启网关或修改用户 Pod spec。prepare 本身使用相同重试预算。
+
+prepare 写入 `<c>-published` Secret 后，verify 等待已启用功能的键非空：预览为 `.zp-preview-relay-key`，Feishu 授权为 `.zp-market-token` 和 `.wp-feishu-cli.json`。随后在 Pod 检查相应 `/data/<文件名>` 为指向 `runtime.k8s.publishedDirectory`（默认 `/run/workpartner/published`）的链接，目标非空且可读；这一步允许 kubelet 延迟投射 Secret。只读验证不调用 prepare，缺文件时可重新运行 `switch --apply` 触发填充。输出不包含 Secret 值。
 
 `inventory --apply` 要求旧容器运行中且有 Node，使用只读 root 探针盘点所有用户；清空 NODE_OPTIONS，并固定 PATH 为 `/usr/sbin:/usr/bin:/sbin:/bin`。原有可执行文件复制仍以 runtime.uid 执行。默认 dry-run 仅打印 docker diff 和后续探针/文件计划，不生成可用于 switch 的对照表。报告放在宿主 `<ownersFile>.adopt/`（目录模式 0700），按用户代号命名：
 
 - `<slug>.inventory.json`：带 `inventoryId`、时间、稳定条目 ID、采集异常的机器可读报告。
 - `<slug>.inventory.txt`：逐项可读报告。
-- `<slug>.decisions.json`：人工编辑的对照表；新生成时所有 `decision` 为空，文件模式均为 0600。目录及报告每次写入都显式收紧为 0700/0600；报告经独占创建的临时文件加 rename 发布，不跟随已存在的报告符号链接，报告目录本身为符号链接时拒绝。
+- `<slug>.decisions.json`：人工编辑的对照表；新生成时已知无害项预填 `dropped` 和原因，其余 `decision` 为空，文件模式均为 0600。目录及报告每次写入都显式收紧为 0700/0600；报告经独占创建的临时文件加 rename 发布，不跟随已存在的报告符号链接，报告目录本身为符号链接时拒绝。
 
 盘点包括每个 `/etc/passwd` 用户的 crontab、`/etc/crontab` 和 `/etc/cron.d`；有 crontab 工具时不再读取用户 spool，无工具时只读 `/var/spool/cron`（含 crontabs 子目录），同一用户只保留一份来源，verify 也只按该来源核对。每条任务和环境设置单独列项。`/srv`、`/opt` 一级目录记录名称、du KiB 大小（单次超时 60 秒）、UID/GID 和属主；监听端口记录 TCP/UDP、IPv4/IPv6 协议与端口。tmux/screen 通过各用户默认会话端点查询；自定义 socket 的会话需人工补查。
 
@@ -413,6 +419,17 @@ slug=fixture-user
 ```json
 { "issue": "directory-size", "acknowledged": true, "reason": "已人工核对服务目录和迁移内容，容量统计超时不影响核对结论" }
 ```
+
+内置兼容映射集中在 `tools/k8s/adopt-mappings.mjs`，对 carried 项的核对目标生效，保留原盘点记录：
+
+| 旧项 | 默认新目标 |
+| --- | --- |
+| `/opt/partner-next` 及以其目录边界开头的子路径 | `/opt/workpartner` 及相同后缀；包括进程 executable `/opt/partner-next/bin/cc-connect` |
+| 监听端口 `3092` | `25808`，协议保持原值 |
+
+映射不匹配 `/opt/partner-next-other` 等相似名称，也不替代人工 carried/dropped 决策。显式 `target.path`、`target.executable`、`target.port` 可覆盖默认值。
+
+生成决策表时，旧启动脚本产生的 docker diff 目录项 `/usr`、`/usr/local`、`/usr/local/bin`、`/root` 和 `/root/.gitconfig`，以及 root `.gitconfig` 点文件项，预填 `dropped` 和生成原因。`curl`、`sleep` 瞬时进程与交互式 `claude`（无 `-p` / `--print`，只记录交互模式布尔值，不记录参数）进程预填 `dropped` 和重启/瞬时原因。规则只匹配这些已知项目，不按整个 `/usr` 或 `/root` 子树丢弃：自定义可执行文件、凭据、服务目录及其他进程仍保持未决。预填行可人工改写；重新盘点重新生成默认决策。
 
 每一项都须填写 `decision: "carried"` 并在 `method` 写明恢复方式，或 `decision: "dropped"` 并在 `reason` 写明放弃原因，包括不存在的点文件、进程、会话和 docker diff 条目。不可删除行来跳过核对。例如服务目录条目保留生成的 `id/kind/source`，将其余字段改为：
 
@@ -425,9 +442,9 @@ slug=fixture-user
 }
 ```
 
-`target` 为空时按原位置检查；可用 `path` 映射目录、点文件、配置文件和 cron 文件，用 `user` 映射用户 crontab，用 `port/protocol` 映射监听，用 `executable` 或 `name` 映射进程或会话。cron 文件目标仅接受标准 cron 路径且拒绝末级符号链接；任务文本有意改变时需人工审查并填写新条目的 `fingerprint`（SHA-256，去除该行首尾空白），不可把原始含密钥命令写入表。verify 使用固定脚本，通过 stdin 仅传入 id、kind 和核对所需字段，不传原报告、迁移说明或 reason。verify 使用 Pod 的运行用户读取目标；权限不足同样报警，须修复权限或迁移到该用户可管理的位置。目录、点文件和配置仅核对存在性/类型，不验证文件内容、凭据有效性或服务业务行为；cron 核对条目摘要，端口核对监听，进程/会话核对可执行文件/名称。复制的可执行文件默认检查 `/data/.zp-init.d/bin/<文件名>`。
+`target` 为空时先应用上述内置映射，其余按原位置检查；显式 `target` 优先于内置映射。可用 `path` 映射目录、点文件、配置文件和 cron 文件，用 `user` 映射用户 crontab，用 `port/protocol` 映射监听，用 `executable` 或 `name` 映射进程或会话。cron 文件目标仅接受标准 cron 路径且拒绝末级符号链接；任务文本有意改变时需人工审查并填写新条目的 `fingerprint`（SHA-256，去除该行首尾空白），不可把原始含密钥命令写入表。verify 使用固定脚本，通过 stdin 仅传入 id、kind 和核对所需字段，不传原报告、迁移说明或 reason。verify 使用 Pod 的运行用户读取目标；权限不足同样报警，须修复权限或迁移到该用户可管理的位置。目录、点文件和配置仅核对存在性/类型，不验证文件内容、凭据有效性或服务业务行为；cron 核对条目摘要，端口核对监听，进程/会话核对可执行文件/名称。复制的可执行文件默认检查 `/data/.zp-init.d/bin/<文件名>`。
 
-每次 `inventory --apply` 开始都会作废旧决策，采集报告写入后生成新批次并清空决策和 issue 确认。重新盘点后必须重新填写；switch 同时检查批次 ID、文件修改时间、全部条目和说明。从 Docker 切到 k8s 的正常路径，缺表、旧表、空决策或有未确认的采集 issue 时，在创建锁、停 Docker、修改归属及 Kubernetes 写操作前拒绝。报告和表是本地私有运维产物，不应提交公开仓库。
+每次 `inventory --apply` 开始都会作废旧决策，采集报告写入后生成新批次，重新预填已知无害项并清空其余决策和 issue 确认。重新盘点后必须重新填写其余项目；switch 同时检查批次 ID、文件修改时间、全部条目和说明。从 Docker 切到 k8s 的正常路径，缺表、旧表、空决策或有未确认的采集 issue 时，在创建锁、停 Docker、修改归属及 Kubernetes 写操作前拒绝。报告和表是本地私有运维产物，不应提交公开仓库。
 
 对已经迁移但迁移前没有对照表的用户，verify（dry-run 和 --apply）会单独输出一条 ALARM，跳过逐项核对，其余被动检查及 --apply 的运行时检查照常执行；其余检查通过时退出码为 0，结果 `inventoryVerified: false`。报警要求人工核对 cron、`/srv`/`/opt` 服务、进程、监听端口、tmux/screen 会话、凭据点文件、机器人配置和容器层补丁。归属为 k8s、工作负载运行且 Docker 不活跃时，switch 的幂等验证路径同样允许缺表。已有但损坏、过期或未标完的对照表仍失败；已有表但报告丢失、悬空符号链接也不视作缺表。
 

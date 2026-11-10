@@ -49,9 +49,9 @@ export async function createGatewayServices({ organization, runtime: personalRun
       return { user, expires: JSON.parse(Buffer.from(data, 'base64url').toString()).e };
     },
   }) : undefined;
-  async function prepare(user) {
+  async function prepare(user, options) {
     if (!migration.owns(user)) return;
-    if (user.backend === 'aionui' && prepareNextFeishu) await prepareNextFeishu(user);
+    if (user.backend === 'aionui' && prepareNextFeishu) await prepareNextFeishu(user, options);
     if (preview && (user.backend === 'aionui' || legacy)) await writeRelayKey(SESSION_KEY, user, user.backend === 'aionui' ? personalRuntime : legacyRuntime);
   }
   for (const user of users()) {
@@ -71,11 +71,30 @@ export async function createGatewayServices({ organization, runtime: personalRun
     timer = setInterval(maintain, 60000); timer.unref();
     void maintain();
   }
+  // Only the internal listener dispatches this route. Requiring a loopback
+  // peer restricts the trigger to an operator executing inside the gateway Pod.
+  async function prepareInternal(req, res) {
+    if (!req.url.startsWith('/internal/adopt/prepare/')) return false;
+    const finish = status => { res.writeHead(status); res.end(); return true; };
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress)) return finish(403);
+    if (req.method !== 'POST') return finish(405);
+    const slug = req.url.slice('/internal/adopt/prepare/'.length);
+    if (!/^[a-z][a-z0-9-]{1,30}$/.test(slug)) return finish(400);
+    try {
+      const user = users().find(user => user.slug === slug && user.backend === 'aionui');
+      if (!user) return finish(404);
+      if (migration.kind !== 'k8s' || !migration.owns(user)) return finish(409);
+      await prepare(user, { force: true });
+      return finish(204);
+    } catch { return finish(503); } // Never return credentials or upstream errors.
+  }
   return { prepareNextFeishu: prepare, preview, feishu, feishuSettings,
     listen(extension) {
-      if (!feishu && !extension?.internal) return;
-      // This listener is internal-only; each service still authenticates the signed identity and current roster.
+      if (!feishu && !extension?.internal && migration.kind !== 'k8s') return;
+      // This listener is internal-only; token services authenticate signed identities,
+      // while adoption preparation requires a loopback peer and current ownership.
       internal = http.createServer(async (req, res) => {
+        if (await prepareInternal(req, res)) return;
         if (req.url === '/token' && feishu) return feishu.token(req, res);
         if (await extension?.internal?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
         res.writeHead(404); res.end();

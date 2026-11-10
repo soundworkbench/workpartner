@@ -4,10 +4,10 @@
  */
 export function createNextFeishuPreparation({ organization, tokenFor, runtime }) {
   const prepared = new Map();
-  return async user => {
+  return async (user, { force = false } = {}) => {
     if (user.backend !== 'aionui') return;
     const previous = prepared.get(user.slug);
-    if (previous?.unionId === user.unionId && previous.until > Date.now()) return;
+    if (!force && previous?.unionId === user.unionId && previous.until > Date.now()) return;
     if (!/^[a-z][a-z0-9-]{1,30}$/.test(user.slug)) throw new Error('用户身份无效');
     const { runtime: configRuntime, server } = organization;
     const config = { kind: 'container', bin: '/usr/local/bin', realBin: '/opt/partner-clis/bin', execPath: '/usr/local/bin/node',
