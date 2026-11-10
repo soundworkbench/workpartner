@@ -1,0 +1,62 @@
+{
+  "apiVersion": "scheduling.k8s.io/v1",
+  "kind": "PriorityClass",
+  "metadata": {"name": {{gatewayPriorityClass}}, "labels": {{partOf}}},
+  "value": 1000000,
+  "globalDefault": false,
+  "description": "Keep the workspace gateway available under resource pressure."
+}
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {"name": {{gatewayName}}, "namespace": {{systemNamespace}}, "labels": {{gatewayLabels}}},
+  "spec": {
+    "replicas": 1,
+    "strategy": {"type": "Recreate"},
+    "selector": {"matchLabels": {{gatewayLabels}}},
+    "template": {
+      "metadata": {"labels": {{gatewayLabels}}},
+      "spec": {
+        "serviceAccountName": {{gatewayName}},
+        "automountServiceAccountToken": true,
+        "enableServiceLinks": false,
+        "priorityClassName": {{gatewayPriorityClass}},
+        "nodeSelector": {{gatewayNodeSelector}},
+        "tolerations": [
+          {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"},
+          {"key": "node-role.kubernetes.io/master", "operator": "Exists", "effect": "NoSchedule"}
+        ],
+        "containers": [{
+          "name": "gateway",
+          "image": {{gatewayImage}},
+          "imagePullPolicy": "Never",
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "seccompProfile": {"type": "RuntimeDefault"},
+            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE", "FOWNER"]}
+          },
+          "env": [{"name": "WORKPARTNER_ORG_DIR", "value": "/organization"}],
+          "ports": {{gatewayContainerPorts}},
+          "resources": {
+            "requests": {{gatewayResources}},
+            "limits": {{gatewayResources}}
+          },
+          "livenessProbe": {"tcpSocket": {"port": "gateway"}, "initialDelaySeconds": 30, "periodSeconds": 10},
+          "volumeMounts": [
+            {"name": "organization", "mountPath": "/organization", "readOnly": true},
+            {"name": "secure", "mountPath": {{secureDirectory}}},
+            {"name": "state", "mountPath": {{stateDirectory}}},
+            {"name": "users", "mountPath": {{usersFile}}}
+          ]
+        }],
+        "volumes": [
+          {"name": "organization", "hostPath": {"path": {{organizationHostPath}}, "type": "Directory"}},
+          {"name": "secure", "hostPath": {"path": {{secureHostPath}}, "type": "Directory"}},
+          {"name": "state", "hostPath": {"path": {{stateHostPath}}, "type": "Directory"}},
+          {"name": "users", "hostPath": {"path": {{usersHostPath}}, "type": "File"}}
+        ]
+      }
+    }
+  }
+}
