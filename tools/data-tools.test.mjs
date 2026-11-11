@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { createDataTools } from '../gateway/data-tools.mjs';
+import { createDataTools, formatUsd } from '../gateway/data-tools.mjs';
 import { dataToolsSkill, parseDataTools } from '../gateway/organization/data-tools.mjs';
 import { organizationData } from '../gateway/organization/resolve.mjs';
 
@@ -71,7 +71,8 @@ test('neutral organizations expose no data tools; a selected table controls card
   assert.match(dataToolsSkill(catalog), /wp-data call example.measurements.search --json/);
   const response = await fetch(base + '/_wp/data/call/measurements', { method: 'POST', headers, body: '{"q":"acoustics","limit":999}' });
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).costUsd, .01);
+  const called = await response.json();
+  assert.equal(called.costUsd, .01); assert.equal(called.costText, '$0.01');
   const call = requests.at(-1);
   assert.equal(call.url.pathname, '/invoke/example.measurements.search');
   assert.deepEqual(JSON.parse(call.body), [{ q: 'acoustics', limit: 5 }]);
@@ -82,6 +83,8 @@ test('neutral organizations expose no data tools; a selected table controls card
   assert.deepEqual(personal.daily, { usedUsd: .01, limitUsd: 1 });
   assert.deepEqual(personal.monthly, { usedUsd: .01, limitUsd: 5 });
   assert.equal(personal.call.limitUsd, 1);
+  assert.deepEqual(personal.summary, { zh: '今天已用 $0.01 · 剩余 $0.99 / $1.00；本月已用 $0.01 · 剩余 $4.99 / $5.00',
+    en: 'Today used $0.01 · $0.99 left of $1.00; this month used $0.01 · $4.99 left of $5.00' });
   assert.doesNotMatch(JSON.stringify(personal), /someone-else|90000000/);
   const count = requests.length;
   for (const route of ['/catalog/search', '/call/example.other']) {
@@ -215,6 +218,7 @@ test('image calls wait, apply catalog defaults, save URL/base64 files and retain
   assert.equal(saved.result.costUsd, .01); assert.equal(saved.result.callId, 'image-1');
   assert.equal(saved.result.usage.daily.usedUsd, .01);
   assert.equal(saved.result.remainingTodayUsd, .99);
+  assert.match(saved.result.usage.summary.zh, /^今天已用 \$0\.01 · 剩余 \$0\.99 \/ \$1\.00；/);
   assert.equal(saved.result.files.length, 2); assert.equal(saved.result.data, undefined);
   assert.equal(downloadAuth, undefined);
   for (const file of saved.result.files) {
@@ -287,4 +291,9 @@ test('organization skill copy says when to use the data skill and how', t => {
     assert.throws(() => parseDataTools({ ...catalog, skill: skillCopy }), /Invalid data skill copy/);
   }
   assert.throws(() => dataToolsSkill({ ...catalog, skill: { description: { zh: '长'.repeat(1000), en: 'x' } } }), /limit is 1024/);
+});
+
+test('amounts keep sub-cent spending visible', () => {
+  assert.deepEqual([0, .0012, .000123, .009999, .01, .39, .9988, 1 - .0012, 4.615, 5 - .39, 12.3].map(formatUsd),
+    ['$0.00', '$0.0012', '$0.000123', '$0.009999', '$0.01', '$0.39', '$0.9988', '$0.9988', '$4.615', '$4.61', '$12.30']);
 });

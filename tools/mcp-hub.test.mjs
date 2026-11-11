@@ -37,14 +37,16 @@ test('All keeps platform order across recommended examples, pagination and platf
     recommended: id === 'second' && index === 0, price: { kind: 'call', usd: 0.01 },
     ...(id === 'second' && index === 0 ? { example: label('Organization example') } : {}),
   }))]));
-  let render; const tried = [];
+  let render, usedToday = 0; const tried = [], documentEvents = {};
   const window = { wpMarket: { register(name, callback) { assert.equal(name, 'tools'); render = callback; }, tryExample: (text, skill) => tried.push([text, skill]) } };
-  const context = { window, AbortController, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) },
+  const document = { hidden: false, createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }),
+    addEventListener: (name, action) => { documentEvents[name] = action; }, removeEventListener: (name, action) => { if (documentEvents[name] === action) delete documentEvents[name]; } };
+  const context = { window, AbortController, document,
     fetch: async url => {
       const path = new URL(url, 'http://fixture');
       if (path.pathname === '/_wp/data/tools') return Response.json({ groups: [{ name: label('Research'), platforms }] });
       if (path.pathname === '/_wp/data/catalog') return Response.json({ tools: rows[path.searchParams.get('platform')] });
-      if (path.pathname === '/_wp/data/usage') return Response.json({ daily: { limitUsd: 1, usedUsd: 0 }, monthly: { limitUsd: 5, usedUsd: 0 } });
+      if (path.pathname === '/_wp/data/usage') return Response.json({ daily: { limitUsd: 1, usedUsd: usedToday }, monthly: { limitUsd: 5, usedUsd: .39 } });
       assert.fail(`Unexpected request: ${url}`);
     } };
   for (const file of ['wp-tools.js', 'wp-data-tools.js']) {
@@ -58,6 +60,15 @@ test('All keeps platform order across recommended examples, pagination and platf
     const filters = host.children.find(node => node.className === 'wp-data-platforms');
     const more = host.children.find(node => node.className.includes('wp-data-more'));
     const names = () => Array.from(cards.children, node => node.dataset.tool);
+    // The allowance shows what was spent; sub-cent amounts stay visible and refresh when the browser tab is visible again.
+    const usage = host.children[0].children.find(node => node.className === 'wp-data-usage');
+    const text = node => node.textContent ?? node.children.map(text).join('');
+    const quota = () => usage.children.map(block => text(block.children[0]));
+    assert.deepEqual(quota(), ['Today used $0.00 · $1.00 left of $1.00', 'This month used $0.39 · $4.61 left of $5.00']);
+    usedToday = .0012; document.hidden = true; documentEvents.visibilitychange(); await settle();
+    assert.equal(quota()[0], 'Today used $0.00 · $1.00 left of $1.00');
+    document.hidden = false; documentEvents.visibilitychange(); await settle();
+    assert.deepEqual(quota(), ['Today used $0.0012 · $0.9988 left of $1.00', 'This month used $0.39 · $4.61 left of $5.00']);
     const expected = [...Object.keys(rows).flatMap(id => rows[id].map(row => row.name))];
     assert.deepEqual(names(), expected.slice(0, 12));
     // Every card offers Try it on its price row; organization examples win over the card-built draft.
@@ -76,6 +87,7 @@ test('All keeps platform order across recommended examples, pagination and platf
     filters.children.find(button => button.textContent === 'All').click(); await settle();
     assert.deepEqual(names(), expected.slice(0, 12));
   } finally { dispose(); }
+  assert.equal(documentEvents.visibilitychange, undefined);
 });
 
 test('hub cards draft without a skill unless the organization configures one', async () => {
