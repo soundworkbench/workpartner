@@ -1,4 +1,4 @@
-# 工作伙伴消息桥（JConnect）：默认 Codex 引擎（界面叫 ChatGPT），经组织模型服务，免确认。
+# 工作伙伴消息桥（JConnect）：默认 Claude Code 引擎，经组织模型服务，免确认。
 # 由切换脚本按本人原来的飞书机器人填 __PROJECT__、__ALLOW_FROM__、__APP_ID__、__APP_SECRET__，写到 /data/.cc-connect/config.toml（600）。
 data_dir = "/data/.cc-connect/data"
 language = "zh"
@@ -33,13 +33,13 @@ show_context_indicator = false
 show_workdir_indicator = false
 
 [projects.agent]
-type = "codex"
+type = "claudecode"
 
 [projects.agent.options]
 work_dir = "/data/work"
 codex_home = "/data/.codex"
-mode = "yolo"
-model = "__CODEX_MODEL__"
+mode = "bypassPermissions"
+model = "__CLAUDE_MODEL__"
 reasoning_effort = "__EFFORT__"
 
 [[projects.platforms]]
