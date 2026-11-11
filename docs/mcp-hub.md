@@ -10,6 +10,7 @@ An organization can connect a personal workspace to a Streamable HTTP MCP hub. S
     "keyEnvironment": "MODEL_API_KEY",
     "displayNames": "mcp-display.json",
     "hidden": ["search__web_search", "search__web_fetch"],
+    "skill": "media-guide",
     "defaultCategory": "Creation",
     "categories": [{ "en": "Creation", "zh": "内容生成" }],
     "platform": { "id": "media", "name": { "en": "Media service", "zh": "创作服务" } },
@@ -26,7 +27,7 @@ An organization can connect a personal workspace to a Streamable HTTP MCP hub. S
 }
 ```
 
-In this example, `Research` is a category already defined in the selected data catalog. Category keys use the English `en` value from `dataTools` categories or `mcpHub.categories`. `defaultCategory` selects the fallback for tools without an explicit `category`; it must exist in one of those lists. Unconfigured presentation defaults to the neutral Tools category and Tool service platform. Each tool can override the hub-level platform and optionally supply a localized example. These fields affect presentation only and never grant tool access.
+In this example, `Research` is a category already defined in the selected data catalog. Category keys use the English `en` value from `dataTools` categories or `mcpHub.categories`. `defaultCategory` selects the fallback for tools without an explicit `category`; it must exist in one of those lists. Unconfigured presentation defaults to the neutral Tools category and Tool service platform. Each tool can override the hub-level platform and optionally supply a localized example. Optional `skill` names an installed skill (lowercase letters, digits and hyphens) that hub cards draft with; omit it to draft with the example text alone. These fields affect presentation only and never grant tool access.
 
 Use the hub's complete root MCP endpoint, without an agent-specific suffix. The configured environment variable must already hold the person's key in the workspace. The gateway uses that person's existing model key file, so this key must authorize both model access and hub access. No new key is provisioned by this feature. `mcpHub: null` (the default) disables discovery without making a network request.
 
@@ -57,12 +58,13 @@ Claude Code supports `${ENV_VAR}` in headers, but [excludes credential names suc
 
 ## Tools page integration
 
-The Tools tab follows the data catalog layout: filled category pills, platform filters, and two-column cards (one column on a phone). Hub tools join existing data categories by category key, or add an organization-defined category. No MCP category is created. Cards share the same title, description, top-right platform label, and footer. Hub tools show “Included” in the price position and show “Try it” only when the organization supplies an example. Data cards keep their prices and examples.
+The Tools tab follows the data catalog layout: filled category pills, platform filters, and two-column cards (one column on a phone). Hub tools join existing data categories by category key, or add an organization-defined category. No MCP category is created. Cards share the same title, description, top-right platform label, and footer. Hub tools show “Included” in the price position. Data cards keep their prices and examples. Every card offers “Try it”, which opens a new conversation with the organization example, or a draft built from the card's title and description, in the composer. When the card's source declares a skill, the composer starts with that skill selected exactly as the `/` skill menu inserts it (`/<skill> `), followed by the text. The person can remove it or edit the text; nothing is sent automatically. Data cards use the generated `data-tools` skill.
 
 `wp-tools.js` owns the shared renderer. `wp-data-tools.js` and `wp-mcp-tools.js` contribute with `window.wpMarketTools.registerSource(load)` rather than replacing `wpMarket.register('tools', ...)`. The image loads the host first, then the data source and hub source, preserving data category order. `load({locale, signal})` returns a promise of:
 
 ```js
 {
+  skill: 'data-tools', // optional: the skill “Try it” selects for this source's cards
   categories: [{
     id: 'Research', name: { zh: '研究', en: 'Research' },
     platforms: [{ id: 'library', name: { zh: '资料库', en: 'Library' } }],
@@ -91,6 +93,14 @@ python3 -I image/tests/verify-mcp-engines.py --claude /path/to/claude --codex /p
 This creates disposable homes and a local 12-tool hub. Claude Code calls the final tool using a local model stub; Codex uses its app-server tool-call API. Both must authenticate through generated configuration, list all 12 individual tools, and call one successfully. Versions are checked against the image pins. It does not validate an organization's live hub or production sessions.
 
 Run `python3 -I image/tests/mcp-preview.py`, then open `http://127.0.0.1:18333/#/market` and select Tools to reproduce the visual fixture. Add `?dark=1`, `?lang=en`, `?mode=empty`, `?mode=hub-only`, or `?fail=1` before the hash to check those states. The fixture loads both actual source modules; Research contains both data and hub cards and Creation contains hub cards. Remove `fail` from the URL and refresh the list to check recovery.
+
+To check “Try it” in a real workspace, start Chromium with remote debugging, sign in to the workspace, and run:
+
+```sh
+node image/tests/verify-try-skill.mjs --cdp http://127.0.0.1:9222 --url https://workspace.example.com/ --screenshot /local/evidence/try-skill.png
+```
+
+It opens the Tools tab in a new tab, selects “Try it” on the first priced data card and checks that the new-conversation composer starts with `/data-tools ` followed by the example text, that the skill menu stays closed and that nothing is sent. It then clears the draft. Use `--skill` for a hub skill and `--locale en-US` for an English workspace. Both engines share this composer; to accept a release, send the draft once with each engine and confirm the transcript shows the skill loading and a priced `wp-data` call.
 
 Keep preview screenshots in a local evidence directory, outside the repository. Capture both a data category and a hub-populated category for desktop light/dark and a 390px phone. Fixture metadata is illustrative; this proves the combined renderer, not a live provider call.
 

@@ -38,7 +38,7 @@ test('All keeps platform order across recommended examples, pagination and platf
     ...(id === 'second' && index === 0 ? { example: label('Organization example') } : {}),
   }))]));
   let render; const tried = [];
-  const window = { wpMarket: { register(name, callback) { assert.equal(name, 'tools'); render = callback; }, tryExample: text => tried.push(text) } };
+  const window = { wpMarket: { register(name, callback) { assert.equal(name, 'tools'); render = callback; }, tryExample: (text, skill) => tried.push([text, skill]) } };
   const context = { window, AbortController, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) },
     fetch: async url => {
       const path = new URL(url, 'http://fixture');
@@ -65,7 +65,8 @@ test('All keeps platform order across recommended examples, pagination and platf
       const [price, action] = card.children[2].children;
       assert.equal(price.className, 'wp-data-price'); assert.equal(action.textContent, 'Try it'); action.click();
     }
-    assert.equal(tried[0], 'Use “first-0” to description'); assert.equal(tried[7], 'Organization example');
+    // Data cards draft with the generated data skill selected, before the example text.
+    assert.deepEqual(tried[0], ['Use “first-0” to description', 'data-tools']); assert.deepEqual(tried[7], ['Organization example', 'data-tools']);
     assert.equal(more.hidden, false);
     more.click();
     assert.deepEqual(names(), expected);
@@ -75,6 +76,40 @@ test('All keeps platform order across recommended examples, pagination and platf
     filters.children.find(button => button.textContent === 'All').click(); await settle();
     assert.deepEqual(names(), expected.slice(0, 12));
   } finally { dispose(); }
+});
+
+test('hub cards draft without a skill unless the organization configures one', async () => {
+  class Element {
+    constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.style = {}; this.events = {}; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    get lastChild() { return this.children.at(-1); }
+    setAttribute(name, value) { this[name] = value; }
+    addEventListener(name, action) { this.events[name] = action; }
+    click() { this.events.click?.(); }
+  }
+  const label = en => ({ en, zh: en }), platform = { id: 'library', name: label('Library') };
+  async function tryHubCard(market) {
+    let render; const tried = [];
+    const window = { wpMarket: { register(name, callback) { render = callback; }, tryExample: (text, skill) => tried.push([text, skill]) } };
+    const context = { window, AbortController, document: { createElement: tag => new Element(tag) },
+      fetch: async url => { assert.equal(url, '/_wp/market/tools'); return Response.json(market); } };
+    for (const file of ['wp-tools.js', 'wp-mcp-tools.js']) {
+      runInNewContext(readFileSync(new URL(`../image/rebrand/overlay/${file}`, import.meta.url), 'utf8'), context);
+    }
+    const host = new Element('main'), dispose = render(host, { locale: 'en-US' });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      const cards = host.children.find(node => node.className.includes('wp-data-cards'));
+      cards.children[0].children[2].children[1].click();
+      return tried;
+    } finally { dispose(); }
+  }
+  const market = { groups: [{ name: label('Research'), platforms: [platform] }],
+    tools: [{ name: 'library__find', category: 'Research', platform, included: true, title: label('Find'), description: label('Find references'), example: label('Find a reference') }] };
+  // Without a configured skill the draft keeps only the example text.
+  assert.deepEqual(await tryHubCard(market), [['Find a reference', '']]);
+  assert.deepEqual(await tryHubCard({ ...market, skill: 'library-guide' }), [['Find a reference', 'library-guide']]);
 });
 
 test('root hub discovery preserves 12 tool names, session, auth, pagination and SSE', async t => {
@@ -259,8 +294,14 @@ test('market uses organization categories, platform labels, defaults and optiona
   assert.deepEqual(value.tools.map(tool => tool.category), ['Research', 'Creation']);
   assert.deepEqual(value.tools.map(tool => tool.platform), [shared, media]);
   assert.ok(value.tools.every(tool => tool.included)); assert.equal(value.tools[0].example.zh, '查找参考资料'); assert.equal(value.tools[1].example, undefined);
+  assert.equal(value.skill, undefined);
   mode = 'empty'; const empty = await read(); assert.deepEqual(empty.tools, []); assert.equal(empty.groups[0].name.en, 'Creation');
   mode = 'failed'; const failed = await read(); assert.equal(failed.status, 503); assert.deepEqual(failed.groups.map(group => group.name.en), ['Creation', 'Research']);
   assert.throws(() => createMarketTools({ organization: { ...organization, mcpHub: { ...config, defaultCategory: 'Unknown' } } }), /Unknown MCP market category/);
   assert.throws(() => hubConfig({ ...config, tools: { media__render: { platform: { id: 'bad', name: { en: 'Only English' } } } } }), /Invalid MCP market presentation/);
+  for (const skill of ['', 'Guide', 'guide skill', '../guide', 1]) assert.throws(() => hubConfig({ ...config, skill }), /Invalid MCP market presentation/);
+  const configured = createMarketTools({ organization: { ...organization, mcpHub: { ...config, skill: 'library-guide' } }, authenticate: () => ({ slug: 'person' }), keyFor: () => key,
+    discover: async () => [{ name: 'library__find' }] });
+  const skilled = await server(t, async (req, res) => { await configured(req, res, new URL(req.url, 'http://local')); });
+  assert.equal((await (await fetch(skilled.replace('/mcp', '/_wp/market/tools'))).json()).skill, 'library-guide');
 });

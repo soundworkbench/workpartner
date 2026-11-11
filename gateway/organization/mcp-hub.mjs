@@ -18,7 +18,8 @@ export function hubConfig(value) {
         || !tool || typeof tool !== 'object' || Array.isArray(tool)
         || (tool.category !== undefined && (typeof tool.category !== 'string' || !tool.category.trim()))
         || (tool.platform !== undefined && !platform(tool.platform))
-        || (tool.example !== undefined && !localized(tool.example)))))) throw new Error('Invalid MCP market presentation');
+        || (tool.example !== undefined && !localized(tool.example)))))
+    || (value.skill !== undefined && (typeof value.skill !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.skill)))) throw new Error('Invalid MCP market presentation');
   return { ...value, url: url.href, name: value.name || 'workpartner-hub' };
 }
 
