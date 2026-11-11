@@ -94,6 +94,92 @@ test('runtime picker updates defaults and preserves saved personal choices witho
   assert.ok(engine.modelsFor('codex', null, engine.homePick('codex').model).some(m => m.id === 'runtime-codex'));
 });
 
+test('home composer draft is restored by the page pass, expires, and is cleared on send and logout', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-draft-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  materializeAppearance(dir, organizationData({}));
+  const overlay = fs.readFileSync(path.join(root, 'image/rebrand/overlay/wp-overlay.js'), 'utf8')
+    .replace('  /* __WP_COPY__ */', fs.readFileSync(path.join(dir, 'copy.js'), 'utf8'));
+  const end = overlay.lastIndexOf('})();');
+  assert.ok(end > 0);
+  // The admin flag keeps the page pass on its short branch, which still runs the draft restore.
+  const store = new Map([['wp_admin', '1']]);
+  const localStorage = { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
+  const saved = () => JSON.parse(store.get('wp_guid_draft'));
+  class HTMLTextAreaElement { set value(v) { this._v = v; } get value() { return this._v; } }
+  function load() {
+    const listeners = {};
+    const fire = (name, event) => (listeners[name] || []).forEach(fn => fn(event));
+    const input = Object.assign(new HTMLTextAreaElement(), { dataset: {}, events: 0,
+      matches: s => s.includes('guid-input'), dispatchEvent() { this.events++; } });
+    input.value = '';
+    const send = { disabled: false, classList: { contains: () => false } };
+    const visited = [];
+    const window = new EventTarget();
+    window.fetch = async () => ({ json: async () => ({ data: {} }) });
+    window.WpSmoothText = { SmoothText: class {}, protectedLines: () => [], repairStreamingMarkdown: s => s };
+    const context = vm.createContext({ window, fetch: window.fetch, Event, HTMLTextAreaElement, localStorage, NodeFilter: { SHOW_TEXT: 4 },
+      document: { body: {}, documentElement: { classList: { toggle() {} }, style: { getPropertyValue: () => '0px', setProperty() {} } },
+        title: '', querySelectorAll: () => [], createTreeWalker: () => ({ nextNode: () => null }),
+        querySelector: s => s.includes('guid-input') ? input : s.includes('guid-send-btn') ? send : null,
+        addEventListener(name, fn) { (listeners[name] ||= []).push(fn); } },
+      location: { hash: '#/guid', assign: url => visited.push(url) }, innerWidth: 320, MutationObserver: class { observe() {} }, requestAnimationFrame() {},
+      setTimeout() {}, clearTimeout() {}, setInterval() {},
+    });
+    // The send transition needs a real layout; count it instead.
+    vm.runInContext(overlay.slice(0, end) + 'window.signOut = signOut; window.shown = []; ghostShow = function (t) { window.shown.push(t); };' + overlay.slice(end), context);
+    return {
+      input, visited, signOut: window.signOut, shown: window.shown,
+      ready() { fire('DOMContentLoaded'); },
+      type(v) { input.value = v; fire('input', { target: input }); },
+      enter() { fire('keydown', { key: 'Enter', keyCode: 13, target: input }); },
+      click() { fire('click', { target: { closest: s => s.includes('guid-send-btn') ? send : null } }); },
+    };
+  }
+  const first = load();
+  first.ready();
+  assert.equal(first.input.value, '');
+  first.type('unsent task description');
+  assert.equal(saved().text, 'unsent task description');
+  assert.equal(typeof saved().at, 'number');
+
+  const second = load();
+  second.ready();
+  assert.equal(second.input.value, 'unsent task description', 'the page pass restores the draft in a new window');
+  assert.equal(second.input.events, 1);
+  second.ready();
+  assert.equal(second.input.events, 1, 'restores only once per mounted input');
+
+  second.type('');
+  assert.equal(store.has('wp_guid_draft'), false, 'emptying the composer drops the draft');
+  second.type('/skill text');
+  second.enter();
+  assert.equal(saved().text, '/skill text', 'Enter on a slash command picks the command and keeps the draft');
+  second.type('real message');
+  second.enter();
+  assert.equal(store.has('wp_guid_draft'), false, 'Enter sends and drops the draft');
+  second.type('another message');
+  second.click();
+  assert.equal(store.has('wp_guid_draft'), false, 'the send button drops the draft');
+  assert.deepEqual(Array.from(second.shown), ['real message', 'another message']);
+
+  store.set('wp_guid_draft', JSON.stringify({ text: 'stale', at: Date.now() - 25 * 60 * 60 * 1000 }));
+  const third = load();
+  third.ready();
+  assert.equal(third.input.value, '', 'drafts older than a day are not restored');
+  assert.equal(store.has('wp_guid_draft'), false, 'expired drafts are removed');
+
+  store.set('wp_guid_draft', 'plain text from an older version');
+  const fourth = load();
+  fourth.ready();
+  assert.equal(fourth.input.value, '', 'drafts without a saved time are not restored');
+
+  fourth.type('belongs to this account');
+  fourth.signOut();
+  assert.equal(store.has('wp_guid_draft'), false, 'logging out drops the draft');
+  assert.deepEqual(fourth.visited, ['/_wp/logout']);
+});
+
 test('neutral image inputs assemble without a private organization', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-image-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
