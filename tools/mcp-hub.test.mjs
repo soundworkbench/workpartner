@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { runInNewContext } from 'node:vm';
 import { hubConfig, listHubTools } from '../gateway/organization/mcp-hub.mjs';
 import { createMarketTools } from '../gateway/market-tools.mjs';
 
@@ -17,6 +18,57 @@ async function server(t, handler) {
 }
 function temporary(t) { const dir = mkdtempSync(join(tmpdir(), 'mcp-check-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; }
 const key = 'test-person-secret';
+
+test('All keeps platform order across recommended examples, pagination and platform filtering', async () => {
+  // Minimal DOM surface: execute the actual host and data source and inspect rendered cards.
+  class Element {
+    constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.style = {}; this.events = {}; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    get lastChild() { return this.children.at(-1); }
+    setAttribute(name, value) { this[name] = value; }
+    addEventListener(name, action) { this.events[name] = action; }
+    click() { this.events.click?.(); }
+  }
+  const label = en => ({ en, zh: en });
+  const platforms = ['first', 'second'].map(id => ({ id, name: label(id) }));
+  const rows = Object.fromEntries(platforms.map(({ id }) => [id, Array.from({ length: 7 }, (_, index) => ({
+    name: `${id}-${index}`, title: label(`${id}-${index}`), description: label('Description'),
+    recommended: id === 'second' && index === 0, price: { kind: 'call', usd: 0.01 },
+  }))]));
+  let render;
+  const window = { wpMarket: { register(name, callback) { assert.equal(name, 'tools'); render = callback; } } };
+  const context = { window, AbortController, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) },
+    fetch: async url => {
+      const path = new URL(url, 'http://fixture');
+      if (path.pathname === '/_wp/data/tools') return Response.json({ groups: [{ name: label('Research'), platforms }] });
+      if (path.pathname === '/_wp/data/catalog') return Response.json({ tools: rows[path.searchParams.get('platform')] });
+      if (path.pathname === '/_wp/data/usage') return Response.json({ daily: { limitUsd: 1, usedUsd: 0 }, monthly: { limitUsd: 5, usedUsd: 0 } });
+      assert.fail(`Unexpected request: ${url}`);
+    } };
+  for (const file of ['wp-tools.js', 'wp-data-tools.js']) {
+    runInNewContext(readFileSync(new URL(`../image/rebrand/overlay/${file}`, import.meta.url), 'utf8'), context);
+  }
+  const host = new Element('main'), dispose = render(host, { locale: 'en-US' });
+  try {
+    const settle = () => new Promise(resolve => setImmediate(resolve));
+    await settle();
+    const cards = host.children.find(node => node.className.includes('wp-data-cards'));
+    const filters = host.children.find(node => node.className === 'wp-data-platforms');
+    const more = host.children.find(node => node.className.includes('wp-data-more'));
+    const names = () => Array.from(cards.children, node => node.dataset.tool);
+    const expected = [...Object.keys(rows).flatMap(id => rows[id].map(row => row.name))];
+    assert.deepEqual(names(), expected.slice(0, 12));
+    assert.equal(more.hidden, false);
+    more.click();
+    assert.deepEqual(names(), expected);
+    assert.equal(more.hidden, true);
+    filters.children.find(button => button.textContent === 'second').click(); await settle();
+    assert.deepEqual(names(), rows.second.map(row => row.name));
+    filters.children.find(button => button.textContent === 'All').click(); await settle();
+    assert.deepEqual(names(), expected.slice(0, 12));
+  } finally { dispose(); }
+});
 
 test('root hub discovery preserves 12 tool names, session, auth, pagination and SSE', async t => {
   const seen = [];

@@ -72,7 +72,7 @@ The Tools tab follows the data catalog layout: filled category pills, platform f
 }
 ```
 
-The host merges identical category/platform IDs, renders cards once, sorts recommended data examples first, and pages results in batches of 12. Headers stay above categories. Only the data source contributes personal quota blocks, and only when it has data platforms. Empty and retry messages appear in the selected category's card area; a failed hub still returns configured categories so other data categories remain usable. Refreshing retries discovery. Category/filter changes, source registration/removal, locale changes, pending requests and disposal are handled by the shared host.
+The host merges identical category/platform IDs, renders cards once, preserves the order returned by each source, and pages results in batches of 12. Headers stay above categories. Only the data source contributes personal quota blocks, and only when it has data platforms. Empty and retry messages appear in the selected category's card area; a failed hub still returns configured categories so other data categories remain usable. Refreshing retries discovery. Category/filter changes, source registration/removal, locale changes, pending requests and disposal are handled by the shared host.
 
 ## Verification
 

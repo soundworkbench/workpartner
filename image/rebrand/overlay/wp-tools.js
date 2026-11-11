@@ -66,8 +66,7 @@
       if (!group) { status.textContent = copy.empty; return; }
       var results = await Promise.allSettled(group.entries.map(function (entry) { return entry.loadTools(platformId); }));
       if (disposed || current !== cardRevision) return;
-      tools = results.filter(function (result) { return result.status === 'fulfilled'; }).flatMap(function (result) { return result.value; })
-        .sort(function (a, b) { return Number(!!b.recommended) - Number(!!a.recommended); });
+      tools = results.filter(function (result) { return result.status === 'fulfilled'; }).flatMap(function (result) { return result.value; });
       var failed = results.some(function (result) { return result.status === 'rejected'; });
       status.textContent = failed ? copy.failed : tools.length ? '' : copy.empty; retry.hidden = !failed;
       visible = 0; appendCards();
