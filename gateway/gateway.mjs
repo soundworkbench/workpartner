@@ -86,7 +86,8 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
   execute: executeSkill,
 });
 const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
-const services = await createGatewayServices({ dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+let feedback; // The preview callback is evaluated per request, after feedback initialization.
+const services = await createGatewayServices({ extraClient: user => feedback?.clientFor(user) || '', dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
@@ -95,7 +96,7 @@ const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirect
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
 import { createFeedback } from './feedback.mjs';
-const feedback = organization.features.feedback ? createFeedback({ organization, organizationData,
+feedback = organization.features.feedback ? createFeedback({ organization, organizationData,
   authenticate: req => userFor(req).user, tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()),
   sessionAuthenticate: sessionOf,
 }) : undefined;
@@ -282,7 +283,7 @@ const server = http.createServer(async (req, res) => {
     if (await preview?.handle(req, res, url)) return;
     if (!preview && url.pathname === "/_wp/preview/client.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
-      return res.end("// Workspace preview is disabled.");
+      return res.end("// Workspace preview is disabled." + (feedback?.clientFor(userFor(req).user) || ""));
     }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");

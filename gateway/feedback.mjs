@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { feedbackPage } from './feedback-page.mjs';
+import { feedbackClient } from './feedback-client.mjs';
 
 const API = '/_wp/api/feedback', PAGE = '/_wp/feedback';
 const statuses = { open: '已提交', need_info: '待补充', pending_approval: '需求待审批', in_progress: '处理中', done: '已完成', rejected: '不做', duplicate: '重复' };
@@ -104,6 +104,12 @@ export function createFeedback({ organization, organizationData, authenticate, s
       return { allow: list(config?.allow), handlers: list(config?.handlers) };
     } catch { return { allow: [], handlers: [] }; }
   }
+  function access(user) {
+    const lists = policy();
+    const provisioned = Boolean(user?.slug && user?.unionId);
+    const isHandler = provisioned && lists.handlers.includes(user.unionId);
+    return { isHandler, allowed: provisioned && (isHandler || lists.allow.some(value => value === '*' || value === user.slug || value === user.unionId)) };
+  }
   const settings = organization.feedback || {};
   const positive = (value, fallback) => Number.isSafeInteger(value) && value > 0 ? value : fallback;
   const maxBytes = positive(settings.maxImageBytes, 5242880), maxImages = positive(settings.maxImagesPerItem, 6);
@@ -170,7 +176,7 @@ export function createFeedback({ organization, organizationData, authenticate, s
     });
     if (!update.notify) return update.item;
     const { item, reply } = update;
-    const message = `反馈 #${item.no}：${item.title}\n状态：${statuses[item.status]}${reply ? '\n' + [...reply.text].slice(0, 1500).join('') + ([...reply.text].length > 1500 ? '…' : '') : ''}\nhttps://${organization.server.publicHost}/_wp/feedback#${item.id}`;
+    const message = `反馈 #${item.no}：${item.title}\n状态：${statuses[item.status]}${reply ? '\n' + [...reply.text].slice(0, 1500).join('') + ([...reply.text].length > 1500 ? '…' : '') : ''}\nhttps://${organization.server.publicHost}/?wp-feedback=${item.id}`;
     let notice;
     try { await send(item.author.unionId, message); notice = 'sent'; } catch { notice = 'failed'; }
     // Delivery must not hold the write queue. Re-read after concurrent writes or rollback.
@@ -190,7 +196,7 @@ export function createFeedback({ organization, organizationData, authenticate, s
       }
     });
   }
-  return async (req, res, url) => {
+  const handle = async (req, res, url) => {
     const page = url.pathname === PAGE;
     if (!page && url.pathname !== API && !url.pathname.startsWith(API + '/')) return false;
     if (unavailable) { json(res, 503, { error: '反馈功能暂时不可用' }); return true; }
@@ -201,7 +207,6 @@ export function createFeedback({ organization, organizationData, authenticate, s
       if (bot) {
         if (!botAuthenticated(req)) throw fail(401, '机器人令牌无效。');
       } else {
-        const lists = policy();
         signed = tokenAuthenticate(req);
         // An explicit Bearer credential never falls back to a browser cookie.
         user = req.headers.authorization ? signed : authenticate(req);
@@ -210,8 +215,8 @@ export function createFeedback({ organization, organizationData, authenticate, s
           if (page) { res.writeHead(302, { location: '/_wp/login?next=' + encodeURIComponent(url.pathname + url.search), 'cache-control': 'no-store' }); res.end(); return true; }
           throw fail(401, '请先登录工作伙伴。');
         }
-        isHandler = lists.handlers.includes(user.unionId);
-        if (!isHandler && !lists.allow.some(value => value === '*' || value === user.slug || value === user.unionId)) { missing(res); return true; }
+        const admission = access(user); isHandler = admission.isHandler;
+        if (!admission.allowed) { missing(res); return true; }
       }
       const route = bot ? url.pathname.slice((API + '/bot').length) : url.pathname.slice(API.length);
       const match = /^\/items\/([A-Za-z0-9_-]+)(?:\/(comments|files)(?:\/([A-Za-z0-9_-]+))?)?$/.exec(route);
@@ -224,9 +229,8 @@ export function createFeedback({ organization, organizationData, authenticate, s
         if ((!bot && !signed && req.headers.origin !== origin) || !type.test(req.headers['content-type'] || '')) throw fail(403, '请从工作伙伴页面操作，并使用正确的内容类型。');
       }
       if (page && req.method === 'GET') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY',
-          'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; img-src 'self' blob:" });
-        res.end(feedbackPage({ appearanceStyle: organization.appearance?.authorizationStyle, maxImageBytes: maxBytes, maxImagesPerItem: maxImages })); return true;
+        res.writeHead(302, { location: '/?wp-feedback=1', 'cache-control': 'no-store' });
+        res.end(); return true;
       }
       if (bot && route === '/changes' && req.method === 'GET') {
         const since = Number(url.searchParams.get('since') ?? 0), requested = Number(url.searchParams.get('limit') ?? 50);
@@ -300,4 +304,7 @@ export function createFeedback({ organization, organizationData, authenticate, s
     }
     return true;
   };
+  handle.clientFor = user => organization.features?.feedback === false || !access(user).allowed
+    ? '' : feedbackClient({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages });
+  return handle;
 }

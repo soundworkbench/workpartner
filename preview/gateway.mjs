@@ -25,7 +25,7 @@ export async function writeRelayKey(key, user, runtime) {
 }
 
 /** Separate preview origin, browser-bound single-use grants, streaming HTTP and WebSocket routing. */
-export function createPreview({ publicHost, previewHost = "", key, users, sessionUser, upstream, now = Date.now }) {
+export function createPreview({ publicHost, previewHost = "", key, users, sessionUser, upstream, extraClient, now = Date.now }) {
   if (previewHost && (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(previewHost) || previewHost === publicHost
     || publicHost.endsWith(`.${previewHost}`))) {
     throw new Error("PREVIEW_HOST must be a separate sibling domain, without a scheme, port or wildcard");
@@ -145,7 +145,7 @@ export function createPreview({ publicHost, previewHost = "", key, users, sessio
     }
     if (!url.pathname.startsWith("/_wp/preview/")) return false;
     if (!previewHost && url.pathname === "/_wp/preview/client.js") {
-      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" }); res.end("// Workspace preview is disabled."); return true;
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" }); res.end("// Workspace preview is disabled." + (extraClient?.(sessionUser(req)?.user) || "")); return true;
     }
     if (!previewHost) { reject(res, 503, "工作区预览还未启用，请联系管理员。"); return true; }
     if (host !== publicHost || req.method !== "GET" || (req.headers.origin && req.headers.origin !== mainOrigin)) {
@@ -158,7 +158,7 @@ export function createPreview({ publicHost, previewHost = "", key, users, sessio
     const { user, expires } = identity;
     if (url.pathname === "/_wp/preview/client.js") {
       res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-      res.end(`(${installPreviewClient.toString()})(${JSON.stringify({ previewHost, scope: scope(user) })});`);
+      res.end(`(${installPreviewClient.toString()})(${JSON.stringify({ previewHost, scope: scope(user) })});` + (extraClient?.(user) || ""));
       return true;
     }
     if (url.pathname === "/_wp/preview/open") {

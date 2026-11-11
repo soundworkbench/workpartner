@@ -12,7 +12,7 @@ import { RELAY_PORT } from '../preview/policy.mjs';
 import { createPreview, writeRelayKey } from '../preview/gateway.mjs';
 
 /** Initialize organization-selected services with the gateway's identity and personal container resolver. */
-export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, dataTools, migration = createMigration(organization) }) {
+export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, dataTools, extraClient, migration = createMigration(organization) }) {
   const { features, runtime, server } = organization;
   const authenticate = req => tokenUser(req, SESSION_KEY, users());
   const enabled = () => features.feishuAuthorization && process.env.FEISHU_USER_AUTH_ENABLED !== '0';
@@ -34,7 +34,7 @@ export async function createGatewayServices({ organization, runtime: personalRun
     project: createContainerProject({ runtime: personalRuntime, legacyRuntime, uid: runtime.uid }),
   });
   const preview = features.preview && server.previewHost ? createPreview({
-    publicHost: server.publicHost, previewHost: server.previewHost, key: SESSION_KEY, users,
+    publicHost: server.publicHost, previewHost: server.previewHost, key: SESSION_KEY, users, extraClient,
     upstream: async slug => {
       const user = users().find(user => user.slug === slug);
       if (!migration.owns(user)) return {};
