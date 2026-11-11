@@ -44,8 +44,13 @@ class BridgeDefaultsTest(unittest.TestCase):
             self.assertEqual(project['agent']['options']['mode'], 'bypassPermissions')
             self.assertEqual(project['agent']['options']['model'], ENV['PARTNER_BRIDGE_MODEL'])
             self.assertEqual(project['agent']['options']['reasoning_effort'], 'high')
+            self.assertEqual(project['agent']['options']['append_system_prompt'], bridge.BACKGROUND_PROMPT)
 
     def expected(self, source):
+        newline = b'\r\n' if b'\r\n' in source else b'\n'
+        prompt = json.dumps(bridge.BACKGROUND_PROMPT, ensure_ascii=False).encode()
+        source = source.replace(b'[[projects.platforms]]', newline + b'append_system_prompt = ' + prompt + newline
+                                + b'[[projects.platforms]]', 1)
         return source.replace(b'type = "codex"', b'type = "claudecode"') \
             .replace(b'mode = "yolo"', b'mode = "bypassPermissions"') \
             .replace(b'\'old-codex\' # keep comment', b'"fixture-claude" # keep comment') \
@@ -75,6 +80,25 @@ class BridgeDefaultsTest(unittest.TestCase):
                 self.assertTrue(link.is_symlink())
                 self.assertEqual(target.stat().st_mode & 0o777, 0o640)
                 self.assertEqual(list(root.glob('.bridge-*')), [])
+
+    def test_only_the_bridge_ends_turns_for_background_work(self):
+        sync = module('wp-sync-instructions')
+        end_turn = '然后结束本轮'
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, ENV):
+            root = Path(directory)
+            sync.sync(ROOT / 'home/CLAUDE.md', root, 'Colleague', memory_bytes=4 * 2 ** 30)
+            web = (root / 'CLAUDE.md').read_text()
+            self.assertEqual((root / 'AGENTS.md').read_text(), web)
+            config = root / 'config.toml'
+            config.write_bytes(self.template())
+            self.assertTrue(bridge.refresh(config))
+            prompt = tomllib.loads(config.read_text())['projects'][0]['agent']['options']['append_system_prompt']
+        self.assertNotIn(end_turn, web)
+        self.assertIn('同一轮里等它们全部完成', web)
+        self.assertIn(end_turn, prompt)
+        self.assertIn('完成时会唤醒你', prompt)
+        for limit in ('4096 MiB', '512 MiB', '同时最多运行 2 个'):
+            self.assertIn(limit, web)
 
     def test_missing_keys_multiple_projects_and_string_lookalikes(self):
         source = '''note = """

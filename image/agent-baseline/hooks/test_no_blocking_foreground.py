@@ -4,10 +4,14 @@ import json, os, subprocess, sys, unittest
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-blocking-foreground.py')
 
 
-def decision(tool, mode='bypassPermissions', **ti):
-    """返回 (exit code, 钩子输出的 JSON 或 None)。"""
+BRIDGE = dict(os.environ, CC_SESSION_KEY='feishu:fixture')
+WEB = {k: v for k, v in os.environ.items() if k != 'CC_SESSION_KEY'}
+
+
+def decision(tool, mode='bypassPermissions', env=BRIDGE, **ti):
+    """返回 (exit code, 钩子输出的 JSON 或 None)；默认按消息桥会话运行。"""
     p = subprocess.run([sys.executable, HOOK], input=json.dumps({'tool_name': tool, 'tool_input': ti, 'permission_mode': mode}),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     return p.returncode, (json.loads(p.stdout) if p.stdout.strip() else None)
 
 
@@ -64,6 +68,13 @@ class T(unittest.TestCase):
         self.converted('Bash', command='ffmpeg -i a.mp4 b.mp4')
         self.converted('Agent', prompt='x', run_in_background=False)
         self.converted('Task', prompt='x', description='d', run_in_background=False)
+
+    def test_web_session_waits_in_the_same_turn(self):
+        for mode in ('bypassPermissions', 'default'):
+            for tool, ti in (('Bash', {'command': 'docker build -t x .'}), ('Bash', {'command': 'ls', 'timeout': 600000}),
+                             ('Agent', {'prompt': 'x', 'run_in_background': False}),
+                             ('Task', {'prompt': 'x', 'run_in_background': False})):
+                self.assertEqual(decision(tool, mode=mode, env=WEB, **ti), (0, None), (mode, tool, ti))
 
     def test_broken_input_allows(self):
         p = subprocess.run([sys.executable, HOOK], input='not json', capture_output=True, text=True)

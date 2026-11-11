@@ -42,7 +42,8 @@ test('bridge template takes organization Claude defaults and child processes inh
   assert.ok(history.some(entry => entry.template.includes('workpartner:company-instructions:begin')));
   const instructions = fs.readFileSync(path.join(context, 'image/home/CLAUDE.md'), 'utf8');
   assert.match(instructions, /Keep organization policy\./);
-  assert.match(instructions, /预计超过 2 分钟/);
+  assert.match(instructions, /同一轮里等它们全部完成/);
+  assert.doesNotMatch(instructions, /然后结束本轮/);
   materializeNext(context, { WORKPARTNER_ORG_DIR: org });
   assert.equal(fs.readFileSync(path.join(context, 'image/home/CLAUDE.md'), 'utf8'), instructions);
   const environment = nextEnvironment(selected, { MODEL_BASE_URL: 'https://models.example.test/v1' });

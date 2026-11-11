@@ -26,13 +26,17 @@ def read(tid, uid='u'):
     return use('Read', uid, file_path=OUT % tid)
 
 
-def run(rows, tool, current_id='cur', **ti):
+BRIDGE = dict(os.environ, CC_SESSION_KEY='feishu:fixture')
+WEB = {k: v for k, v in os.environ.items() if k != 'CC_SESSION_KEY'}
+
+
+def run(rows, tool, current_id='cur', env=BRIDGE, **ti):
     with tempfile.NamedTemporaryFile('w', suffix='.jsonl', delete=False) as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False, separators=(',', ':')) + '\n')
     try:
         p = subprocess.run([sys.executable, HOOK], capture_output=True, text=True, input=json.dumps(
-            {'tool_name': tool, 'tool_input': ti, 'transcript_path': f.name, 'tool_use_id': current_id}))
+            {'tool_name': tool, 'tool_input': ti, 'transcript_path': f.name, 'tool_use_id': current_id}), env=env)
     finally:
         os.unlink(f.name)
     return p.returncode, p.stderr
@@ -76,6 +80,10 @@ class T(unittest.TestCase):
         self.assertEqual(run(rows, 'TaskOutput', task_id='other')[0], 0)
         rows = [user('hi'), read('t9', 'a'), use('Bash', 'b', command='tail -n 20 ' + OUT % 't9')]
         self.assertEqual(run(rows, 'Bash', command='cat ' + OUT % 't9')[0], 2)
+
+    def test_web_session_may_keep_checking(self):
+        rows = [user('hi'), read('b1', 'a'), result(), read('b1', 'b'), result()]
+        self.assertEqual(run(rows, 'Read', env=WEB, file_path=OUT % 'b1'), (0, ''))
 
     def test_unrelated_tools_allowed(self):
         rows = [user('hi')] + [read('b1', str(i)) for i in range(5)]
