@@ -3,7 +3,8 @@
 - 单条 Bash 命令里 sleep 超过 60 秒：拒绝。
 - 多次短 sleep 能绕过单次上限，所以同一回合（自最近一条真正的用户消息起）累计 sleep 超过 300 秒也拒绝。
   循环里的 sleep 按次数估算：能从 seq 看出次数就按次数乘；while/until 等看不出次数的按 300 秒计。
-要等的事改用后台运行（run_in_background: true），跑完会自动通知；先回复用户。"""
+消息桥会话（环境里有 CC_SESSION_KEY）提示改用后台运行，完成会唤醒会话；
+网页会话没有完成通知，提示在前台运行并设好超时，同一轮里等完再答复。"""
 import json, os, re, sys
 from pathlib import Path
 
@@ -18,7 +19,10 @@ cmd = _QUOTED.sub("''", _HEREDOC.sub('<<HEREDOC', ti.get('command', '') or ''))
 sleeps = [int(x) for x in re.findall(r'\bsleep\s+(\d+)', cmd)]
 if not sleeps:
     sys.exit(0)
-hint = '要等的事改用后台运行（run_in_background: true），跑完会自动通知；先回复用户。'
+if os.environ.get('CC_SESSION_KEY'):
+    hint = '要等的事改用后台运行（run_in_background: true），跑完会自动通知；先回复用户。'
+else:
+    hint = '要等的命令在前台运行并设好超时，子代理在前台运行；同一轮里等完再给最终答复。'
 for s in sleeps:
     if s > PER_CALL:
         print(f'拒绝：会话里不要等待超过 {PER_CALL} 秒（sleep {s}）。' + hint, file=sys.stderr)

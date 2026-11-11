@@ -123,7 +123,7 @@ class InputsTest(unittest.TestCase):
                 rendered = updated.decode()
                 self.assertIn(f'内存上限为 {expected[0]} MiB', rendered)
                 self.assertIn(f'后台任务最多使用 {expected[1]} MiB', rendered)
-                for text in ('预计超过 2 分钟', '不要用睡眠或轮询', '同时最多运行 2 个', '互相独立的工作用子代理并行处理'):
+                for text in ('同一轮里等它们全部完成', '不要用睡眠或轮询', '同时最多运行 2 个', '互相独立的工作用子代理并行处理'):
                     self.assertEqual(rendered.count(text), 1)
                 self.assertNotIn('__MEMORY', rendered)
                 metadata = target.stat()

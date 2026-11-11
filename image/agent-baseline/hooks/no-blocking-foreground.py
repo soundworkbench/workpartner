@@ -7,8 +7,10 @@
   或命令命中 SLOW_PATTERNS，就用 PreToolUse 的 updatedInput 加上 run_in_background: true
   并放行（Claude Code 2.1.319 实测生效）。命令带 `timeout N`（N<=120 秒）视为有上限，不动。
 - Agent|Task：run_in_background 明确为 false 时同样转后台；不写或为 true 不动。
-- 其他一律放行；钩子自身出错也放行。"""
-import json, re, sys
+- 其他一律放行；钩子自身出错也放行。
+- 只在消息桥会话（环境里有 CC_SESSION_KEY）生效：只有消息桥会在后台任务完成时唤醒会话；
+  网页会话转后台后没人唤醒，结果会丢，所以一律放行，让它在同一轮里等完。"""
+import json, os, re, sys
 
 MAX_TIMEOUT_MS = 180000
 MAX_BOUNDED_SEC = 120
@@ -90,6 +92,8 @@ def check_agent(ti):
 
 
 def main():
+    if not os.environ.get('CC_SESSION_KEY'):
+        return 0
     d = json.load(sys.stdin)
     ti = d.get('tool_input') or {}
     name = d.get('tool_name') or ''

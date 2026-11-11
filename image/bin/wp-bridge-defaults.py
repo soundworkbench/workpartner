@@ -10,6 +10,14 @@ import sys
 import tempfile
 import tomllib
 
+# Only the bridge resumes the agent when background work finishes, so only the
+# bridge may end a turn early; the shared instructions wait in the same turn.
+BACKGROUND_PROMPT = ('本会话来自消息应用，后台任务完成时会唤醒你。预计超过 2 分钟的工作'
+                     '（批处理、长时间转换、大文件下载、深入调研）交给后台子代理或后台命令；'
+                     '用一句话说明已开始、完成后会回报，然后结束本轮。被唤醒时读取结果并主动回报；'
+                     '有新消息时先回答新消息。这条优先于说明文件中“在同一轮里等子代理完成”的要求，'
+                     '内存和并发上限照旧。')
+
 
 def replace_key(source, project, table, key, value):
     """Accept a textual edit only when TOML proves it changes exactly one key."""
@@ -65,7 +73,8 @@ def migrate(target, model, effort, *, apply=True):
         raise ValueError('Missing bridge projects')
     for index in range(len(projects)):
         for table, key, value in [('', 'type', 'claudecode'), ('options', 'mode', 'bypassPermissions'),
-                                  ('options', 'model', model), ('options', 'reasoning_effort', effort)]:
+                                  ('options', 'model', model), ('options', 'reasoning_effort', effort),
+                                  ('options', 'append_system_prompt', BACKGROUND_PROMPT)]:
             source = replace_key(source, index, table, key, value)
     updated = source.encode('utf-8')
     if updated == original:

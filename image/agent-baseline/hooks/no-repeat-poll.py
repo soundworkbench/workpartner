@@ -4,7 +4,8 @@
 读取指：TaskOutput / BashOutput 工具（task_id、bash_id、shell_id），
 Read 或 Bash（cat、tail 等）访问 `.../tasks/<任务号>.output` 这类输出文件。
 该任务的完成通知已经到达（transcript 里有对应 <task-notification>）后的读取不拦。
-钩子自身出错、读不到 transcript 都放行。"""
+钩子自身出错、读不到 transcript 都放行。
+只在消息桥会话（环境里有 CC_SESSION_KEY）生效：网页会话没有完成通知，要在同一轮里查到完成为止。"""
 import json, os, re, sys
 
 MAX_READS = 2
@@ -90,6 +91,8 @@ def prior_reads(lines, tid, current_use_id):
 
 
 def main():
+    if not os.environ.get('CC_SESSION_KEY'):
+        return 0
     d = json.load(sys.stdin)
     tid = task_id_of(d.get('tool_name'), d.get('tool_input'))
     if not tid:
