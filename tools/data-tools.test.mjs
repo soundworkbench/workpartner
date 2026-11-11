@@ -140,7 +140,7 @@ test('image calls wait, apply catalog defaults, save URL/base64 files and retain
   tool.title = { en: 'Generate image', zh: '生成图片' };
   tool.example = { en: 'Generate a small green tree', zh: '生成一棵绿色小树' };
   fs.writeFileSync(path.join(root, 'catalog.json'), JSON.stringify(catalog));
-  fs.writeFileSync(path.join(root, '.wp-market-token'), 'fixture-personal');
+  fs.writeFileSync(path.join(root, '.zp-market-token'), 'fixture-personal');
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=', 'base64');
   const calls = [], budgets = [];
   let charged = 0, rejectCall = false, oversized = false, invalidImage = false, pending = false, timeout = false, downloadAuth;
