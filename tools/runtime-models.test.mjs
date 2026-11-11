@@ -164,6 +164,20 @@ test('editing only JSON replaces an idle container on the same image and supplie
   assert.deepEqual(clients.get('wp.modelConfig'), runtimeConfig);
   assert.deepEqual(clients.get('wp.engineModels'), { codex: updated.codex, claude: updated.claude });
   assert.ok(fs.existsSync(path.join(fresh, '.wp-seed-v2')));
+
+  // Quick-line edits alone use the same replacement and idempotency policy.
+  for (const quickLineModel of ['fast-model', undefined]) {
+    fs.writeFileSync(file, JSON.stringify({ model: { defaults: updated, quickLineModel } }));
+    assert.equal(await aionui.upstream(user), null);
+    await aionui.pending('person');
+    const env = calls.filter(call => call.url.startsWith('/containers/create?')).at(-1).body.Env;
+    assert.deepEqual(env.filter(value => value.startsWith('QUICK_LINE_MODEL=')),
+      quickLineModel ? [`QUICK_LINE_MODEL=${quickLineModel}`] : []);
+    const count = calls.filter(call => call.url.startsWith('/containers/create?')).length;
+    assert.ok(await aionui.upstream(user));
+    assert.equal(calls.filter(call => call.url.startsWith('/containers/create?')).length, count);
+  }
+
 });
 
 test('runtime selection rejects unknown kinds and defaults to Docker', async () => {
@@ -206,6 +220,13 @@ test('Docker runtime preserves personal container and isolation parameters', asy
     HostConfig: { Binds: ['/data-host/next/person:/data', '/secure-host/model-person.key:/etc/partner/model.key:ro', '/data-host/users/person/work:/data/old-work:ro'],
       NetworkMode: 'fixture-person-net', RestartPolicy: { Name: 'unless-stopped' }, Memory: 4294967296, NanoCpus: 2000000000, PidsLimit: 512 },
   });
+  for (const quickLineModel of ['fast-model', undefined, '']) {
+    const modelConfig = JSON.stringify({ defaults: {}, ...(quickLineModel === undefined ? {} : { quickLineModel }) });
+    await runtime.create({ slug: 'person' }, { modelConfig });
+    const env = calls.filter(c => c.route.startsWith('/containers/create')).at(-1).body.Env;
+    assert.deepEqual(env.filter(value => value.startsWith('QUICK_LINE_MODEL=')),
+      quickLineModel ? [`QUICK_LINE_MODEL=${quickLineModel}`] : []);
+  }
   const stat = fs.statSync(path.join(dir, 'next/person'));
   assert.equal(stat.uid, 1001); assert.equal(stat.gid, 1001);
 });

@@ -96,6 +96,7 @@ export function createDockerRuntime(o = {}) {
   }
 
   async function create(user, { modelConfig } = {}) {
+    const quickModel = modelConfig && JSON.parse(modelConfig).quickLineModel;
     const { slug } = user;
     const { container, network } = names(slug);
     const key = `${o.keyPrefix}${slug}.key`;
@@ -107,7 +108,8 @@ export function createDockerRuntime(o = {}) {
       Image: o.image, User: `${uid}:${uid}`, Hostname: container,
       Env: [`${o.modelBaseEnvironment || "MODEL_BASE_URL"}=${o.modelBaseUrl}`, `PARTNER_USER_NAME=${user.name || ""}`,
         ...(o.sharedSkills ? [`WORKPARTNER_SHARED_SKILLS=${o.sharedSkills.container}`, `WORKPARTNER_MARKET_PREINSTALLED=${JSON.stringify(o.sharedSkills.preinstalled)}`] : []),
-        ...(modelConfig ? [`WORKPARTNER_MODEL_CONFIG=${modelConfig}`] : [])],
+        ...(modelConfig ? [`WORKPARTNER_MODEL_CONFIG=${modelConfig}`] : []),
+        ...(quickModel ? [`QUICK_LINE_MODEL=${quickModel}`] : [])],
       Labels: { [o.userLabel || "workpartner.next-user"]: slug },
       HostConfig: {
         Binds: [`${o.hostData}/${slug}:/data`, `${o.hostSecure}/${key}:${o.modelKeyFile || "/etc/partner/model.key"}:ro`, ...(o.sharedSkills ? [`${o.sharedSkills.host}:${o.sharedSkills.container}:ro`] : []), ...oldWork],
