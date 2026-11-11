@@ -188,12 +188,88 @@ test('bot writes validate atomically, reply keys are per-item idempotent, type o
   const again = (await f.bot('items/' + a.id, patch)).data.item;
   assert.deepEqual(again, first); assert.equal(f.notices.length, 1);
   const changed = (await f.bot('items/' + a.id, { status: 'done', reply: patch.reply })).data.item;
-  assert.equal(changed.status, 'done'); assert.equal(changed.comments.length, 1); assert.equal(f.notices.length, 2);
+  assert.equal(changed.status, 'done'); assert.equal(changed.comments.length, 1); assert.equal(f.notices.length, 1);
   assert.equal((await f.bot('items/' + b.id, { reply: patch.reply })).data.item.comments.length, 1);
   for (const body of [{ type: 'bug' }, { status: 'invalid' }, { status: ['done'] }, { approval: { state: 'oops' } }, { pr: 'javascript:alert(1)' }, { reply: { key: '', text: 'hi' } }, { status: 'open', reply: { key: 'new', text: 'x'.repeat(4001) } }]) {
     const before = f.read(); assert.equal((await f.bot('items/' + a.id, body)).status, 400); assert.deepEqual(f.read(), before);
   }
   assert.match(f.notices[0][1], /#1/); assert.match(f.notices[0][1], /处理中/); assert.match(f.notices[0][1], new RegExp('/\\?wp-feedback=' + a.id));
+});
+
+test('status-only bot updates save without sending or changing notice', async t => {
+  for (const notice of [undefined, 'sent', 'failed']) {
+    const sends = [];
+    const f = fixture(t, { send: async (...args) => {
+      sends.push(args);
+      if (notice === 'failed') throw new Error('offline');
+    } }), a = await f.create();
+    if (notice) await f.bot('items/' + a.id, { reply: { key: 'initial', text: 'Received' } });
+    sends.length = 0;
+    const before = f.read().items[a.id];
+    const result = await f.bot('items/' + a.id, { status: 'in_progress' });
+    assert.equal(result.status, 200);
+    assert.equal(result.data.item.status, 'in_progress');
+    assert.equal(result.data.item.seq, before.seq + 1);
+    assert.equal(result.data.item.notice, notice);
+    assert.equal(Object.hasOwn(result.data.item, 'notice'), Object.hasOwn(before, 'notice'));
+    assert.deepEqual(f.read().items[a.id], result.data.item);
+    assert.equal(sends.length, 0);
+  }
+});
+
+test('a new bot reply with a status change sends the reply and new status once', async t => {
+  const f = fixture(t), a = await f.create();
+  const reply = { key: 'fixed', text: 'Fixed the issue' };
+  const result = await f.bot('items/' + a.id, { status: 'done', reply });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.item.status, 'done');
+  assert.equal(result.data.item.comments.length, 1);
+  assert.equal(result.data.item.notice, 'sent');
+  assert.deepEqual(f.read().items[a.id], result.data.item);
+  assert.equal(f.notices.length, 1);
+  assert.deepEqual(f.notices[0], [alice.unionId,
+    `反馈 #${a.no}：${a.title}\n状态：已完成\n${reply.text}\n${origin}/?wp-feedback=${a.id}`]);
+});
+
+test('a new bot reply without a status change sends once', async t => {
+  const f = fixture(t), a = await f.create();
+  const reply = { key: 'received', text: 'Received your feedback' };
+  const result = await f.bot('items/' + a.id, { reply });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.item.status, a.status);
+  assert.equal(result.data.item.comments.length, 1);
+  assert.equal(result.data.item.notice, 'sent');
+  assert.deepEqual(f.read().items[a.id], result.data.item);
+  assert.equal(f.notices.length, 1);
+  assert.equal(f.notices[0][0], alice.unionId);
+  assert.ok(f.notices[0][1].includes(reply.text));
+});
+
+test('a repeated bot reply key saves a different status without sending again', async t => {
+  const f = fixture(t), a = await f.create();
+  const reply = { key: 'received', text: 'Received your feedback' };
+  const first = (await f.bot('items/' + a.id, { status: 'in_progress', reply })).data.item;
+  assert.equal(f.notices.length, 1);
+  const result = await f.bot('items/' + a.id, { status: 'done', reply });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.item.status, 'done');
+  assert.equal(result.data.item.seq, first.seq + 1);
+  assert.equal(result.data.item.notice, first.notice);
+  assert.deepEqual(result.data.item.comments, first.comments);
+  assert.deepEqual(f.read().items[a.id], result.data.item);
+  assert.equal(f.notices.length, 1);
+});
+
+test('a PR-only bot update saves without sending', async t => {
+  const f = fixture(t), a = await f.create();
+  const pr = 'https://github.com/org/repo/pull/1';
+  const result = await f.bot('items/' + a.id, { pr });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.item.pr, pr);
+  assert.equal(result.data.item.seq, a.seq + 1);
+  assert.equal(Object.hasOwn(result.data.item, 'notice'), false);
+  assert.deepEqual(f.read().items[a.id], result.data.item);
+  assert.equal(f.notices.length, 0);
 });
 
 test('notification failure does not undo a committed bot update', async t => {
@@ -315,7 +391,7 @@ test('missing item during notice persistence does not fail a committed bot respo
     t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('disk failure'), { code: 'EIO' }); });
   } });
   const a = await f.create();
-  const result = await f.bot('items/' + a.id, { status: 'done' });
+  const result = await f.bot('items/' + a.id, { status: 'done', reply: { key: 'fixed', text: 'Fixed' } });
   assert.equal(result.status, 200); assert.equal(result.data.item.status, 'done');
   assert.deepEqual(f.read().items, {});
 });
@@ -485,7 +561,8 @@ test('notification result has its own seq, and result-save failure preserves the
   assert.equal((await f.bot('changes?since=2')).data.items[0].notice, 'sent');
   const renameOriginal = fs.renameSync; let calls = 0;
   const rename = t.mock.method(fs, 'renameSync', (...args) => { if (++calls === 2) throw new Error('notice disk failure'); return renameOriginal(...args); });
-  const r = await f.bot('items/' + a.id, { status: 'done' }); rename.mock.restore();
+  const r = await f.bot('items/' + a.id, { status: 'done', reply: { key: 'fixed', text: 'Fixed' } }); rename.mock.restore();
+  assert.equal(calls, 2);
   assert.equal(r.status, 200); assert.equal(r.data.item.status, 'done');
   assert.equal(r.data.item.seq, 4); assert.equal(f.read().items[a.id].status, 'done');
 });
