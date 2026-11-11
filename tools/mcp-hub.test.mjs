@@ -137,8 +137,8 @@ test('market is authenticated, read-only, personal, localized, sanitized and unc
   assert.equal(data.tools[1].title.en, 'server__fallback'); assert.equal(data.tools[1].description.en, 'First line [redacted]');
   assert.ok(!text.includes('secret-one')); assert.ok(!text.includes('inputSchema')); assert.ok(!text.includes('Second line'));
   await request('two'); assert.deepEqual(keys, ['secret-one', 'secret-two']);
-  assert.deepEqual(await (await request('denied')).json(), { tools: [] });
-  assert.deepEqual(await (await request('error')).json(), { error: 'temporarily_unavailable' });
+  assert.deepEqual((await (await request('denied')).json()).tools, []);
+  assert.equal((await (await request('error')).json()).error, 'temporarily_unavailable');
 });
 
 test('assembled image starts discovery, then removes entries after denial without storing credentials', async t => {
@@ -178,4 +178,30 @@ test('assembled image starts discovery, then removes entries after denial withou
   authorized = false; assert.match(await start(), /disabled/);
   assert.ok(!readFileSync(join(home, '.codex/config.toml'), 'utf8').includes('mcp_servers'));
   assert.deepEqual(JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8')).mcpServers, {});
+});
+
+
+test('market uses organization categories, platform labels, defaults and optional examples, including empty and retry groups', async t => {
+  const directory = temporary(t);
+  writeFileSync(join(directory, 'data.json'), JSON.stringify({ schemaVersion: 1, categories: [{ en: 'Research', zh: '研究' }],
+    platforms: [], directory: { platformsPath: '/platforms', platformPath: '/platform/{id}', endpointPath: '/endpoint/{id}', searchPath: '/search', blockedEndpoints: [], blockedProviders: [] }, tools: [] }));
+  const shared = { id: 'library', name: { en: 'Library', zh: '资料库' } }, media = { id: 'media', name: { en: 'Media', zh: '媒体' } };
+  const config = { url: 'https://example.com/mcp', keyEnvironment: 'PERSON_KEY', defaultCategory: 'Creation',
+    categories: [{ en: 'Creation', zh: '内容创作' }], platform: media,
+    tools: { library__find: { category: 'Research', platform: shared, example: { en: 'Find a reference', zh: '查找参考资料' } }, hidden__tool: { category: 'Research' } }, hidden: ['hidden__tool'] };
+  let mode = 'ok';
+  const organization = { directory, dataTools: { catalog: 'data.json' }, mcpHub: config };
+  const route = createMarketTools({ organization, authenticate: () => ({ slug: 'person' }), keyFor: () => key,
+    discover: async () => { if (mode === 'failed') throw new Error('offline'); if (mode === 'empty') return []; return ['library__find', 'media__render', 'hidden__tool'].map(name => ({ name })); } });
+  const base = await server(t, async (req, res) => { await route(req, res, new URL(req.url, 'http://local')); });
+  const read = async () => { const response = await fetch(base.replace('/mcp', '/_wp/market/tools')); return { status: response.status, ...await response.json() }; };
+  const value = await read();
+  assert.deepEqual(value.groups.map(group => group.name.en), ['Research', 'Creation']);
+  assert.deepEqual(value.tools.map(tool => tool.category), ['Research', 'Creation']);
+  assert.deepEqual(value.tools.map(tool => tool.platform), [shared, media]);
+  assert.ok(value.tools.every(tool => tool.included)); assert.equal(value.tools[0].example.zh, '查找参考资料'); assert.equal(value.tools[1].example, undefined);
+  mode = 'empty'; const empty = await read(); assert.deepEqual(empty.tools, []); assert.equal(empty.groups[0].name.en, 'Creation');
+  mode = 'failed'; const failed = await read(); assert.equal(failed.status, 503); assert.deepEqual(failed.groups.map(group => group.name.en), ['Creation', 'Research']);
+  assert.throws(() => createMarketTools({ organization: { ...organization, mcpHub: { ...config, defaultCategory: 'Unknown' } } }), /Unknown MCP market category/);
+  assert.throws(() => hubConfig({ ...config, tools: { media__render: { platform: { id: 'bad', name: { en: 'Only English' } } } } }), /Invalid MCP market presentation/);
 });

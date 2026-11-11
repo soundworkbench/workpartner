@@ -9,10 +9,24 @@ An organization can connect a personal workspace to a Streamable HTTP MCP hub. S
     "name": "workpartner-hub",
     "keyEnvironment": "MODEL_API_KEY",
     "displayNames": "mcp-display.json",
-    "hidden": ["search__web_search", "search__web_fetch"]
+    "hidden": ["search__web_search", "search__web_fetch"],
+    "defaultCategory": "Creation",
+    "categories": [{ "en": "Creation", "zh": "内容生成" }],
+    "platform": { "id": "media", "name": { "en": "Media service", "zh": "创作服务" } },
+    "tools": {
+      "documents__read": {
+        "category": "Research",
+        "platform": { "id": "library", "name": { "en": "Library", "zh": "资料库" } }
+      },
+      "media__render": {
+        "example": { "en": "Create a short video", "zh": "制作一段短视频" }
+      }
+    }
   }
 }
 ```
+
+In this example, `Research` is a category already defined in the selected data catalog. Category keys use the English `en` value from `dataTools` categories or `mcpHub.categories`. `defaultCategory` selects the fallback for tools without an explicit `category`; it must exist in one of those lists. Unconfigured presentation defaults to the neutral Tools category and Tool service platform. Each tool can override the hub-level platform and optionally supply a localized example. These fields affect presentation only and never grant tool access.
 
 Use the hub's complete root MCP endpoint, without an agent-specific suffix. The configured environment variable must already hold the person's key in the workspace. The gateway uses that person's existing model key file, so this key must authorize both model access and hub access. No new key is provisioned by this feature. `mcpHub: null` (the default) disables discovery without making a network request.
 
@@ -27,7 +41,7 @@ Use the hub's complete root MCP endpoint, without an agent-specific suffix. The 
 }
 ```
 
-The authenticated, read-only `GET /_wp/market/tools` route discovers tools using the caller's key. It returns only names, localized titles, and one-line descriptions. Missing translations use the hub's title/name and description. Responses are never cached across people. No key, schema, connection URL, or authentication header is returned to the page. A denied key or a disabled hub produces an empty list; temporary discovery failures produce a retry state.
+The authenticated, read-only `GET /_wp/market/tools` route discovers tools using the caller's key. It returns names, localized titles and one-line descriptions, category/platform metadata, the included-price flag, and optional organization-owned examples. Missing translations use the hub's title/name and description. Responses are never cached across people. No key, schema, connection URL, or authentication header is returned to the page. A denied key or a disabled hub produces an empty list; temporary discovery failures produce a retry state.
 
 `hidden` is an optional list of exact `server__tool` names omitted from this market response. Omit it or use `[]` to show every discovered tool. Use names from your own hub's current `tools/list` response; the example prefixes above are illustrative. Names are case-sensitive, without wildcard matching; unknown names have no effect. This is display configuration only: both engines still discover and can call hidden tools through the same hub, and startup still enables the hub when all its tools are hidden. It does not revoke access or change native search behavior.
 
@@ -43,18 +57,22 @@ Claude Code supports `${ENV_VAR}` in headers, but [excludes credential names suc
 
 ## Tools page integration
 
-The Tools tab has one scrolling category row and uses the Skills card style. MCP contributes a read-only `MCP` category when tools exist. A zero-tool page shows “Tools are not enabled”; failure shows a retry action. There are no switches or execution buttons on MCP cards.
+The Tools tab follows the data catalog layout: filled category pills, platform filters, and two-column cards (one column on a phone). Hub tools join existing data categories by category key, or add an organization-defined category. No MCP category is created. Cards share the same title, description, top-right platform label, and footer. Hub tools show “Included” in the price position and show “Try it” only when the organization supplies an example. Data cards keep their prices and examples.
 
-`wp-tools.js` owns the Tools renderer. Other tools modules (including the data catalog in #31) contribute to the same host with `window.wpMarketTools.registerSource(load)` rather than replacing `wpMarket.register('tools', ...)`. `load({locale, signal})` returns a promise of:
+`wp-tools.js` owns the shared renderer. `wp-data-tools.js` and `wp-mcp-tools.js` contribute with `window.wpMarketTools.registerSource(load)` rather than replacing `wpMarket.register('tools', ...)`. The image loads the host first, then the data source and hub source, preserving data category order. `load({locale, signal})` returns a promise of:
 
 ```js
 {
-  categories: [{ id: 'unique-category', label: 'Category', render(panel) { /* return optional cleanup */ } }],
+  categories: [{
+    id: 'Research', name: { zh: '研究', en: 'Research' },
+    platforms: [{ id: 'library', name: { zh: '资料库', en: 'Library' } }],
+    async loadTools(platformId) { /* empty string selects all; return card metadata */ }
+  }],
   renderHeader(header) { /* optional quota header; return optional cleanup */ }
 }
 ```
 
-A data source should return one category per configured data category, with its platform filter and cards inside `render`, and place quota blocks in `renderHeader`. Headers remain above the shared category row. The host handles category navigation, locale changes, async results, cancellation, and disposal. Data catalog integration is a prerequisite before merging both features together; #31 is not included in this PR.
+The host merges identical category/platform IDs, renders cards once, sorts recommended data examples first, and pages results in batches of 12. Headers stay above categories. Only the data source contributes personal quota blocks, and only when it has data platforms. Empty and retry messages appear in the selected category's card area; a failed hub still returns configured categories so other data categories remain usable. Refreshing retries discovery. Category/filter changes, source registration/removal, locale changes, pending requests and disposal are handled by the shared host.
 
 ## Verification
 
@@ -72,6 +90,8 @@ python3 -I image/tests/verify-mcp-engines.py --claude /path/to/claude --codex /p
 
 This creates disposable homes and a local 12-tool hub. Claude Code calls the final tool using a local model stub; Codex uses its app-server tool-call API. Both must authenticate through generated configuration, list all 12 individual tools, and call one successfully. Versions are checked against the image pins. It does not validate an organization's live hub or production sessions.
 
-Run `python3 -I image/tests/mcp-preview.py`, then open `http://127.0.0.1:18333/#/market` and select Tools to reproduce the visual fixture. Add `?dark=1`, `?lang=en`, or `?empty=1` before the hash to check those states.
+Run `python3 -I image/tests/mcp-preview.py`, then open `http://127.0.0.1:18333/#/market` and select Tools to reproduce the visual fixture. Add `?dark=1`, `?lang=en`, `?mode=empty`, `?mode=hub-only`, or `?fail=1` before the hash to check those states. The fixture loads both actual source modules; Research contains both data and hub cards and Creation contains hub cards. Remove `fail` from the URL and refresh the list to check recovery.
 
-The preview screenshots use the actual market host, Tools renderer, and stylesheet with neutral fixture metadata: [desktop light](images/mcp-tools-light.png), [desktop dark](images/mcp-tools-dark.png), [390px phone](images/mcp-tools-phone.png). Deployment still needs an organization-owned hub configuration and display table, a new image, and gateway restart. After deployment, start a fresh session in each engine and call one authorized hub tool; then verify denied/zero-tool behavior, personal configuration preservation, and zh/en page metadata using real accounts.
+Keep preview screenshots in a local evidence directory, outside the repository. Capture both a data category and a hub-populated category for desktop light/dark and a 390px phone. Fixture metadata is illustrative; this proves the combined renderer, not a live provider call.
+
+Deployment needs an organization-owned hub configuration and display table, a new personal image, and a gateway restart. After deployment, start a fresh session in each engine and call one authorized hub tool; then verify denied/zero-tool behavior, personal configuration preservation, and zh/en page metadata using real accounts.

@@ -7,6 +7,18 @@ export function hubConfig(value) {
     || !/^[a-z][a-z0-9_-]*$/.test(value.name || 'workpartner-hub')
     || (value.hidden !== undefined && (!Array.isArray(value.hidden)
       || value.hidden.some(name => typeof name !== 'string' || !/^[a-zA-Z0-9_.-]+__[a-zA-Z0-9_.-]+$/.test(name))))) throw new Error('Invalid MCP hub configuration');
+  const localized = item => item && typeof item.zh === 'string' && item.zh.trim() && typeof item.en === 'string' && item.en.trim();
+  const platform = item => item && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.id) && localized(item.name);
+  if ((value.defaultCategory !== undefined && (typeof value.defaultCategory !== 'string' || !value.defaultCategory.trim()))
+    || (value.categories !== undefined && (!Array.isArray(value.categories) || !value.categories.every(localized)
+      || new Set(value.categories.map(row => row.en)).size !== value.categories.length))
+    || (value.platform !== undefined && !platform(value.platform))
+    || (value.tools !== undefined && (!value.tools || typeof value.tools !== 'object' || Array.isArray(value.tools)
+      || Object.entries(value.tools).some(([name, tool]) => !/^[a-zA-Z0-9_.-]+__[a-zA-Z0-9_.-]+$/.test(name)
+        || !tool || typeof tool !== 'object' || Array.isArray(tool)
+        || (tool.category !== undefined && (typeof tool.category !== 'string' || !tool.category.trim()))
+        || (tool.platform !== undefined && !platform(tool.platform))
+        || (tool.example !== undefined && !localized(tool.example)))))) throw new Error('Invalid MCP market presentation');
   return { ...value, url: url.href, name: value.name || 'workpartner-hub' };
 }
 
