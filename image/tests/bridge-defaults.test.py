@@ -81,6 +81,42 @@ class BridgeDefaultsTest(unittest.TestCase):
                 self.assertEqual(target.stat().st_mode & 0o777, 0o640)
                 self.assertEqual(list(root.glob('.bridge-*')), [])
 
+    def test_organization_upgrade_keys_follow_the_template_without_overriding_personal_values(self):
+        old = self.old_config()
+        template = self.template().replace(b'reaction_emoji = "OnIt"', b'reaction_emoji = "none"') \
+            .replace(b'typing_marker = "..."', b'typing_marker = "..."\nspinner_image = "/opt/fixture/spinner.gif"\n\n[queue_batch]\ndebounce_ms = 0')
+        upgrades = [{'key': 'stream_preview.spinner_image'}, {'key': 'queue_batch.debounce_ms', 'from': [1500]},
+                    {'key': 'projects.platforms.options.reaction_emoji', 'from': ['OnIt']},
+                    {'key': 'stream_preview.not_in_template'}]
+        personal = old.replace(b'reaction_emoji = "OnIt"', b'reaction_emoji = "THUMBSUP"') \
+            .replace(b'typing_marker = "..."', b'typing_marker = "..."\nspinner_image = "/data/mine.gif"') + b'\n[queue_batch]\ndebounce_ms = 800\n'
+        superseded = old + b'\n[queue_batch]\ndebounce_ms = 1500 # kept comment\n'
+        cases = [(old, ('none', '/opt/fixture/spinner.gif', 0)), (personal, ('THUMBSUP', '/data/mine.gif', 800)),
+                 (superseded, ('none', '/opt/fixture/spinner.gif', 0))]
+        for source, (emoji, spinner, debounce) in cases:
+            with self.subTest(emoji=emoji, debounce=debounce), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'template.toml').write_bytes(template)
+                (root / 'organization.json').write_text(json.dumps({'bridge': {'upgradeKeys': upgrades}}))
+                target = root / 'config.toml'
+                target.write_bytes(source)
+                with patch.dict(os.environ, dict(ENV, WORKPARTNER_ORG_DIR=directory)), \
+                        patch.object(bridge, 'TEMPLATE', root / 'template.toml'):
+                    self.assertTrue(bridge.refresh(target))
+                    content = target.read_bytes()
+                    metadata = target.stat()
+                    self.assertFalse(bridge.refresh(target))
+                    self.assertEqual(target.stat(), metadata)
+                self.check_agent(content)
+                parsed = tomllib.loads(content.decode())
+                self.assertEqual(parsed['projects'][0]['platforms'][0]['options']['reaction_emoji'], emoji)
+                self.assertEqual(parsed['stream_preview']['spinner_image'], spinner)
+                self.assertEqual(parsed['queue_batch']['debounce_ms'], debounce)
+                self.assertNotIn('not_in_template', parsed['stream_preview'])
+                self.assertIn(b'fixture-private-value', content)
+                if source is superseded:
+                    self.assertIn(b'debounce_ms = 0 # kept comment', content)
+
     def test_only_the_bridge_ends_turns_for_background_work(self):
         sync = module('wp-sync-instructions')
         end_turn = '然后结束本轮'

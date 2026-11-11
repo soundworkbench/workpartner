@@ -55,6 +55,13 @@ export function organizationData(environment = process.env) {
     throw new Error('runtime.k8s.reconcileExclude must be an array of nonempty user slugs');
   }
   quickLineModel(data.model.quickLineModel);
+  const upgradeKeys = data.bridge.upgradeKeys;
+  if (upgradeKeys !== undefined && (!Array.isArray(upgradeKeys) || upgradeKeys.some(entry => !entry || typeof entry.key !== 'string'
+    || !/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/.test(entry.key)
+    || (entry.key.startsWith('projects.') && !/^projects\.platforms\.options\.[A-Za-z0-9_-]+$/.test(entry.key))
+    || (entry.from !== undefined && (!Array.isArray(entry.from) || entry.from.some(value => !['string', 'number', 'boolean'].includes(typeof value))))))) {
+    throw new Error('Invalid bridge.upgradeKeys');
+  }
   const market = data.market;
   for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {
     if (!Array.isArray(market[key]) || market[key].some(value => typeof value !== 'string' || !value)) throw new Error(`Invalid market.${key}`);
