@@ -1,0 +1,63 @@
+/** Verify build substitution and the actual environment passed into agent children. */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { organizationData, nextEnvironment } from '../gateway/organization/resolve.mjs';
+import { materializeNext } from '../gateway/organization/materialize-next.mjs';
+
+const root = path.resolve(import.meta.dirname, '..');
+
+test('bridge template takes organization Claude defaults and child processes inherit the sub-agent model', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-defaults-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const org = path.join(dir, 'org');
+  fs.cpSync(path.join(root, 'org/default'), org, { recursive: true });
+  const data = organizationData({ WORKPARTNER_ORG_DIR: org });
+  Object.assign(data.model.defaults, { claude: 'fixture-claude', haiku: 'fixture-small', effort: 'high' });
+  data.bridge.template = 'bridge.toml';
+  fs.copyFileSync(path.join(root, 'image/home/cc-connect-feishu.toml'), path.join(org, 'bridge.toml'));
+  fs.writeFileSync(path.join(org, 'history.json'), JSON.stringify([{ template: 'organization history' }]));
+  data.image.legacyInstructions = 'history.json';
+  data.image.instructions = 'instructions.md';
+  const oldInstructions = JSON.parse(fs.readFileSync(path.join(root, 'image/bin/legacy-instructions.json')))[0].template;
+  fs.writeFileSync(path.join(org, 'instructions.md'), oldInstructions.replace('## 公司统一说明', '## Company instructions\n\nKeep organization policy.'));
+  fs.writeFileSync(path.join(org, 'organization.json'), JSON.stringify(data));
+  const context = path.join(dir, 'context');
+  fs.cpSync(path.join(root, 'image'), path.join(context, 'image'), { recursive: true });
+  const selected = materializeNext(context, { WORKPARTNER_ORG_DIR: org });
+  const template = path.join(context, 'image/home/cc-connect-feishu.toml');
+  const parsed = spawnSync('python3', ['-I', '-c', 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))))', template], { encoding: 'utf8' });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  const agent = JSON.parse(parsed.stdout).projects[0].agent;
+  assert.equal(agent.type, 'claudecode');
+  assert.equal(agent.options.mode, 'bypassPermissions');
+  assert.equal(agent.options.model, 'fixture-claude');
+  assert.equal(agent.options.reasoning_effort, 'high');
+  assert.doesNotMatch(fs.readFileSync(template, 'utf8'), /agent_session_idle_timeout_mins|__CLAUDE_MODEL__|__EFFORT__/);
+  const history = JSON.parse(fs.readFileSync(path.join(context, 'image/bin/legacy-instructions.json')));
+  assert.deepEqual(history.at(-1), { template: 'organization history' });
+  assert.ok(history.some(entry => entry.template.includes('workpartner:company-instructions:begin')));
+  const instructions = fs.readFileSync(path.join(context, 'image/home/CLAUDE.md'), 'utf8');
+  assert.match(instructions, /Keep organization policy\./);
+  assert.match(instructions, /预计超过 2 分钟/);
+  materializeNext(context, { WORKPARTNER_ORG_DIR: org });
+  assert.equal(fs.readFileSync(path.join(context, 'image/home/CLAUDE.md'), 'utf8'), instructions);
+  const environment = nextEnvironment(selected, { MODEL_BASE_URL: 'https://models.example.test/v1' });
+  assert.equal(environment.PARTNER_BRIDGE_MODEL, 'fixture-claude');
+  assert.equal(environment.CLAUDE_CODE_SUBAGENT_MODEL, 'fixture-small');
+  assert.equal(environment.PARTNER_MEMORY_BYTES, String(data.runtime.nextMemory));
+  const source = fs.readFileSync(path.join(root, 'image/bin/start.sh'), 'utf8');
+  const exportLine = source.split('\n').find(line => line === 'export CLAUDE_CODE_SUBAGENT_MODEL');
+  assert.ok(exportLine);
+  const child = spawnSync('bash', ['-euc', `${exportLine}\npython3 -I -c 'import os; print(os.environ["CLAUDE_CODE_SUBAGENT_MODEL"])'`], { env: { PATH: process.env.PATH, ...environment }, encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout.trim(), 'fixture-small');
+  const updated = nextEnvironment(selected, { MODEL_BASE_URL: 'https://models.example.test/v1',
+    WORKPARTNER_MODEL_CONFIG: JSON.stringify({ defaults: { ...data.model.defaults, claude: 'runtime-claude', haiku: 'runtime-small' } }) });
+  assert.equal(updated.PARTNER_BRIDGE_MODEL, 'runtime-claude');
+  assert.equal(updated.CLAUDE_CODE_SUBAGENT_MODEL, 'runtime-small');
+  assert.equal(nextEnvironment(selected, { MODEL_BASE_URL: 'https://models.example.test/v1', CLAUDE_CODE_SUBAGENT_MODEL: 'personal-small' }).CLAUDE_CODE_SUBAGENT_MODEL, 'personal-small');
+});

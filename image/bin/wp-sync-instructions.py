@@ -11,6 +11,20 @@ BEGIN = b'<!-- workpartner:company-instructions:begin -->'
 END = b'<!-- workpartner:company-instructions:end -->'
 
 
+def memory_budget(environment=os.environ, limits=None):
+    """Prefer the container's effective limit, including per-person overrides."""
+    if limits is None:
+        limits = [Path('/sys/fs/cgroup/memory.max'), Path('/sys/fs/cgroup/memory/memory.limit_in_bytes')]
+    for path in limits:
+        try:
+            value = int(path.read_text().strip())
+            if 0 < value < 2 ** 60:
+                return value
+        except (OSError, ValueError):
+            pass
+    return int(environment['PARTNER_MEMORY_BYTES'])
+
+
 def block_span(content):
     """返回唯一完整标记块的位置；无标记返回 None，残缺或重复标记拒绝写入。"""
     if BEGIN not in content and END not in content:
@@ -24,9 +38,15 @@ def block_span(content):
     return start, stop
 
 
-def sync(template, workspace, name):
+def sync(template, workspace, name, memory_bytes=None):
     """首次或原样旧模板整份更新；个人说明只同步标记块，无块则追加一次。"""
     source = template.read_bytes()
+    if b'__MEMORY_MIB__' in source or b'__BACKGROUND_MEMORY_MIB__' in source:
+        total = memory_budget() if memory_bytes is None else memory_bytes
+        if total < 4 * 2 ** 20:
+            raise ValueError('容器内存预算过小，未修改说明文件')
+        source = source.replace(b'__MEMORY_MIB__', str(total // 2 ** 20).encode())
+        source = source.replace(b'__BACKGROUND_MEMORY_MIB__', str(min(512, total // (4 * 2 ** 20))).encode())
     span = block_span(source)
     if span is None:
         raise ValueError('镜像模板缺少公司统一说明块，未修改说明文件')

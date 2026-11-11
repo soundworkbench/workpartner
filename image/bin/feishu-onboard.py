@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import signal
 import subprocess
 import sys
@@ -17,6 +18,15 @@ BASE = Path('/data/.cc-connect')
 CONFIG = BASE / 'config.toml'
 STATE = BASE / '.feishu-setup.json'
 LIFETIME = 600
+
+
+def refresh_agent(config):
+    """Share the startup migration, including its warning-only failure policy."""
+    try:
+        helper = runpy.run_path(str(Path(__file__).with_name('wp-bridge-defaults.py')))
+        helper['refresh'](config)
+    except Exception as error:
+        print(f'Warning: bridge defaults unchanged ({type(error).__name__}); continuing', file=sys.stderr)
 
 
 def save(state):
@@ -78,6 +88,7 @@ def run(project, *, base=BASE, command='/opt/workpartner/bin/cc-connect',
             fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
+        refresh_agent(CONFIG)
         if CONFIG.is_file() or (base / 'pending-feishu.toml').exists():
             return
         with tempfile.TemporaryDirectory(prefix='.feishu-', dir=base) as directory:
@@ -89,6 +100,7 @@ def run(project, *, base=BASE, command='/opt/workpartner/bin/cc-connect',
                 content = Path(template).read_text().replace('__PROJECT__', project).replace('__ALLOW_FROM__', '')
                 config.write_text(content)
                 config.chmod(0o600)
+                refresh_agent(config)
                 # Output can contain credentials. Keep it private, bounded on read, and never print it.
                 with tempfile.TemporaryFile() as output:
                     process = subprocess.Popen([command, 'feishu', 'new', '--config', str(config),
@@ -107,6 +119,7 @@ def run(project, *, base=BASE, command='/opt/workpartner/bin/cc-connect',
                     save({'status': 'expired'})
                     return
                 config.chmod(0o600)
+                refresh_agent(config)
                 data = tomllib.loads(config.read_text())
                 options = data['projects'][0]['platforms'][0]['options']
                 credentials = all(options.get(key) and not options[key].startswith('__') for key in ('app_id', 'app_secret'))

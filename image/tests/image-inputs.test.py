@@ -97,12 +97,51 @@ class InputsTest(unittest.TestCase):
             personal = b'Personal instructions\r\nKeep this exactly.\r\n'
             target = work / 'CLAUDE.md'
             target.write_bytes(personal)
-            instructions.sync(template, work, 'Colleague')
+            instructions.sync(template, work, 'Colleague', memory_bytes=3 * 2 ** 30)
             self.assertTrue(target.read_bytes().startswith(personal))
             first = target.read_bytes()
-            instructions.sync(template, work, 'Colleague')
+            instructions.sync(template, work, 'Colleague', memory_bytes=3 * 2 ** 30)
             self.assertEqual(target.read_bytes(), first)
             self.assertTrue((work / 'AGENTS.md').is_symlink())
+
+    def test_released_instruction_block_upgrades_and_renders_personal_budget(self):
+        source = ROOT / 'home/CLAUDE.md'
+        for memory, expected in ((3 * 2 ** 30, (3072, 512)), (2 ** 30, (1024, 256))):
+            with self.subTest(memory=memory), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                history = json.loads((ROOT / 'bin/legacy-instructions.json').read_text())
+                target = root / 'CLAUDE.md'
+                old = history[-1]['template'].replace('__NAME__', 'Colleague').encode()
+                target.write_bytes(b'Personal prefix\r\n' + old + b'Personal suffix\r\n')
+                target.chmod(0o640)
+                (root / 'AGENTS.md').write_bytes(b'Own agent instructions\r\n')
+                instructions.sync(source, root, 'Colleague', memory_bytes=memory)
+                updated = target.read_bytes()
+                old_span, new_span = instructions.block_span(old), instructions.block_span(updated)
+                self.assertEqual(updated[:new_span[0]], b'Personal prefix\r\n' + old[:old_span[0]])
+                self.assertEqual(updated[new_span[1]:], old[old_span[1]:] + b'Personal suffix\r\n')
+                rendered = updated.decode()
+                self.assertIn(f'内存上限为 {expected[0]} MiB', rendered)
+                self.assertIn(f'后台任务最多使用 {expected[1]} MiB', rendered)
+                for text in ('预计超过 2 分钟', '不要用睡眠或轮询', '同时最多运行 2 个', '互相独立的工作用子代理并行处理'):
+                    self.assertEqual(rendered.count(text), 1)
+                self.assertNotIn('__MEMORY', rendered)
+                metadata = target.stat()
+                instructions.sync(source, root, 'Colleague', memory_bytes=memory)
+                self.assertEqual(target.stat(), metadata)
+                self.assertEqual((root / 'AGENTS.md').read_bytes(), b'Own agent instructions\r\n')
+                self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_memory_budget_uses_effective_container_limit_then_deployment_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            limit = Path(temporary) / 'memory.max'
+            env = {'PARTNER_MEMORY_BYTES': str(3 * 2 ** 30)}
+            limit.write_text(str(8 * 2 ** 30))
+            self.assertEqual(instructions.memory_budget(env, [limit]), 8 * 2 ** 30)
+            limit.write_text('max')
+            self.assertEqual(instructions.memory_budget(env, [limit]), 3 * 2 ** 30)
+            limit.unlink()
+            self.assertEqual(instructions.memory_budget(env, [limit]), 3 * 2 ** 30)
 
 
 if __name__ == '__main__':
