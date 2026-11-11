@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { spawnSync } from 'node:child_process';
 import { organizationData, nextModelConfig, nextEnvironment } from '../gateway/organization/resolve.mjs';
 import { createDockerRuntime } from '../gateway/runtime/docker.mjs';
 import { createAionui } from '../gateway/aionui.mjs';
@@ -94,4 +95,30 @@ test('removing a user entry replaces only that user idle container', async t => 
   assert.deepEqual(created, ['listed']);
   const env = containers.get('listed').env.find(value => value.startsWith('WORKPARTNER_MODEL_CONFIG='));
   assert.equal(JSON.parse(env.slice(env.indexOf('=') + 1)).catalog.claude.some(entry => entry.id === extra.id), false);
+});
+
+test('the messaging bridge /model list follows the same per-user catalog as the web picker', t => {
+  const org = organization(t, { userCatalog: { listed: { claude: [extra] } } });
+  const config = path.join(org.dir, 'config.toml');
+  const template = fs.readFileSync(path.resolve(import.meta.dirname, '../image/home/cc-connect-feishu.toml'), 'utf8')
+    .replace('__CLAUDE_MODEL__', 'old-default').replace('__EFFORT__', 'high');
+  const start = slug => {
+    const result = spawnSync('python3', ['-I', path.resolve(import.meta.dirname, '../image/bin/wp-bridge-defaults.py'), config], {
+      encoding: 'utf8', env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: org.dir,
+        WORKPARTNER_MODEL_CONFIG: JSON.stringify(nextModelConfig(org.data(), {}, slug)) } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    const parsed = spawnSync('python3', ['-I', '-c', 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))))', config], { encoding: 'utf8' });
+    return JSON.parse(parsed.stdout).projects[0].agent;
+  };
+  const organizationModels = nextModelConfig(org.data()).catalog.claude.map(entry => ({ model: entry.key, alias: entry.name }));
+  for (const [slug, models] of [['other', organizationModels], ['listed', [...organizationModels, { model: 'claude-extra', alias: 'Extra' }]]]) {
+    fs.writeFileSync(config, template);
+    const agent = start(slug);
+    assert.equal(agent.options.provider, 'workpartner');
+    assert.deepEqual(agent.providers, [{ name: 'workpartner', model: agent.options.model, models }]);
+  }
+  // Removing the user's entry removes it from the list at the next start.
+  org.write({});
+  assert.deepEqual(start('listed').providers[0].models, organizationModels);
 });

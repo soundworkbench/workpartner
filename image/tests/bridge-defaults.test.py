@@ -188,6 +188,51 @@ name = "second"
             self.assertEqual(parsed['projects'][0]['platforms'], original['projects'][0]['platforms'])
             self.assertFalse(bridge.refresh(target))
 
+    def test_managed_provider_lists_the_catalog_and_keeps_personal_providers_and_choices(self):
+        catalog = [{'id': 'fixture-claude', 'key': 'fixture-claude', 'name': 'Large', 'also': ['default']},
+                   {'id': 'small', 'key': 'fixture-small', 'name': 'Small', 'also': []},
+                   {'id': 'extra', 'key': 'fixture-extra', 'name': 'Extra', 'also': []}]
+        runtime = dict(ENV, WORKPARTNER_MODEL_CONFIG=json.dumps({'defaults': {}, 'catalog': {'claude': catalog}}))
+        personal = b'\n[[projects.agent.providers]]\nname = "mine"\napi_key = "fixture-private-value"\n' \
+            b'\n[[projects.agent.providers.models]]\nmodel = "mine-model" # keep comment\n'
+        listed = [{'model': entry['key'], 'alias': entry['name']} for entry in catalog]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, runtime):
+            target = Path(directory) / 'config.toml'
+            target.write_bytes(self.old_config() + personal)
+            self.assertTrue(bridge.refresh(target))
+            content = target.read_bytes()
+            self.check_agent(content)
+            agent = tomllib.loads(content.decode())['projects'][0]['agent']
+            self.assertEqual(agent['options']['provider'], 'workpartner')
+            self.assertEqual(agent['providers'], [
+                {'name': 'mine', 'api_key': 'fixture-private-value', 'models': [{'model': 'mine-model'}]},
+                {'name': 'workpartner', 'model': 'fixture-claude', 'models': listed}])
+            self.assertIn(personal.strip(), content)
+            metadata = target.stat()
+            self.assertFalse(bridge.refresh(target))
+            self.assertEqual(target.stat(), metadata)
+
+            # The bridge stores /model choices on the active provider; a listed choice survives restarts.
+            chosen = content.replace(b'model = "fixture-claude"\nmodels', b'model = "fixture-small"\nmodels')
+            self.assertNotEqual(chosen, content)
+            target.write_bytes(chosen)
+            self.assertFalse(bridge.refresh(target))
+            # Removed entries leave the list, and a choice that is no longer listed returns to the default.
+            runtime['WORKPARTNER_MODEL_CONFIG'] = json.dumps({'defaults': {}, 'catalog': {'claude': catalog[:1]}})
+            with patch.dict(os.environ, runtime):
+                self.assertTrue(bridge.refresh(target))
+            agent = tomllib.loads(target.read_text())['projects'][0]['agent']
+            self.assertEqual(agent['providers'][1], {'name': 'workpartner', 'model': 'fixture-claude', 'models': listed[:1]})
+            self.assertEqual(agent['providers'][0]['name'], 'mine')
+
+            # A provider the person activated stays active; a model that only followed the old default moves with it.
+            target.write_text(target.read_text().replace('provider = "workpartner"', 'provider = "mine"'))
+            with patch.dict(os.environ, dict(runtime, PARTNER_BRIDGE_MODEL='fixture-new')):
+                self.assertTrue(bridge.refresh(target))
+            agent = tomllib.loads(target.read_text())['projects'][0]['agent']
+            self.assertEqual(agent['options']['provider'], 'mine')
+            self.assertEqual(agent['providers'][1]['model'], 'fixture-new')
+
     def test_failure_never_partially_writes_or_prints_credentials(self):
         for source in (b'[broken fixture-private-value', self.old_config()):
             with self.subTest(source=source[:20]), tempfile.TemporaryDirectory() as directory:
