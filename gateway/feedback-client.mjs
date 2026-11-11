@@ -6,17 +6,23 @@ export function feedbackClient({ maxImageBytes = 5242880, maxImagesPerItem = 6 }
 
 function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages }) {
   try {
+    function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value); }
     // Runs in <head>, before the main UI router. Match feedback.mjs /items/:id.
     const url = new URL(location.href), parameter = url.searchParams.get('wp-feedback');
     let autoOpen = false, initialId = '';
     if (parameter !== null) {
-      const legacyHash = url.hash && !url.hash.startsWith('#/');
+      const legacyHash = parameter === '1' && url.hash && !url.hash.startsWith('#/');
       const candidate = parameter === '1' && legacyHash ? url.hash.slice(1) : parameter;
-      initialId = (parameter !== '1' || legacyHash) && /^[A-Za-z0-9_-]+$/.test(candidate) ? candidate : '';
+      initialId = (parameter !== '1' || legacyHash) && validId(candidate) ? candidate : '';
       autoOpen = parameter === '1' || Boolean(initialId);
-      url.searchParams.delete('wp-feedback');
+      // Parse only each key; keep all unrelated query segments byte-for-byte.
+      const parts = location.search.slice(1).split('&').filter(part => {
+        try { return decodeURIComponent(part.split('=')[0].replace(/\+/g, ' ')) !== 'wp-feedback'; }
+        catch { return true; }
+      });
+      const search = parts.length ? '?' + parts.join('&') : '';
       if (legacyHash) url.hash = '';
-      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+      history.replaceState(history.state, '', url.pathname + search + url.hash);
     }
 
     const API = '/_wp/api/feedback';
@@ -27,6 +33,10 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
       return value && /^en/i.test(value) ? 'en-US' : 'zh-CN';
     }
     const t = (zh, en) => locale() === 'en-US' ? en : zh;
+    const sizeLimit = maxBytes >= 0.1 * 1024 * 1024
+      ? Number((maxBytes / 1024 / 1024).toFixed(1)) + ' MB'
+      : Math.max(0.1, Number((maxBytes / 1024).toFixed(1))) + ' KB';
+    const invalidItem = () => t('无法打开反馈，请刷新后重试。', 'Unable to open feedback. Please refresh and try again.');
     const date = value => new Date(value).toLocaleString(locale());
     const statusText = status => ({
       open: t('已提交', 'Submitted'), need_info: t('待补充', 'More information needed'),
@@ -44,6 +54,11 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
     let draftBusy = false, detailBusy = false, pendingItem = null;
     const ui = {}, translations = [], detailDrafts = new Map();
     const draftFiles = [];
+    function reveal(target) {
+      // scrollIntoView may also scroll ancestor containers, including the page.
+      dialog.scrollTop = Math.max(0, dialog.scrollTop + target.getBoundingClientRect().top
+        - dialog.getBoundingClientRect().top - dialog.clientTop - 16);
+    }
     const unexpected = () => {
       try { if (ui.message) ui.message.textContent = t('暂时无法处理，请稍后重试。', 'Unable to continue. Please try again.'); }
       catch { /* Even an unavailable settings adapter must stay isolated. */ }
@@ -98,16 +113,21 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
         let entry = menu.querySelector('[data-wp-feedback]');
         if (!entry) {
           const logout = menu.querySelector('[role="menuitem"]');
-          const sep = node('div', undefined, 'wp-pick-sep'); sep.setAttribute('data-wp-feedback-separator', '');
+          const previous = logout ? logout.previousElementSibling : menu.lastElementChild;
+          if (!previous?.matches('.wp-pick-sep')) {
+            const sep = node('div', undefined, 'wp-pick-sep'); sep.setAttribute('data-wp-feedback-separator', '');
+            menu.insertBefore(sep, logout);
+          }
           entry = button(t('反馈', 'Feedback'), () => { closeMenus(); return show(); });
           entry.className = 'wp-pick-item'; entry.setAttribute('role', 'menuitem'); entry.setAttribute('data-wp-feedback', '');
           entry.addEventListener('click', e => e.stopPropagation());
-          menu.insertBefore(sep, logout); menu.insertBefore(entry, logout);
+          menu.insertBefore(entry, logout);
         }
         const label = t('反馈', 'Feedback'); if (entry.textContent !== label) entry.textContent = label;
-        const avatar = document.querySelector('button.wp-user');
+        const avatar = document.querySelector('button.wp-user[aria-expanded="true"]') || document.querySelector('button.wp-user');
         if (!avatar) return;
         const rect = avatar.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
         // Restrict height first, then measure: even a short viewport keeps the menu above the avatar.
         menu.style.maxHeight = Math.max(0, Math.min(rect.top - 14, window.innerHeight - 16)) + 'px';
         menu.style.overflowY = 'auto';
@@ -120,7 +140,8 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
     function styles() {
       const style = node('style');
       style.textContent = `
-.wp-feedback-dialog { position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(800px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:auto; padding:24px; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; }
+.wp-feedback-dialog { position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(800px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:auto; padding:24px; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; color-scheme:light; }
+html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
 .wp-feedback-dialog::backdrop { background:var(--wp-feedback-backdrop, rgba(0,0,0,.35)); }
 .wp-feedback-dialog * { box-sizing:border-box; min-width:0; }
 .wp-feedback-dialog [hidden] { display:none!important; }
@@ -132,14 +153,16 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
 .wp-feedback-dialog input, .wp-feedback-dialog textarea, .wp-feedback-dialog select { max-width:100%; color:var(--wp-ink, #222); font:inherit; }
 .wp-feedback-dialog input[type=text], .wp-feedback-dialog textarea, .wp-feedback-dialog select { width:100%; display:block; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:8px 10px; background:var(--wp-main, #F2F2ED); }
 .wp-feedback-dialog textarea { min-height:100px; resize:vertical; }
-.wp-feedback-dialog input[type=file] { width:100%; }
-.wp-feedback-dialog button { cursor:pointer; max-width:100%; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:6px 12px; background:var(--wp-send, #3C3F43); color:var(--wp-send-ink, #FCFCFC); font:inherit; overflow-wrap:anywhere; }
+.wp-feedback-dialog input[type=file] { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.wp-feedback-dialog .wp-feedback-picker:has(input:focus-visible) button { outline:2px solid var(--wp-focus-line, #888); outline-offset:2px; }
+.wp-feedback-dialog button { cursor:pointer; max-width:100%; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:6px 12px; background:var(--wp-send, #3C3F43); color:var(--wp-send-ink, #FCFCFC); font:inherit; font-size:13px; overflow-wrap:anywhere; }
 .wp-feedback-dialog button:hover { background:var(--wp-send-hover, #2E3237); }
 .wp-feedback-dialog button:disabled { opacity:.5; cursor:wait; }
 .wp-feedback-dialog .wp-feedback-secondary, .wp-feedback-dialog .wp-feedback-entry { background:var(--wp-hover, #eee); color:var(--wp-ink, #222); }
 .wp-feedback-dialog .wp-feedback-secondary:hover, .wp-feedback-dialog .wp-feedback-entry:hover { background:var(--wp-active, #ddd); }
 .wp-feedback-dialog :focus-visible { outline:2px solid var(--wp-focus-line, #888); outline-offset:2px; }
-.wp-feedback-dialog .wp-feedback-close { position:absolute; right:12px; top:10px; padding:4px 8px; font-size:22px; }
+.wp-feedback-dialog .wp-feedback-close { position:absolute; right:12px; top:10px; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-3, #777); }
+.wp-feedback-dialog .wp-feedback-close:hover { background:var(--wp-hover, #eee); }
 .wp-feedback-dialog a { color:var(--wp-ink, #222); }
 .wp-feedback-muted { color:var(--wp-ink-2, #666); }
 .wp-feedback-message, .wp-feedback-text { white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -166,14 +189,18 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
       const label = node('label'), caption = node('span'); label.append(caption);
       const input = node('input'), thumbs = node('div', undefined, 'wp-feedback-thumbs');
       input.type = 'file'; input.accept = 'image/png,image/jpeg,image/webp'; input.multiple = true; label.append(input);
+      const choose = button('', () => { if (!input.disabled) input.click(); }, true);
+      const picker = node('div', undefined, 'wp-feedback-picker'); picker.append(label, choose);
       const hint = node('p', '', 'wp-feedback-muted');
       let urls = [];
       function dispose() { urls.forEach(url => URL.revokeObjectURL(url)); urls = []; }
       function render() {
         caption.textContent = t('截图（PNG / JPEG / WebP）', 'Screenshots (PNG / JPEG / WebP)');
-        hint.textContent = t(`可粘贴截图；每张最多 ${maxBytes} 字节，每条最多 ${maxImages} 张。`,
-          `Paste screenshots here; up to ${maxBytes} bytes each and ${maxImages} per feedback item.`);
+        hint.textContent = t(`可粘贴截图；每张最多 ${sizeLimit}，每条最多 ${maxImages} 张。`,
+          `Paste screenshots here; up to ${sizeLimit} each and ${maxImages} per feedback item.`);
+        choose.textContent = t('选择图片', 'Choose images');
         dispose(); thumbs.replaceChildren(); input.disabled = busy() || storedCount() + files.length >= maxImages;
+        choose.disabled = input.disabled;
         files.forEach((file, index) => {
           const box = node('div', undefined, 'wp-feedback-thumb'), img = node('img');
           img.src = URL.createObjectURL(file); urls.push(img.src); img.alt = file.name || t('待上传截图', 'Pending screenshot');
@@ -186,7 +213,7 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
         try {
           for (const file of selected) {
             if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error(t('截图只支持 PNG、JPEG 或 WebP 图片。', 'Only PNG, JPEG and WebP screenshots are supported.'));
-            if (file.size > maxBytes) throw new Error(t(`截图过大，每张最多 ${maxBytes} 字节。`, `Screenshot too large; maximum ${maxBytes} bytes per image.`));
+            if (file.size > maxBytes) throw new Error(t(`截图过大，每张最多 ${sizeLimit}。`, `Screenshot too large; maximum ${sizeLimit} per image.`));
             if (files.length + storedCount() >= maxImages) throw new Error(t(`每条反馈最多上传 ${maxImages} 张截图。`, `Maximum ${maxImages} screenshots per feedback item.`));
             files.push(file);
           }
@@ -197,9 +224,9 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
       input.addEventListener('change', safe(() => { select([...input.files]); input.value = ''; }));
       const paste = safe(event => {
         const selected = [...(event.clipboardData?.items || [])].filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
-        if (selected.length) { event.preventDefault(); select(selected); }
+        if (selected.length) { event.preventDefault(); event.stopPropagation(); select(selected); }
       });
-      render(); return { label, hint, thumbs, render, paste, dispose };
+      render(); return { label: picker, hint, thumbs, render, paste, dispose };
     }
     let draftQueue, detailQueue;
     function mount() {
@@ -249,6 +276,7 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
       ui.submit.disabled = draftBusy; ui.fields.disabled = draftBusy || Boolean(pendingItem);
       ui.submit.textContent = pendingItem ? t('重试上传截图', 'Retry screenshot upload') : t('提交反馈', 'Submit feedback');
       ui.refresh.disabled = detailBusy; ui.scope.disabled = detailBusy; draftQueue.render();
+      if (ui.back) ui.back.disabled = detailBusy;
     }
     async function list() {
       const version = ++listVersion;
@@ -258,9 +286,10 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
         ui.scope.hidden = !data.isHandler; ui.listTitle.textContent = all ? t('全部反馈', 'All feedback') : t('我的反馈', 'My feedback');
         ui.scope.textContent = all ? t('我的反馈', 'My feedback') : t('全部反馈', 'All feedback');
         ui.list.replaceChildren();
-        if (!data.items.length) ui.list.append(node('p', t('还没有反馈。', 'No feedback yet.'), 'wp-feedback-muted'));
-        data.items.forEach(item => {
-          const entry = button('', async () => { if (detailBusy) return; await openDetail(item.id); ui.detail.scrollIntoView({ block: 'nearest' }); });
+        const items = data.items.filter(item => validId(item?.id));
+        if (!items.length) ui.list.append(node('p', t('还没有反馈。', 'No feedback yet.'), 'wp-feedback-muted'));
+        items.forEach(item => {
+          const entry = button('', () => openDetail(item.id, true));
           entry.className = 'wp-feedback-entry';
           entry.append(node('strong', '#' + item.no + ' · ' + typeText(item.type) + ' · ' + item.title), badge(item),
             node('div', t('更新于 ', 'Updated ') + date(item.updatedAt), 'wp-feedback-muted'));
@@ -280,39 +309,55 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
       if (revoked) return;
       closeMenus(); mount(); translations.forEach(update => update()); controls();
       if (!dialog.open) { previousFocus = document.querySelector('button.wp-user') || document.activeElement; dialog.showModal(); }
-      if (await list()) await openDetail(key);
+      const version = detailVersion;
+      if (await list() && version === detailVersion) await openDetail(key, true);
     }
     async function submit(event) {
       event.preventDefault(); if (draftBusy || revoked) return;
       draftBusy = true; controls(); ui.submitMessage.textContent = t('正在提交…', 'Submitting…');
+      let savedKey = '';
       try {
-        if (!pendingItem) pendingItem = (await api('', 'POST', { type: ui.type.value, title: ui.title.value, body: ui.body.value })).item;
+        if (!pendingItem) {
+          const item = (await api('', 'POST', { type: ui.type.value, title: ui.title.value, body: ui.body.value })).item;
+          if (!validId(item?.id)) { ui.submitMessage.textContent = invalidItem(); return; }
+          pendingItem = item;
+        }
         while (draftFiles.length) {
           const file = draftFiles[0];
-          pendingItem = (await api('/items/' + pendingItem.id + '/files?filename=' + encodeURIComponent(file.name), 'POST', file, true)).item;
+          const item = (await api('/items/' + pendingItem.id + '/files?filename=' + encodeURIComponent(file.name), 'POST', file, true)).item;
+          if (!validId(item?.id)) { ui.submitMessage.textContent = invalidItem(); return; }
+          pendingItem = item;
           draftFiles.shift(); draftQueue.render();
         }
-        const key = pendingItem.id; pendingItem = null;
+        savedKey = pendingItem.id; pendingItem = null;
         ui.title.value = ''; ui.body.value = ''; ui.type.value = 'bug';
         ui.submitMessage.textContent = t('提交成功。', 'Feedback submitted.');
-        await openDetail(key);
       } catch (error) {
         ui.submitMessage.textContent = (pendingItem ? t(`反馈 #${pendingItem.no} 已保存；截图未全部上传，可删除或重试。`,
           `Feedback #${pendingItem.no} was saved. Some screenshots remain; remove them or retry. `) : '') + error.message;
       } finally { draftBusy = false; controls(); await list(); }
+      // Render the refreshed list first: changing its height moves the detail below it.
+      if (savedKey) await openDetail(savedKey, true);
     }
-    async function openDetail(key) {
+    async function openDetail(key, scroll = false) {
       if (detailBusy || revoked) return;
       currentId = key; const version = ++detailVersion, section = ui.detail;
       if (!key) { section.hidden = true; return; }
+      if (!validId(key)) { ui.message.textContent = invalidItem(); reveal(ui.message); return; }
       section.hidden = false;
       // Keep the existing editor until a read succeeds; failed refreshes must not erase input.
       try {
         const data = await api('/items/' + encodeURIComponent(key));
         if (version !== detailVersion || revoked) return;
         const item = data.item;
+        if (!validId(item?.id)) { ui.message.textContent = invalidItem(); reveal(ui.message); return; }
         detailQueue?.dispose(); section.onpaste = null;
-        section.replaceChildren(node('h3', '#' + item.no + ' · ' + typeText(item.type) + ' · ' + item.title), badge(item),
+        ui.back = button(t('返回列表', 'Back to list'), () => {
+          if (detailBusy) return;
+          currentId = ''; ++detailVersion; section.hidden = true; section.onpaste = null;
+          detailQueue?.dispose(); detailQueue = null; reveal(ui.listTitle);
+        }, true);
+        section.replaceChildren(ui.back, node('h3', '#' + item.no + ' · ' + typeText(item.type) + ' · ' + item.title), badge(item),
           node('p', item.author.name + ' · ' + date(item.createdAt), 'wp-feedback-muted'), node('p', item.body, 'wp-feedback-text'));
         if (item.typeChangedFrom) section.append(node('p', t('此反馈已从问题调整为需求。', 'This issue was changed to a feature request.'), 'wp-feedback-muted'));
         if (item.approval.state !== 'none') {
@@ -328,6 +373,7 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
         const images = node('div', undefined, 'wp-feedback-images');
         function showImages(files) {
           images.replaceChildren(); files.forEach(file => {
+            if (!validId(file?.id)) return;
             const a = node('a'), img = node('img'); a.href = API + '/items/' + encodeURIComponent(item.id) + '/files/' + encodeURIComponent(file.id);
             a.target = '_blank'; a.rel = 'noopener noreferrer'; img.src = a.href; img.alt = file.name; img.loading = 'lazy'; a.append(img); images.append(a);
           });
@@ -345,6 +391,7 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
               while (draft.files.length) {
                 const file = draft.files[0];
                 const result = await api('/items/' + item.id + '/files?filename=' + encodeURIComponent(file.name), 'POST', file, true);
+                if (!validId(result.item?.id)) { msg.textContent = invalidItem(); return; }
                 stored = result.item.files; draft.files.shift(); showImages(stored); queue.render();
               }
               msg.textContent = t('截图已上传。', 'Screenshots uploaded.');
@@ -365,15 +412,17 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
         area.addEventListener('input', safe(() => { draft.comment = area.value; })); label.append(area); form.append(label, send, msg);
         form.addEventListener('submit', safe(async event => {
           event.preventDefault(); if (detailBusy) return;
-          detailBusy = true; ++detailVersion; send.disabled = true; area.disabled = true; controls(); draft.comment = area.value;
+          detailBusy = true; const writeVersion = ++detailVersion;
+          send.disabled = true; area.disabled = true; controls(); draft.comment = area.value;
           let saved = false;
           try { await api('/items/' + item.id + '/comments', 'POST', { text: area.value }); draft.comment = ''; area.value = ''; saved = true; }
           catch (error) { msg.textContent = error.message; }
           finally { detailBusy = false; send.disabled = false; area.disabled = false; controls(); }
-          if (saved) { if (await list()) await openDetail(key); }
+          if (saved && await list() && writeVersion === detailVersion) await openDetail(key);
         }));
         section.append(form);
-      } catch (error) { if (version === detailVersion) ui.message.textContent = error.message; }
+        if (scroll) reveal(section);
+      } catch (error) { if (version === detailVersion) { ui.message.textContent = error.message; reveal(ui.message); } }
     }
     const init = safe(() => {
       observer = new MutationObserver(safe(menus)); observer.observe(document.body, { childList: true, subtree: true }); menus();

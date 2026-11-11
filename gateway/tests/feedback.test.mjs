@@ -503,8 +503,8 @@ test('changes uses the default page size and caps requested batches at 200', asy
 });
 
 // Only the DOM operations used by this client; observer delivery is explicit and bounded.
-function browser({ href = origin + '/', language, storedLanguage, request = async () => ({ items: [], isHandler: false }) } = {}) {
-  const observers = [], callbacks = new Map(), reads = [], alerts = [], replacements = [];
+function browser({ href = origin + '/', language, storedLanguage, maxImageBytes = 40, request = async () => ({ items: [], isHandler: false }) } = {}) {
+  const observers = [], callbacks = new Map(), reads = [], alerts = [], replacements = [], scrolls = [];
   let deliveries = 0;
   const notify = target => {
     for (const o of observers) if (o.target && (o.target === target || (o.options.subtree && o.target.contains(target)))) o.pending = true;
@@ -539,12 +539,25 @@ function browser({ href = origin + '/', language, storedLanguage, request = asyn
     showModal() { this.open = true; }
     close() { this.open = false; this.fire('close'); }
     focus() { document.activeElement = this; }
-    scrollIntoView() {}
+    scrollIntoView() { scrolls.push({ element: this, kind: 'intoView' }); }
+    get scrollTop() { return this._scrollTop || 0; }
+    set scrollTop(top) { this._scrollTop = top; scrolls.push({ element: this, top }); }
+    get clientTop() { return 1; }
+    get previousElementSibling() { return this.parentNode?.children[this.parentNode.children.indexOf(this) - 1] || null; }
+    get lastElementChild() { return this.children.at(-1) || null; }
+    click() { this.clicks = (this.clicks || 0) + 1; }
     reset() { this.querySelectorAll('input, textarea').forEach(e => { e.value = ''; }); }
     get isConnected() { return document.body?.contains(this) || document.head.contains(this); }
     get offsetHeight() { return Math.min(this.children.length * 34, Number.parseFloat(this.style.maxHeight) || 500); }
     get offsetWidth() { return 220; }
-    getBoundingClientRect() { return { top: 550, bottom: 590, left: 10, right: 230 }; }
+    getBoundingClientRect() {
+      if (this.rect) return this.rect;
+      if (this.tag === 'dialog') return { top: 12, bottom: 628, left: 12, right: 348, width: 336, height: 616 };
+      let parent = this.parentNode;
+      while (parent && parent.tag !== 'dialog') parent = parent.parentNode;
+      const top = parent ? (this.id === 'wp-feedback-detail' ? 1400 : this.className === 'wp-feedback-message' ? 1200 : 800) - parent.scrollTop : 550;
+      return { top, bottom: top + 40, left: 10, right: 230, width: 220, height: 40 };
+    }
   }
   const document = {
     readyState: 'loading', body: null, head: new Element('head'), documentElement: { lang: 'zh-CN' },
@@ -562,14 +575,14 @@ function browser({ href = origin + '/', language, storedLanguage, request = asyn
     MutationObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe(target, options) { assert.ok(target); this.target = target; this.options = options; } disconnect() { this.target = null; this.pending = false; } },
     fetch: async (url, options) => { reads.push({ url, options }); const result = await request(url, options); return { ok: !result.status || result.status < 400, status: result.status || 200, json: async () => result }; },
   });
-  vm.runInContext(feedbackClient({ maxImageBytes: 40, maxImagesPerItem: 3 }), context);
+  vm.runInContext(feedbackClient({ maxImageBytes, maxImagesPerItem: 3 }), context);
   function flush() { for (let n = 0; observers.some(o => o.pending); n++) { assert.ok(n < 20, 'observer must settle'); for (const o of observers) if (o.pending) { o.pending = false; deliveries++; o.fn([]); } } }
   async function tick() { await new Promise(resolve => setImmediate(resolve)); flush(); }
   async function ready() { document.body = new Element('body'); document.readyState = 'interactive'; callbacks.get('DOMContentLoaded')?.(); await tick(); }
-  function menu(logout = true) { const m = new Element('div'); m.className = 'wp-pick-menu wp-settings-menu'; document.body.append(m); redraw(m, logout); return m; }
-  function redraw(m, logout = true) { m.replaceChildren(); if (logout) { const b = new Element('button'); b.className = 'wp-pick-item'; b.setAttribute('role', 'menuitem'); b.textContent = 'Logout'; m.append(b); } flush(); }
+  function menu(logout = true, separator = true) { const m = new Element('div'); m.className = 'wp-pick-menu wp-settings-menu'; document.body.append(m); redraw(m, logout, separator); return m; }
+  function redraw(m, logout = true, separator = true) { m.replaceChildren(); if (separator) { const sep = new Element('div'); sep.className = 'wp-pick-sep'; m.append(sep); } if (logout) { const b = new Element('button'); b.className = 'wp-pick-item'; b.setAttribute('role', 'menuitem'); b.textContent = 'Logout'; m.append(b); } flush(); }
   async function open() { const m = menu(); const b = m.querySelector('[data-wp-feedback]'); assert.ok(b); await b.fire('click'); await tick(); return document.querySelector('dialog'); }
-  return { document, window, location, replacements, reads, alerts, ready, menu, redraw, open, tick, flush, Element, get deliveries() { return deliveries; } };
+  return { document, window, location, replacements, reads, alerts, scrolls, ready, menu, redraw, open, tick, flush, Element, get deliveries() { return deliveries; } };
 }
 
 const browserItem = () => ({ id: 'item1', no: 1, type: 'bug', title: '<img onerror=bad>', body: '描述', author: { name: '甲' }, status: 'open',
@@ -598,7 +611,7 @@ test('deep links are consumed synchronously, preserve other parameters/routes an
   for (const [suffix, clean, detail, opens] of [
     ['?keep=2&wp-feedback=item1', '?keep=2', 'item1', true], ['?wp-feedback=1#item1', '', 'item1', true],
     ['?wp-feedback=1#1', '', '1', true], ['?wp-feedback=1#/market', '#/market', false, true], ['?keep=2&wp-feedback=item1#/market', '?keep=2#/market', 'item1', true],
-    ['?wp-feedback=bad%2Fid#bad!', '', false, false], ['?wp-feedback=1#bad!', '', false, true],
+    ['?wp-feedback=bad%2Fid#bad!', '#bad!', false, false], ['?wp-feedback=1#bad!', '', false, true],
     ['?keep=2#/market', '?keep=2#/market', false, false],
   ]) {
     const b = browser({ href: origin + '/' + suffix, request: async url => url.includes('/items/') ? { item: browserItem(), canUpload: true } : { items: [], isHandler: false } });
@@ -672,7 +685,7 @@ test('file validation reports format, size and count limits; failed create retai
   const input = form.querySelector('input[type=file]');
   for (const [files, text] of [
     [[{ name: 'x.gif', type: 'image/gif', size: 12 }], /PNG、JPEG 或 WebP/],
-    [[{ ...screenshot('big.png'), size: 41 }], /40 字节/],
+    [[{ ...screenshot('big.png'), size: 41 }], /0\.1 KB/],
     [[1, 2, 3, 4].map(n => screenshot(n + '.png')), /最多上传 3 张/],
   ]) { input.files = files; await input.fire('change'); assert.match(form.textContent, text); }
   assert.equal(form.querySelectorAll('img').length, 3);
@@ -750,4 +763,247 @@ test('an overlay exception inside observer/event callbacks cannot escape into th
   const b = browser(); await b.ready(); await b.open();
   b.window.wpSettings = { get() { throw new Error('settings unavailable'); } };
   assert.doesNotThrow(() => b.menu()); await b.tick();
+});
+
+function assertDialogScrolledTo(b, target) {
+  const dialog = b.document.querySelector('dialog');
+  assert.ok(b.scrolls.length, 'must scroll after rendering the target');
+  assert.ok(b.scrolls.every(s => s.element === dialog && s.kind !== 'intoView'), 'only the dialog may scroll');
+  const gap = target.getBoundingClientRect().top - dialog.getBoundingClientRect().top;
+  assert.ok(gap >= dialog.clientTop && gap <= 32, `target near dialog top: ${gap}`);
+}
+
+test('initial detail and successful submission scroll inside the dialog after the list renders', async () => {
+  for (const initial of [true, false]) {
+    const b = browser({ href: origin + (initial ? '/?wp-feedback=item1' : '/'), request: async url =>
+      url.includes('/items/') ? { item: browserItem(), canUpload: true } : { item: browserItem(), items: [browserItem()], isHandler: false } });
+    await b.ready(); const dialog = initial ? b.document.querySelector('dialog') : await b.open();
+    if (!initial) await dialog.querySelector('form').fire('submit');
+    await b.tick();
+    assert.deepEqual(b.reads.slice(-2).map(r => r.url), [base, base + '/items/item1'], 'refresh list before positioning detail');
+    assertDialogScrolledTo(b, dialog.querySelector('#wp-feedback-detail'));
+  }
+});
+
+test('unavailable initial detail scrolls its error into the dialog viewport', async () => {
+  for (const status of [404, 500]) {
+    const b = browser({ href: origin + '/?wp-feedback=missing', request: async url =>
+      url.includes('/items/') ? { status, error: 'Cannot open feedback' } : { items: [browserItem()], isHandler: false } });
+    await b.ready();
+    const msg = b.document.querySelectorAll('.wp-feedback-message').find(n => n.textContent === 'Cannot open feedback');
+    assert.ok(msg); assertDialogScrolledTo(b, msg);
+  }
+});
+
+test('back to list collapses details and list clicks still switch between items', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    const second = { ...browserItem(), id: 'item2', no: 2, title: 'Second' };
+    const b = browser({ language, href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+      ? { item: url.endsWith('item2') ? second : browserItem(), canUpload: true } : { items: [browserItem(), second], isHandler: false } });
+    await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+    await dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click');
+    assert.match(detail.textContent, /Second/); assertDialogScrolledTo(b, detail);
+    await buttonWith(detail, language === 'en-US' ? 'Back to list' : '返回列表').fire('click');
+    assert.equal(detail.hidden, true);
+    const title = dialog.querySelectorAll('h3').find(n => n.textContent === (language === 'en-US' ? 'My feedback' : '我的反馈'));
+    assertDialogScrolledTo(b, title);
+    await dialog.querySelector('.wp-feedback-entry').fire('click');
+    assert.equal(detail.hidden, false); assert.match(detail.textContent, /<img onerror=bad>/);
+  }
+});
+
+test('menu reuses overlay separators across redraws and revocation removes only owned separators', async () => {
+  for (const separator of [true, false]) for (const status of [401, 404]) {
+    let denied = false;
+    const b = browser({ request: async () => denied ? { status } : { items: [], isHandler: false } });
+    await b.ready(); const dialog = await b.open(), menu = b.menu(true, separator);
+    for (let n = 0; n < 4; n++) {
+      assert.equal(menu.querySelectorAll('.wp-pick-sep').length, 1);
+      assert.equal(menu.querySelectorAll('[data-wp-feedback-separator]').length, separator ? 0 : 1);
+      assert.equal(menu.querySelectorAll('[data-wp-feedback]').length, 1);
+      b.redraw(menu, true, separator);
+    }
+    const original = separator ? menu.querySelector('.wp-pick-sep') : null;
+    denied = true; await buttonWith(dialog, '刷新').fire('click');
+    assert.equal(menu.querySelector('[data-wp-feedback]'), null);
+    assert.equal(menu.querySelectorAll('.wp-pick-sep').length, separator ? 1 : 0);
+    if (original) assert.equal(original.parentNode, menu);
+    b.redraw(menu, true, separator); assert.equal(menu.querySelector('[data-wp-feedback]'), null);
+  }
+});
+
+test('size hints and validation use localized MB or KB while enforcing the byte limit', async () => {
+  for (const language of ['zh-CN', 'en-US']) for (const [maxImageBytes, expected] of [
+    [5242880, '5 MB'], [300000, '0.3 MB'], [1572864, '1.5 MB'], [102400, '100 KB'], [1536, '1.5 KB'],
+  ]) {
+    const b = browser({ language, maxImageBytes }); await b.ready(); const form = (await b.open()).querySelector('form');
+    assert.ok(form.textContent.includes(expected)); assert.doesNotMatch(form.textContent, /字节|bytes|5\.0 MB/);
+    const input = form.querySelector('input[type=file]');
+    input.files = [{ ...screenshot('limit.png'), size: maxImageBytes }]; await input.fire('change');
+    assert.equal(form.querySelectorAll('img').length, 1);
+    input.files = [{ ...screenshot('too-big.png'), size: maxImageBytes + 1 }]; await input.fire('change');
+    assert.ok(form.querySelector('.wp-feedback-message').textContent.includes(expected));
+    assert.equal(form.querySelectorAll('img').length, 1);
+  }
+});
+
+test('invalid API list and detail item ids never render actions or produce dependent requests', async () => {
+  for (const id of ['..', 'bad/id', '']) {
+    const invalid = { ...browserItem(), id, title: 'Invalid item', files: [{ id: 'file1', name: 'bad.png' }] };
+    const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+      ? { item: invalid, canUpload: true } : { items: [invalid, browserItem()], isHandler: false } });
+    await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+    assert.equal(dialog.querySelectorAll('.wp-feedback-entry').length, 1);
+    assert.doesNotMatch(detail.textContent, /Invalid item/);
+    assert.equal(detail.querySelectorAll('img, a, form, input').length, 0);
+    assert.deepEqual(b.reads.map(r => r.url), [base, base + '/items/item1']);
+    assert.equal(b.alerts.length, 0);
+  }
+});
+
+test('invalid created or uploaded item ids never become upload or detail URLs', async () => {
+  for (const id of ['..', 'bad/id', '']) for (const phase of ['create', 'upload']) {
+    const b = browser({ request: async (url, options) => options.method === 'POST'
+      ? { item: { ...browserItem(), id: phase === 'upload' && url === base ? 'item1' : id } }
+      : { items: [], isHandler: false } });
+    await b.ready(); const form = (await b.open()).querySelector('form');
+    await form.fire('paste', pasteFiles([screenshot('one.png'), screenshot('two.png')]));
+    await form.fire('submit'); await b.tick();
+    const writes = b.reads.filter(r => r.options.method === 'POST');
+    assert.deepEqual(writes.map(r => r.url), phase === 'create' ? [base] : [base, base + '/items/item1/files?filename=one.png']);
+    assert.ok(b.reads.every(r => r.url === base || r.url === base + '/items/item1/files?filename=one.png'));
+    assert.equal(b.document.querySelector('#wp-feedback-detail').querySelectorAll('img, a').length, 0);
+  }
+});
+
+test('invalid file ids are omitted from screenshot links on detail load and after upload', async () => {
+  const files = ['..', 'bad/id', '', 'safe_-1'].map(id => ({ id, name: id || 'empty' }));
+  let uploaded = false;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') uploaded = true;
+    return url.includes('/items/') ? { item: { ...browserItem(), files: uploaded ? files : files.slice(0, 2) }, canUpload: true } : { items: [], isHandler: false };
+  } });
+  await b.ready(); const detail = b.document.querySelector('#wp-feedback-detail');
+  assert.equal(detail.querySelectorAll('img, a').length, 0);
+  await detail.fire('paste', pasteFiles([screenshot('new.png')])); await buttonWith(detail, '上传截图').fire('click');
+  assert.equal(detail.querySelectorAll('img').length, 1); assert.equal(detail.querySelectorAll('a').length, 1);
+  assert.equal(detail.querySelector('img').src, base + '/items/item1/files/safe_-1');
+  assert.equal(detail.querySelector('a').href, base + '/items/item1/files/safe_-1');
+});
+
+test('concrete feedback parameters preserve unrelated hashes', async () => {
+  for (const id of ['item1', 'bad%2Fid', '']) {
+    const b = browser({ href: origin + '/?wp-feedback=' + id + '#foo' });
+    assert.equal(b.location.hash, '#foo'); assert.equal(b.location.search, '');
+  }
+});
+
+test('consuming feedback parameters preserves the raw bytes of every other query segment', () => {
+  for (const [query, expected] of [
+    ['?a=%20b&wp-feedback=1&flag', '?a=%20b&flag'],
+    ['?wp-feedback=item1&a=one+two&x=%2f&flag=&a=%7e', '?a=one+two&x=%2f&flag=&a=%7e'],
+    ['?flag&wp%2Dfeedback=1&wp-feedback=item2&x=%26%3d', '?flag&x=%26%3d'],
+    ['?x=1&&wp-feedback=1&', '?x=1&&'],
+  ]) {
+    const b = browser({ href: origin + '/' + query + '#/market' });
+    assert.equal(b.location.search, expected); assert.equal(b.location.hash, '#/market'); assert.equal(b.reads.length, 0);
+  }
+});
+
+test('handled screenshot paste stops propagation in draft and detail without intercepting keydown', async () => {
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+    ? { item: browserItem(), canUpload: true } : { items: [], isHandler: false } });
+  await b.ready(); const dialog = b.document.querySelector('dialog');
+  for (const target of [dialog.querySelector('form'), dialog.querySelector('#wp-feedback-detail')]) {
+    for (const files of [[], [screenshot('paste.png')]]) {
+      let prevented = 0, stopped = 0;
+      await target.fire('paste', { ...pasteFiles(files), preventDefault() { prevented++; }, stopPropagation() { stopped++; } });
+      assert.equal(prevented, files.length); assert.equal(stopped, files.length);
+    }
+  }
+  assert.ok([dialog, ...dialog.querySelectorAll('*')].every(n => !n.listeners.keydown && !n.onkeydown));
+});
+
+test('menu positioning uses the expanded avatar and leaves styles intact for zero-size anchors', async () => {
+  for (const size of [[0, 40], [220, 0], [220, 40]]) {
+    const b = browser(); await b.ready();
+    const first = new b.Element('button'); first.className = 'wp-user'; b.document.body.append(first);
+    const active = new b.Element('button'); active.className = 'wp-user'; active.setAttribute('aria-expanded', 'true');
+    active.rect = { top: 400, bottom: 440, left: 90, right: 310, width: size[0], height: size[1] }; b.document.body.append(active);
+    const menu = b.menu();
+    if (!size[0] || !size[1]) {
+      assert.deepEqual(menu.style, {});
+      Object.assign(menu.style, { top: '37px', left: '21px', maxHeight: '123px', overflowY: 'scroll' });
+      b.redraw(menu);
+      assert.deepEqual(menu.style, { top: '37px', left: '21px', maxHeight: '123px', overflowY: 'scroll' });
+    }
+    else { assert.equal(menu.style.left, '90px'); assert.equal(menu.style.top, '292px'); }
+  }
+});
+
+test('localized image picker triggers the focusable labelled file input and mirrors its disabled state', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    const b = browser({ language, href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+      ? { item: browserItem(), canUpload: true } : { items: [], isHandler: false } });
+    await b.ready(); const dialog = b.document.querySelector('dialog');
+    for (const root of [dialog.querySelector('form'), dialog.querySelector('#wp-feedback-detail')]) {
+      const picker = buttonWith(root, language === 'en-US' ? 'Choose images' : '选择图片'), input = root.querySelector('input[type=file]');
+      assert.equal(picker.type, 'button'); assert.equal(Boolean(input.hidden), false); assert.notEqual(input.tabIndex, -1);
+      assert.equal(input.parentNode.tag, 'label'); assert.equal(picker.disabled, false);
+      await picker.fire('click'); assert.equal(input.clicks, 1);
+      input.files = [1, 2, 3].map(n => screenshot(n + '.png')); await input.fire('change');
+      assert.equal(input.disabled, true); assert.equal(picker.disabled, true);
+      await buttonWith(root, language === 'en-US' ? 'Remove' : '删除').fire('click');
+      assert.equal(input.disabled, false); assert.equal(picker.disabled, false);
+    }
+  }
+});
+
+test('back to list invalidates an outstanding detail read without losing drafts', async () => {
+  let release, reads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => {
+    if (!url.includes('/items/')) return { items: [browserItem()], isHandler: false };
+    if (++reads === 2) await new Promise(resolve => { release = resolve; });
+    return { item: browserItem(), canUpload: true };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const area = detail.querySelector('textarea'); area.value = 'Keep draft'; await area.fire('input');
+  const refreshing = buttonWith(dialog, '刷新').fire('click'); await b.tick(); assert.ok(release);
+  await buttonWith(detail, '返回列表').fire('click');
+  const scrollCount = b.scrolls.length; release(); await refreshing;
+  assert.equal(detail.hidden, true); assert.equal(b.scrolls.length, scrollCount);
+  await dialog.querySelector('.wp-feedback-entry').fire('click');
+  assert.equal(detail.hidden, false); assert.equal(detail.querySelector('textarea').value, 'Keep draft');
+});
+
+test('back to list during post-comment refresh stays collapsed when the response arrives', async () => {
+  let releaseList, listReads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST' || url.includes('/items/')) return { item: browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem()], isHandler: false };
+  } });
+  await b.ready(); const detail = b.document.querySelector('#wp-feedback-detail');
+  detail.querySelector('textarea').value = 'Comment';
+  const submitting = detail.querySelector('form').fire('submit'); await b.tick(); assert.ok(releaseList);
+  await buttonWith(detail, '返回列表').fire('click'); assert.equal(detail.hidden, true);
+  const detailReads = b.reads.filter(r => r.url === base + '/items/item1').length;
+  releaseList(); await submitting; await b.tick();
+  assert.equal(detail.hidden, true);
+  assert.equal(b.reads.filter(r => r.url === base + '/items/item1').length, detailReads);
+});
+
+test('back to list during dialog reopen wins over its pending list refresh', async () => {
+  let releaseList, listReads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => {
+    if (url.includes('/items/')) return { item: browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem()], isHandler: false };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  dialog.close(); const reopening = b.open(); await b.tick(); assert.ok(releaseList);
+  await buttonWith(detail, '返回列表').fire('click');
+  releaseList(); await reopening;
+  assert.equal(detail.hidden, true);
+  assert.equal(b.reads.filter(r => r.url === base + '/items/item1').length, 1);
 });
