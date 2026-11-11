@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import vm from 'node:vm';
-import { feedbackPage } from '../feedback-page.mjs';
+import { feedbackClient } from '../feedback-client.mjs';
 import { createFeedback } from '../feedback.mjs';
 import { issueToken, tokenUser } from '../market-auth.mjs';
 
@@ -39,7 +39,7 @@ function fixture(t, extra = {}) {
   }
   const create = async (user = alice, body = draft) => { const r = await request(base, { method: 'POST', user, body }); assert.equal(r.status, 201, String(r.raw)); return r.data.item; };
   const bot = (route, body, headers = {}) => request(base + '/bot/' + route, { user: null, method: body === undefined ? 'GET' : 'POST', body, headers: { authorization: 'Bearer service-secret', origin: undefined, ...headers } });
-  return { dir, organization, request, create, bot, notices, read: () => JSON.parse(fs.readFileSync(path.join(dir, 'feedback/store.json'))),
+  return { dir, organization, request, create, bot, notices, clientFor: user => handle.clientFor(user), read: () => JSON.parse(fs.readFileSync(path.join(dir, 'feedback/store.json'))),
     config: value => { live = value; }, advance: ms => { time += ms; }, restart: () => { handle = createFeedback(options); } };
 }
 
@@ -193,7 +193,7 @@ test('bot writes validate atomically, reply keys are per-item idempotent, type o
   for (const body of [{ type: 'bug' }, { status: 'invalid' }, { status: ['done'] }, { approval: { state: 'oops' } }, { pr: 'javascript:alert(1)' }, { reply: { key: '', text: 'hi' } }, { status: 'open', reply: { key: 'new', text: 'x'.repeat(4001) } }]) {
     const before = f.read(); assert.equal((await f.bot('items/' + a.id, body)).status, 400); assert.deepEqual(f.read(), before);
   }
-  assert.match(f.notices[0][1], /#1/); assert.match(f.notices[0][1], /处理中/); assert.match(f.notices[0][1], new RegExp('/_wp/feedback#' + a.id));
+  assert.match(f.notices[0][1], /#1/); assert.match(f.notices[0][1], /处理中/); assert.match(f.notices[0][1], new RegExp('/\\?wp-feedback=' + a.id));
 });
 
 test('notification failure does not undo a committed bot update', async t => {
@@ -427,14 +427,42 @@ test('500 comments per item includes bot replies, preserves atomicity and permit
   assert.equal((await f.bot('items/' + a.id, { status: 'done' })).status, 200);
 });
 
-test('page has restrictive CSP, responsive viewport and safe DOM rendering', async t => {
-  const f = fixture(t); f.organization.appearance.authorizationStyle = 'body{color:navy}';
-  const r = await f.request('/_wp/feedback'); assert.equal(r.status, 200);
-  assert.match(r.headers['content-security-policy'], /img-src 'self' blob:/);
-  assert.match(String(r.raw), /initial-scale=1/); assert.match(String(r.raw), /body\{color:navy\}/);
-  assert.doesNotMatch(String(r.raw), /innerHTML/); assert.match(String(r.raw), /textContent/);
-  const script = String(r.raw).match(/<script>([\s\S]*?)<\/script>/)[1];
-  assert.doesNotThrow(() => new Function(script));
+test('legacy page redirects to the main UI after admission', async t => {
+  const f = fixture(t), r = await f.request('/_wp/feedback');
+  assert.equal(r.status, 302); assert.equal(r.headers.location, '/?wp-feedback=1');
+  assert.equal(r.headers['cache-control'], 'no-store'); assert.equal(r.raw, '');
+  assert.equal(r.headers['content-security-policy'], undefined);
+  f.config({ feedback: { allow: [] } });
+  assert.equal((await f.request('/_wp/feedback')).status, 404);
+});
+
+test('clientFor shares live admission policy and never embeds identities or credentials', t => {
+  const f = fixture(t);
+  for (const allow of [[alice.slug], [alice.unionId], ['*']]) {
+    f.config({ feedback: { allow } });
+    const script = f.clientFor(alice);
+    assert.ok(script.startsWith('\n;')); assert.match(script, /wp-feedback-dialog/);
+    assert.doesNotMatch(script, /union-a|alice|service-secret|bot.token/);
+  }
+  for (const config of [{ feedback: { allow: [] } }, {}, new Error('bad JSON'), { feedback: { allow: '*' } }]) {
+    f.config(config); assert.equal(f.clientFor(alice), '');
+  }
+  f.config({ feedback: { allow: [], handlers: [handler.unionId] } });
+  assert.ok(f.clientFor(handler)); assert.equal(f.clientFor(alice), '');
+  f.config({ feedback: { allow: ['*'], handlers: [handler.unionId] } });
+  assert.equal(f.clientFor(null), ''); assert.equal(f.clientFor({ unionId: handler.unionId }), '');
+  f.organization.features = { feedback: false };
+  assert.equal(f.clientFor(alice), ''); assert.equal(f.clientFor(handler), '');
+});
+
+test('generated client is isolated, numeric-only configured and uses safe DOM rendering', () => {
+  for (const options of [undefined, { maxImageBytes: 40, maxImagesPerItem: 3 }, { maxImageBytes: 'secret-user-data' }]) {
+    const script = feedbackClient(options);
+    assert.doesNotThrow(() => new vm.Script(script));
+    assert.doesNotMatch(script, /innerHTML\s*=|insertAdjacentHTML|document\.write|secret-user-data/);
+    assert.match(script, /textContent/);
+    assert.doesNotThrow(() => vm.runInNewContext(script, {}), 'startup errors cannot escape');
+  }
 });
 
 
@@ -463,46 +491,6 @@ test('notification result has its own seq, and result-save failure preserves the
 });
 
 
-test('detail screenshot retry retains remaining files and does not re-upload saved files', async () => {
-  class Element {
-    constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.value = ''; this.files = []; }
-    append(...children) { this.children.push(...children); }
-    replaceChildren(...children) { this.children = children; }
-    addEventListener() {}
-    setAttribute() {}
-    scrollIntoView() {}
-  }
-  const ids = new Map(), element = id => { if (!ids.has(id)) ids.set(id, new Element(id)); return ids.get(id); };
-  const item = { id: 'item1', no: 1, type: 'bug', title: '标题', body: '描述', author: { name: '甲' }, status: 'open',
-    createdAt: '2026-11-11T12:00:00Z', updatedAt: '2026-11-11T12:00:00Z', approval: { state: 'none' }, files: [], comments: [] };
-  const uploaded = [];
-  const context = vm.createContext({ document: { getElementById: element, createElement: tag => new Element(tag) },
-    window: { addEventListener() {} }, location: { hash: '#item1' }, URL: { createObjectURL: file => 'blob:' + file.name, revokeObjectURL() {} }, Date,
-    fetch: async (url, options) => {
-      if (options.method === 'POST') {
-        if (options.body.name === 'bad.png') return { ok: false, status: 400, json: async () => ({ error: '无效图片' }) };
-        uploaded.push(options.body.name); item.files.push({ id: 'file' + uploaded.length, name: options.body.name });
-        return { ok: true, json: async () => ({ item: structuredClone(item) }) };
-      }
-      return { ok: true, json: async () => url.includes('/items/') ? { item: structuredClone(item), canUpload: true } : { items: [], isHandler: false } };
-    },
-  });
-  vm.runInContext(feedbackPage().match(/<script>([\s\S]*?)<\/script>/)[1], context);
-  await vm.runInContext('openDetail()', context);
-  const flatten = e => [e, ...e.children.flatMap(flatten)], elements = () => flatten(element('detail'));
-  const input = elements().find(e => e.tag === 'input');
-  input.files = ['first.png', 'bad.png', 'third.png'].map(name => ({ name, type: 'image/png', size: 12 }));
-  await input.onchange();
-  const upload = elements().find(e => e.tag === 'button' && e.textContent === '上传截图');
-  if (upload) await upload.onclick();
-  assert.deepEqual(uploaded, ['first.png']);
-  assert.equal(elements().filter(e => e.tag === 'img').length, 3, 'saved screenshot and both pending files remain visible');
-  const badPreview = elements().find(e => e.children.some(child => child.tag === 'img' && child.alt === 'bad.png'));
-  badPreview.children.find(e => e.tag === 'button').onclick();
-  await upload.onclick();
-  assert.deepEqual(uploaded, ['first.png', 'third.png']);
-});
-
 test('changes uses the default page size and caps requested batches at 200', async t => {
   const f = fixture(t);
   for (let n = 0; n < 201; n++) await f.create({ slug: 'batch-' + n, unionId: 'batch-union-' + n, name: '批量作者' });
@@ -512,4 +500,713 @@ test('changes uses the default page size and caps requested batches at 200', asy
   assert.equal(capped.items.length, 200); assert.equal(capped.next, 200);
   const last = (await f.bot('changes?since=200&limit=200')).data;
   assert.equal(last.items.length, 1); assert.equal(last.next, 201);
+});
+
+// Only the DOM operations used by this client; observer delivery is explicit and bounded.
+function browser({ href = origin + '/', language, storedLanguage, maxImageBytes = 40, request = async () => ({ items: [], isHandler: false }) } = {}) {
+  const observers = [], callbacks = new Map(), reads = [], alerts = [], replacements = [], scrolls = [];
+  let deliveries = 0;
+  const notify = target => {
+    for (const o of observers) if (o.target && (o.target === target || (o.options.subtree && o.target.contains(target)))) o.pending = true;
+  };
+  class Element {
+    constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.value = ''; this.files = []; this.listeners = {}; this.className = ''; this._text = ''; }
+    set textContent(value) { this._text = String(value); this.replaceChildren(); }
+    get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
+    append(...children) { children.forEach(c => this.insertBefore(c, null)); }
+    appendChild(child) { this.append(child); return child; }
+    insertBefore(child, before) {
+      if (child.parentNode) child.remove();
+      const index = before ? this.children.indexOf(before) : this.children.length;
+      assert.notEqual(index, -1); this.children.splice(index, 0, child); child.parentNode = this; notify(this); return child;
+    }
+    replaceChildren(...children) { this.children.forEach(c => { c.parentNode = null; }); this.children = []; this.append(...children); notify(this); }
+    remove() { if (this.parentNode) { const p = this.parentNode; p.children.splice(p.children.indexOf(this), 1); this.parentNode = null; notify(p); } }
+    contains(target) { return this === target || this.children.some(c => c.contains(target)); }
+    setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'id') this.id = value; }
+    getAttribute(key) { return key === 'id' ? this.id : key === 'type' ? this.type : this.attributes[key]; }
+    matches(selector) {
+      if (selector.startsWith('#')) return this.id === selector.slice(1);
+      const attr = selector.match(/\[([^=\]]+)(?:=["']?([^"'\]]+)["']?)?\]/);
+      if (attr && (attr[2] === undefined ? this.getAttribute(attr[1]) === undefined : this.getAttribute(attr[1]) !== attr[2])) return false;
+      const cls = selector.match(/\.([\w-]+)/); if (cls && !this.className.split(' ').includes(cls[1])) return false;
+      const tag = selector.match(/^[\w-]+/); return !tag || this.tag === tag[0];
+    }
+    querySelectorAll(selector) { return this.children.flatMap(c => [c, ...c.querySelectorAll('*')]).filter(c => selector.split(',').some(s => c.matches(s.trim()))); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
+    async fire(type, values = {}) { const event = { target: this, preventDefault() {}, stopPropagation() {}, ...values }; for (const fn of this.listeners[type] || []) await fn(event); if (this['on' + type]) await this['on' + type](event); }
+    showModal() { this.open = true; }
+    close() { this.open = false; this.fire('close'); }
+    focus(options) { document.activeElement = this; this.focusOptions = options; }
+    scrollIntoView() { scrolls.push({ element: this, kind: 'intoView' }); }
+    get scrollTop() { return this._scrollTop || 0; }
+    set scrollTop(top) { this._scrollTop = top; scrolls.push({ element: this, top }); }
+    get clientTop() { return 1; }
+    get previousElementSibling() { return this.parentNode?.children[this.parentNode.children.indexOf(this) - 1] || null; }
+    get lastElementChild() { return this.children.at(-1) || null; }
+    click() { this.clicks = (this.clicks || 0) + 1; }
+    reset() { this.querySelectorAll('input, textarea').forEach(e => { e.value = ''; }); }
+    get isConnected() { return document.body?.contains(this) || document.head.contains(this); }
+    get offsetHeight() { return Math.min(this.children.length * 34, Number.parseFloat(this.style.maxHeight) || 500); }
+    get offsetWidth() { return 220; }
+    getBoundingClientRect() {
+      if (this.rect) return this.rect;
+      if (this.tag === 'dialog' || this.className === 'wp-feedback-content') return { top: 12, bottom: 628, left: 12, right: 348, width: 336, height: 616 };
+      let parent = this.parentNode;
+      while (parent && parent.className !== 'wp-feedback-content') parent = parent.parentNode;
+      const top = parent ? (this.id === 'wp-feedback-detail' ? 1400 : this.className === 'wp-feedback-message' ? 1200 : 800) - parent.scrollTop : 550;
+      return { top, bottom: top + 40, left: 10, right: 230, width: 220, height: 40 };
+    }
+  }
+  const document = {
+    readyState: 'loading', body: null, head: new Element('head'), documentElement: { lang: 'zh-CN' },
+    createElement: tag => new Element(tag),
+    querySelectorAll: s => document.body?.querySelectorAll(s) || [],
+    querySelector: s => document.body?.querySelector(s) || null,
+    addEventListener: (type, fn) => callbacks.set(type, fn),
+  };
+  const location = new URL(href), history = { state: { retained: true }, replaceState(state, title, value) { replacements.push(value); assert.equal(state, this.state); location.href = new URL(value, location).href; } };
+  const window = { innerWidth: 360, innerHeight: 640, addEventListener() {}, alert: text => alerts.push(text) };
+  if (language) window.wpSettings = { get: () => ({ language }) };
+  class BrowserURL extends URL { static createObjectURL(file) { return 'blob:' + file.name; } static revokeObjectURL() {} }
+  const context = vm.createContext({ document, window, location, history, URL: BrowserURL,
+    localStorage: { getItem: key => key === 'i18nextLng' ? storedLanguage : null },
+    MutationObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe(target, options) { assert.ok(target); this.target = target; this.options = options; } disconnect() { this.target = null; this.pending = false; } },
+    fetch: async (url, options) => { reads.push({ url, options }); const result = await request(url, options); return { ok: !result.status || result.status < 400, status: result.status || 200, json: async () => result }; },
+  });
+  vm.runInContext(feedbackClient({ maxImageBytes, maxImagesPerItem: 3 }), context);
+  function flush() { for (let n = 0; observers.some(o => o.pending); n++) { assert.ok(n < 20, 'observer must settle'); for (const o of observers) if (o.pending) { o.pending = false; deliveries++; o.fn([]); } } }
+  async function tick() { await new Promise(resolve => setImmediate(resolve)); flush(); }
+  async function ready() { document.body = new Element('body'); document.readyState = 'interactive'; callbacks.get('DOMContentLoaded')?.(); await tick(); }
+  function menu(logout = true, separator = true) { const m = new Element('div'); m.className = 'wp-pick-menu wp-settings-menu'; document.body.append(m); redraw(m, logout, separator); return m; }
+  function redraw(m, logout = true, separator = true) { m.replaceChildren(); if (separator) { const sep = new Element('div'); sep.className = 'wp-pick-sep'; m.append(sep); } if (logout) { const b = new Element('button'); b.className = 'wp-pick-item'; b.setAttribute('role', 'menuitem'); b.textContent = 'Logout'; m.append(b); } flush(); }
+  async function open() { const m = menu(); const b = m.querySelector('[data-wp-feedback]'); assert.ok(b); await b.fire('click'); await tick(); return document.querySelector('dialog'); }
+  return { document, window, location, replacements, reads, alerts, scrolls, ready, menu, redraw, open, tick, flush, Element, get deliveries() { return deliveries; } };
+}
+
+const browserItem = () => ({ id: 'item1', no: 1, type: 'bug', title: '<img onerror=bad>', body: '描述', author: { name: '甲' }, status: 'open',
+  createdAt: '2026-11-11T12:00:00Z', updatedAt: '2026-11-11T12:00:00Z', approval: { state: 'none' }, files: [], comments: [] });
+
+test('menu insertion survives complete redraws, follows overlay language and settles', async () => {
+  const b = browser({ storedLanguage: 'en-US' }); await b.ready();
+  const avatar = new b.Element('button'); avatar.className = 'wp-user'; b.document.body.append(avatar);
+  const menu = b.menu();
+  for (let n = 0; n < 4; n++) {
+    const buttons = menu.querySelectorAll('[data-wp-feedback]'); assert.equal(buttons.length, 1);
+    assert.equal(buttons[0].textContent, n ? '反馈' : 'Feedback');
+    assert.equal(menu.children.at(-1).textContent, 'Logout'); assert.equal(menu.children.at(-2), buttons[0]);
+    assert.equal(menu.children.at(-3).className, 'wp-pick-sep');
+    assert.ok(Number.parseFloat(menu.style.top) >= 8); assert.ok(Number.parseFloat(menu.style.top) + menu.offsetHeight <= 632);
+    b.window.wpSettings = { get: () => ({ language: 'zh-CN' }) }; b.redraw(menu);
+  }
+  assert.ok(b.deliveries < 20);
+  b.redraw(menu, false); assert.equal(menu.children.at(-1).textContent, '反馈');
+  await menu.querySelector('[data-wp-feedback]').fire('click'); await b.tick();
+  assert.equal(b.document.querySelector('.wp-pick-menu'), null); assert.equal(avatar.getAttribute('aria-expanded'), 'false');
+  assert.equal(b.document.querySelector('dialog').open, true); assert.equal(b.location.href, origin + '/');
+});
+
+test('deep links are consumed synchronously, preserve other parameters/routes and open after DOM ready', async () => {
+  for (const [suffix, clean, detail, opens] of [
+    ['?keep=2&wp-feedback=item1', '?keep=2', 'item1', true], ['?wp-feedback=1#item1', '', 'item1', true],
+    ['?wp-feedback=1#1', '', '1', true], ['?wp-feedback=1#/market', '#/market', false, true], ['?keep=2&wp-feedback=item1#/market', '?keep=2#/market', 'item1', true],
+    ['?wp-feedback=bad%2Fid#bad!', '#bad!', false, false], ['?wp-feedback=1#bad!', '', false, true],
+    ['?keep=2#/market', '?keep=2#/market', false, false],
+  ]) {
+    const b = browser({ href: origin + '/' + suffix, request: async url => url.includes('/items/') ? { item: browserItem(), canUpload: true } : { items: [], isHandler: false } });
+    assert.equal(b.location.href, origin + '/' + clean); assert.equal(b.reads.length, 0, 'head execution performs no DOM or API work');
+    await b.ready(); assert.equal(Boolean(b.document.querySelector('dialog')?.open), opens);
+    assert.equal(b.reads.some(r => r.url === base + '/items/' + detail), Boolean(detail));
+  }
+});
+
+test('detail screenshot retry retains remaining files and does not re-upload saved files', async () => {
+  const item = browserItem(), uploaded = [];
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') {
+      if (options.body.name === 'bad.png') return { status: 400, error: '无效图片' };
+      uploaded.push(options.body.name); item.files.push({ id: 'file' + uploaded.length, name: options.body.name });
+      return { item: structuredClone(item) };
+    }
+    return url.includes('/items/') ? { item: structuredClone(item), canUpload: true } : { items: [], isHandler: false };
+  } });
+  await b.ready();
+  const detail = b.document.querySelector('#wp-feedback-detail'), input = detail.querySelector('input'); assert.ok(input);
+  input.files = ['first.png', 'bad.png', 'third.png'].map(name => ({ name, type: 'image/png', size: 12 })); await input.fire('change');
+  const upload = detail.querySelectorAll('button').find(e => e.textContent === '上传截图'); assert.ok(upload); await upload.fire('click'); await b.tick();
+  assert.deepEqual(uploaded, ['first.png']); assert.equal(detail.querySelectorAll('img').length, 3);
+  const bad = detail.querySelectorAll('img').find(img => img.alt === 'bad.png'); await bad.parentNode.querySelector('button').fire('click');
+  await upload.fire('click'); await b.tick(); assert.deepEqual(uploaded, ['first.png', 'third.png']);
+});
+
+test('list access revoked closes dialog and permanently removes the menu entry', async () => {
+  for (const status of [401, 404]) {
+    const b = browser({ request: async () => ({ status }) }); await b.ready(); await b.open();
+    assert.equal(b.document.querySelector('dialog').open, false); assert.equal(b.alerts.length, 1);
+    const menu = b.menu(); assert.equal(menu.querySelector('[data-wp-feedback]'), null);
+  }
+});
+
+const buttonWith = (root, text) => { const button = root.querySelectorAll('button').find(n => n.textContent === text); assert.ok(button, 'button: ' + text); return button; };
+const screenshot = name => ({ name, type: 'image/png', size: 12 });
+function pasteFiles(files) { return { clipboardData: { items: files.map(file => ({ kind: 'file', getAsFile: () => file })) } }; }
+
+test('draft controls survive localization/reopen and partial upload retries create only one feedback item', async () => {
+  const item = browserItem(), uploads = []; let creates = 0;
+  const b = browser({ request: async (url, options) => {
+    if (options.method === 'POST') {
+      if (url === base) { creates++; assert.deepEqual(JSON.parse(options.body), { type: 'feature', title: 'My title', body: 'My description' }); return { item: structuredClone(item) }; }
+      if (options.body.name === 'bad.png') return { status: 400, error: 'bad screenshot' };
+      uploads.push(options.body.name); item.files.push({ id: 'file' + uploads.length, name: options.body.name }); return { item: structuredClone(item) };
+    }
+    return url.includes('/items/') ? { item: structuredClone(item), canUpload: true } : { items: [item], isHandler: false };
+  } });
+  await b.ready(); const dialog = await b.open(), form = dialog.querySelector('form');
+  const type = form.querySelector('select'); assert.ok(type, 'type select remains mounted after translation'); type.value = 'feature';
+  form.querySelector('#wp-feedback-title').value = 'My title'; form.querySelector('#wp-feedback-body').value = 'My description';
+  await form.fire('paste', pasteFiles([screenshot('first.png'), screenshot('bad.png'), screenshot('third.png')]));
+  await form.fire('submit'); await b.tick();
+  assert.equal(creates, 1); assert.deepEqual(uploads, ['first.png']);
+  assert.equal(form.querySelector('#wp-feedback-body').value, 'My description'); assert.equal(form.querySelector('fieldset').disabled, true);
+  const bad = form.querySelectorAll('img').find(img => img.alt === 'bad.png'); assert.ok(bad); await bad.parentNode.querySelector('button').fire('click');
+  dialog.close(); b.window.wpSettings = { get: () => ({ language: 'en-US' }) }; await b.open();
+  assert.equal(form.querySelector('select').value, 'feature'); assert.match(form.textContent, /Screenshots/); assert.doesNotMatch(form.textContent, /截图（/);
+  await form.fire('submit'); await b.tick();
+  assert.equal(creates, 1); assert.deepEqual(uploads, ['first.png', 'third.png']);
+  assert.equal(form.querySelector('#wp-feedback-body').value, ''); assert.equal(form.querySelector('fieldset').disabled, false);
+  assert.equal(b.location.href, origin + '/');
+  for (const read of b.reads) assert.equal(read.options.credentials, 'same-origin');
+});
+
+test('file validation reports format, size and count limits; failed create retains editable input', async () => {
+  const b = browser({ request: async (url, options) => options.method === 'POST' ? { status: 503, error: 'offline' } : { items: [], isHandler: false } });
+  await b.ready(); const dialog = await b.open(), form = dialog.querySelector('form');
+  const input = form.querySelector('input[type=file]');
+  for (const [files, text] of [
+    [[{ name: 'x.gif', type: 'image/gif', size: 12 }], /PNG、JPEG 或 WebP/],
+    [[{ ...screenshot('big.png'), size: 41 }], /0\.1 KB/],
+    [[1, 2, 3, 4].map(n => screenshot(n + '.png')), /最多上传 3 张/],
+  ]) { input.files = files; await input.fire('change'); assert.match(form.textContent, text); }
+  assert.equal(form.querySelectorAll('img').length, 3);
+  const title = form.querySelector('#wp-feedback-title'), body = form.querySelector('#wp-feedback-body'); title.value = 'untouched'; body.value = 'still here';
+  await form.fire('submit'); await b.tick();
+  assert.match(form.textContent, /offline/); assert.equal(title.value, 'untouched'); assert.equal(body.value, 'still here');
+  assert.equal(form.querySelector('fieldset').disabled, false); assert.equal(form.querySelectorAll('img').length, 3);
+});
+
+test('handler scope, literal API text, comment errors and refresh preserve drafts without changing routing', async () => {
+  const item = browserItem(); item.approval = { state: 'pending', note: '<script>text</script>' }; item.pr = 'https://example.test/pr/1';
+  let failComment = true;
+  const b = browser({ href: origin + '/#/market', request: async (url, options) => {
+    if (options.method === 'POST') {
+      assert.equal(url, base + '/items/item1/comments');
+      if (failComment) return { status: 503, error: 'comment failed' };
+      item.comments.push({ text: JSON.parse(options.body).text, by: { name: 'User' }, at: item.createdAt }); item.status = 'in_progress';
+      return { item: structuredClone(item) };
+    }
+    return url.includes('/items/') ? { item: structuredClone(item), canUpload: true } : { items: [item], isHandler: true };
+  } });
+  await b.ready(); const dialog = await b.open(); await buttonWith(dialog, '全部反馈').fire('click'); await b.tick();
+  assert.equal(b.reads.at(-1).url, base + '?scope=all');
+  await dialog.querySelector('.wp-feedback-entry').fire('click'); await b.tick();
+  const detail = dialog.querySelector('#wp-feedback-detail'); assert.match(detail.textContent, /<img onerror=bad>/); assert.equal(detail.querySelector('img'), null);
+  assert.match(detail.textContent, /<script>text<\/script>/); assert.equal(detail.querySelector('script'), null); assert.equal(detail.querySelector('a').href, item.pr);
+  let form = detail.querySelector('form'), area = form.querySelector('textarea'); area.value = 'draft comment'; await area.fire('input');
+  await form.fire('submit'); assert.match(form.textContent, /comment failed/); assert.equal(area.value, 'draft comment');
+  await buttonWith(dialog, '刷新').fire('click'); await b.tick();
+  form = detail.querySelector('form'); area = form.querySelector('textarea'); assert.equal(area.value, 'draft comment');
+  failComment = false; await form.fire('submit'); await b.tick();
+  assert.equal(detail.querySelector('textarea').value, ''); assert.match(detail.textContent, /处理中/); assert.match(detail.textContent, /draft comment/);
+  assert.equal(b.location.hash, '#/market');
+  await dialog.fire('click', { clientX: 0, clientY: 0 }); assert.equal(dialog.open, false);
+});
+
+test('same-item refresh preserves focus on the list refresh button', async () => {
+  const item = browserItem();
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url =>
+    url.includes('/items/') ? { item, canUpload: true } : { items: [item], isHandler: false } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const refresh = buttonWith(dialog, '刷新'), heading = detail.querySelector('h3');
+  refresh.focus();
+  await refresh.fire('click'); await b.tick();
+  assert.deepEqual(b.reads.slice(-2).map(r => r.url), [base, base + '/items/item1']);
+  assert.notEqual(detail.querySelector('h3'), heading, 'detail must finish rendering');
+  assert.equal(b.document.activeElement, refresh);
+});
+
+test('successful comment refresh focuses the detail heading after focus falls to the body', async () => {
+  const item = browserItem();
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') {
+      assert.equal(url, base + '/items/item1/comments');
+      item.comments.push({ text: JSON.parse(options.body).text, by: { name: 'User' }, at: item.createdAt });
+      return { item };
+    }
+    return url.includes('/items/') ? { item, canUpload: true } : { items: [item], isHandler: false };
+  } });
+  await b.ready(); const detail = b.document.querySelector('#wp-feedback-detail'), form = detail.querySelector('form');
+  const area = form.querySelector('textarea'); area.value = 'New comment'; await area.fire('input'); area.focus();
+  const submitting = form.fire('submit');
+  assert.equal(area.disabled, true);
+  // Model the browser moving focus to the body when the focused control is disabled.
+  b.document.body.focus();
+  await submitting; await b.tick();
+  assert.deepEqual(b.reads.slice(-3).map(r => r.url), [base + '/items/item1/comments', base, base + '/items/item1']);
+  assert.equal(detail.querySelector('textarea').value, ''); assert.match(detail.textContent, /New comment/);
+  const heading = detail.querySelector('h3');
+  assert.equal(b.document.activeElement, heading); assert.equal(heading.focusOptions.preventScroll, true);
+});
+
+test('successful submission preserves a failed list refresh message without opening detail', async () => {
+  const item = browserItem(); let saved = false;
+  const b = browser({ language: 'en-US', request: async (url, options) => {
+    if (options.method === 'POST') { saved = true; return { item }; }
+    if (url === base) return saved ? { status: 500, error: 'List refresh failed' } : { items: [], isHandler: false };
+    return { item, canUpload: true };
+  } });
+  await b.ready(); const dialog = await b.open(), form = dialog.querySelector('form');
+  const title = form.querySelector('#wp-feedback-title'), body = form.querySelector('#wp-feedback-body');
+  title.value = 'New feedback'; body.value = 'Description'; form.querySelector('select').value = 'feature';
+  await form.fire('submit'); await b.tick();
+  assert.match(form.textContent, /Feedback submitted\./);
+  assert.ok(dialog.querySelectorAll('.wp-feedback-message').some(n => n.textContent === 'List refresh failed'));
+  assert.deepEqual(b.reads.map(r => [r.options.method, r.url]), [['GET', base], ['POST', base], ['GET', base]]);
+  assert.equal(dialog.querySelector('#wp-feedback-detail').hidden, true);
+  assert.equal(title.value, ''); assert.equal(body.value, ''); assert.equal(form.querySelector('select').value, 'bug');
+  assert.equal(form.querySelector('fieldset').disabled, false);
+});
+
+test('a detail refresh started before a write cannot replace the busy editor or lose its draft', async () => {
+  for (const action of ['comment', 'upload']) {
+    let releaseGet, releasePost, detailReads = 0;
+    const item = browserItem();
+    const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+      if (options.method === 'POST') return new Promise(resolve => { releasePost = () => resolve({ status: 503, error: 'write failed' }); });
+      if (url.includes('/items/')) { if (++detailReads === 2) await new Promise(resolve => { releaseGet = resolve; }); return { item: structuredClone(item), canUpload: true }; }
+      return { items: [item], isHandler: false };
+    } });
+    await b.ready();
+    const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail'), form = detail.querySelector('form');
+    const area = form.querySelector('textarea'); area.value = 'keep this comment'; await area.fire('input');
+    if (action === 'upload') await detail.fire('paste', pasteFiles([screenshot('pending.png')]));
+    const refreshing = buttonWith(dialog, '刷新').fire('click'); await b.tick(); assert.ok(releaseGet);
+    const writing = action === 'comment' ? form.fire('submit') : buttonWith(detail, '上传截图').fire('click');
+    await b.tick(); assert.ok(releasePost);
+    // Repeated attempts while the first write is in flight must not send another POST.
+    if (action === 'comment') await form.fire('submit'); else await buttonWith(detail, '上传截图').fire('click');
+    assert.equal(b.reads.filter(r => r.options.method === 'POST').length, 1);
+    releaseGet(); await refreshing; await b.tick();
+    assert.equal(detail.querySelector('textarea'), area, 'late read must not replace the busy editor');
+    releasePost(); await writing; await b.tick();
+    assert.equal(area.value, 'keep this comment'); assert.match(detail.textContent, /write failed/);
+    if (action === 'upload') assert.equal(detail.querySelectorAll('img').length, 1);
+  }
+});
+
+test('English UI localizes server validation/quota/storage errors', async () => {
+  for (const [status, error, expected] of [[400, '描述不能为空，且不能超过 8000 字。', /input|text/i],
+    [429, '每天最多提交 30 条反馈，请明天再试。', /tomorrow/i], [503, '暂时无法保存反馈，请刷新核实后重试。', /save|saved/i]]) {
+    const b = browser({ language: 'en-US', request: async (url, options) => options.method === 'POST' ? { status, error } : { items: [], isHandler: false } });
+    await b.ready(); const dialog = await b.open(), form = dialog.querySelector('form');
+    await form.fire('submit'); await b.tick();
+    assert.match(form.textContent, expected); assert.ok(!form.textContent.includes(error));
+  }
+});
+
+test('an overlay exception inside observer/event callbacks cannot escape into the main UI', async () => {
+  const b = browser(); await b.ready(); await b.open();
+  b.window.wpSettings = { get() { throw new Error('settings unavailable'); } };
+  assert.doesNotThrow(() => b.menu()); await b.tick();
+});
+
+function assertDialogScrolledTo(b, target) {
+  const content = b.document.querySelector('.wp-feedback-content');
+  assert.ok(content);
+  assert.ok(b.scrolls.length, 'must scroll after rendering the target');
+  assert.ok(b.scrolls.every(s => s.element === content && s.kind !== 'intoView'), 'only the dialog content may scroll');
+  const gap = target.getBoundingClientRect().top - content.getBoundingClientRect().top;
+  assert.ok(gap >= content.clientTop && gap <= 32, `target near dialog top: ${gap}`);
+}
+
+test('initial detail and successful submission scroll inside the dialog after the list renders', async () => {
+  for (const initial of [true, false]) {
+    const b = browser({ href: origin + (initial ? '/?wp-feedback=item1' : '/'), request: async url =>
+      url.includes('/items/') ? { item: browserItem(), canUpload: true } : { item: browserItem(), items: [browserItem()], isHandler: false } });
+    await b.ready(); const dialog = initial ? b.document.querySelector('dialog') : await b.open();
+    if (!initial) await dialog.querySelector('form').fire('submit');
+    await b.tick();
+    assert.deepEqual(b.reads.slice(-2).map(r => r.url), [base, base + '/items/item1'], 'refresh list before positioning detail');
+    assertDialogScrolledTo(b, dialog.querySelector('#wp-feedback-detail'));
+    const heading = dialog.querySelector('#wp-feedback-detail').querySelector('h3');
+    assert.equal(b.document.activeElement, heading); assert.ok(dialog.contains(b.document.activeElement));
+    assert.equal(heading.getAttribute('tabindex'), '-1'); assert.equal(heading.focusOptions.preventScroll, true);
+  }
+});
+
+test('unavailable initial detail scrolls its error into the dialog viewport', async () => {
+  for (const status of [404, 500]) {
+    const b = browser({ href: origin + '/?wp-feedback=missing', request: async url =>
+      url.includes('/items/') ? { status, error: 'Cannot open feedback' } : { items: [browserItem()], isHandler: false } });
+    await b.ready();
+    const msg = b.document.querySelectorAll('.wp-feedback-message').find(n => n.textContent === 'Cannot open feedback');
+    assert.ok(msg); assertDialogScrolledTo(b, msg);
+  }
+});
+
+test('back to list collapses details and list clicks still switch between items', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    const second = { ...browserItem(), id: 'item2', no: 2, title: 'Second' };
+    const b = browser({ language, href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+      ? { item: url.endsWith('item2') ? second : browserItem(), canUpload: true } : { items: [browserItem(), second], isHandler: false } });
+    await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+    await dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click');
+    assert.match(detail.textContent, /Second/); assertDialogScrolledTo(b, detail);
+    await buttonWith(detail, language === 'en-US' ? 'Back to list' : '返回列表').fire('click');
+    assert.equal(detail.hidden, true);
+    const title = dialog.querySelectorAll('h3').find(n => n.textContent === (language === 'en-US' ? 'My feedback' : '我的反馈'));
+    assertDialogScrolledTo(b, title);
+    assert.ok(dialog.contains(b.document.activeElement)); assert.equal(b.document.activeElement, title);
+    assert.equal(title.getAttribute('tabindex'), '-1'); assert.equal(title.focusOptions.preventScroll, true);
+    await dialog.querySelector('.wp-feedback-entry').fire('click');
+    assert.equal(detail.hidden, false); assert.match(detail.textContent, /<img onerror=bad>/);
+  }
+});
+
+test('menu reuses overlay separators across redraws and revocation removes only owned separators', async () => {
+  for (const separator of [true, false]) for (const status of [401, 404]) {
+    let denied = false;
+    const b = browser({ request: async () => denied ? { status } : { items: [], isHandler: false } });
+    await b.ready(); const dialog = await b.open(), menu = b.menu(true, separator);
+    for (let n = 0; n < 4; n++) {
+      assert.equal(menu.querySelectorAll('.wp-pick-sep').length, 1);
+      assert.equal(menu.querySelectorAll('[data-wp-feedback-separator]').length, separator ? 0 : 1);
+      assert.equal(menu.querySelectorAll('[data-wp-feedback]').length, 1);
+      b.redraw(menu, true, separator);
+    }
+    const original = separator ? menu.querySelector('.wp-pick-sep') : null;
+    denied = true; await buttonWith(dialog, '刷新').fire('click');
+    assert.equal(menu.querySelector('[data-wp-feedback]'), null);
+    assert.equal(menu.querySelectorAll('.wp-pick-sep').length, separator ? 1 : 0);
+    if (original) assert.equal(original.parentNode, menu);
+    b.redraw(menu, true, separator); assert.equal(menu.querySelector('[data-wp-feedback]'), null);
+  }
+});
+
+test('size hints and validation use localized MB or KB while enforcing the byte limit', async () => {
+  for (const language of ['zh-CN', 'en-US']) for (const [maxImageBytes, expected] of [
+    [5242880, '5 MB'], [300000, '0.3 MB'], [1572864, '1.5 MB'], [102400, '100 KB'], [1536, '1.5 KB'],
+  ]) {
+    const b = browser({ language, maxImageBytes }); await b.ready(); const form = (await b.open()).querySelector('form');
+    assert.ok(form.textContent.includes(expected)); assert.doesNotMatch(form.textContent, /字节|bytes|5\.0 MB/);
+    const input = form.querySelector('input[type=file]');
+    input.files = [{ ...screenshot('limit.png'), size: maxImageBytes }]; await input.fire('change');
+    assert.equal(form.querySelectorAll('img').length, 1);
+    input.files = [{ ...screenshot('too-big.png'), size: maxImageBytes + 1 }]; await input.fire('change');
+    assert.ok(form.querySelector('.wp-feedback-message').textContent.includes(expected));
+    assert.equal(form.querySelectorAll('img').length, 1);
+  }
+});
+
+test('invalid API list and detail item ids never render actions or produce dependent requests', async () => {
+  for (const id of ['..', 'bad/id', '']) {
+    const invalid = { ...browserItem(), id, title: 'Invalid item', files: [{ id: 'file1', name: 'bad.png' }] };
+    const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+      ? { item: invalid, canUpload: true } : { items: [invalid, browserItem()], isHandler: false } });
+    await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+    assert.equal(dialog.querySelectorAll('.wp-feedback-entry').length, 1);
+    assert.doesNotMatch(detail.textContent, /Invalid item/);
+    assert.equal(detail.querySelectorAll('img, a, form, input').length, 0);
+    assert.deepEqual(b.reads.map(r => r.url), [base, base + '/items/item1']);
+    assert.equal(b.alerts.length, 0);
+  }
+});
+
+test('invalid created or uploaded item ids never become upload or detail URLs', async () => {
+  for (const id of ['..', 'bad/id', '']) for (const phase of ['create', 'upload']) {
+    const b = browser({ request: async (url, options) => options.method === 'POST'
+      ? { item: { ...browserItem(), id: phase === 'upload' && url === base ? 'item1' : id } }
+      : { items: [], isHandler: false } });
+    await b.ready(); const form = (await b.open()).querySelector('form');
+    await form.fire('paste', pasteFiles([screenshot('one.png'), screenshot('two.png')]));
+    await form.fire('submit'); await b.tick();
+    const writes = b.reads.filter(r => r.options.method === 'POST');
+    assert.deepEqual(writes.map(r => r.url), phase === 'create' ? [base] : [base, base + '/items/item1/files?filename=one.png']);
+    assert.ok(b.reads.every(r => r.url === base || r.url === base + '/items/item1/files?filename=one.png'));
+    assert.equal(b.document.querySelector('#wp-feedback-detail').querySelectorAll('img, a').length, 0);
+  }
+});
+
+test('invalid file ids are omitted from screenshot links on detail load and after upload', async () => {
+  const files = ['..', 'bad/id', '', 'safe_-1'].map(id => ({ id, name: id || 'empty' }));
+  let uploaded = false;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') uploaded = true;
+    return url.includes('/items/') ? { item: { ...browserItem(), files: uploaded ? files : files.slice(0, 2) }, canUpload: true } : { items: [], isHandler: false };
+  } });
+  await b.ready(); const detail = b.document.querySelector('#wp-feedback-detail');
+  assert.equal(detail.querySelectorAll('img, a').length, 0);
+  await detail.fire('paste', pasteFiles([screenshot('new.png')])); await buttonWith(detail, '上传截图').fire('click');
+  assert.equal(detail.querySelectorAll('img').length, 1); assert.equal(detail.querySelectorAll('a').length, 1);
+  assert.equal(detail.querySelector('img').src, base + '/items/item1/files/safe_-1');
+  assert.equal(detail.querySelector('a').href, base + '/items/item1/files/safe_-1');
+});
+
+test('concrete feedback parameters preserve unrelated hashes', async () => {
+  for (const id of ['item1', 'bad%2Fid', '']) {
+    const b = browser({ href: origin + '/?wp-feedback=' + id + '#foo' });
+    assert.equal(b.location.hash, '#foo'); assert.equal(b.location.search, '');
+  }
+});
+
+test('consuming feedback parameters preserves the raw bytes of every other query segment', () => {
+  for (const [query, expected] of [
+    ['?a=%20b&wp-feedback=1&flag', '?a=%20b&flag'],
+    ['?wp-feedback=item1&a=one+two&x=%2f&flag=&a=%7e', '?a=one+two&x=%2f&flag=&a=%7e'],
+    ['?flag&wp%2Dfeedback=1&wp-feedback=item2&x=%26%3d', '?flag&x=%26%3d'],
+    ['?x=1&&wp-feedback=1&', '?x=1&&'],
+  ]) {
+    const b = browser({ href: origin + '/' + query + '#/market' });
+    assert.equal(b.location.search, expected); assert.equal(b.location.hash, '#/market'); assert.equal(b.reads.length, 0);
+  }
+});
+
+test('handled screenshot paste stops propagation in draft and detail without intercepting keydown', async () => {
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+    ? { item: browserItem(), canUpload: true } : { items: [], isHandler: false } });
+  await b.ready(); const dialog = b.document.querySelector('dialog');
+  for (const target of [dialog.querySelector('form'), dialog.querySelector('#wp-feedback-detail')]) {
+    for (const files of [[], [screenshot('paste.png')]]) {
+      let prevented = 0, stopped = 0;
+      await target.fire('paste', { ...pasteFiles(files), preventDefault() { prevented++; }, stopPropagation() { stopped++; } });
+      assert.equal(prevented, files.length); assert.equal(stopped, files.length);
+    }
+  }
+  assert.ok([dialog, ...dialog.querySelectorAll('*')].every(n => !n.listeners.keydown && !n.onkeydown));
+});
+
+test('menu positioning uses the expanded avatar and leaves styles intact for zero-size anchors', async () => {
+  for (const size of [[0, 40], [220, 0], [220, 40]]) {
+    const b = browser(); await b.ready();
+    const first = new b.Element('button'); first.className = 'wp-user'; b.document.body.append(first);
+    const active = new b.Element('button'); active.className = 'wp-user'; active.setAttribute('aria-expanded', 'true');
+    active.rect = { top: 400, bottom: 440, left: 90, right: 310, width: size[0], height: size[1] }; b.document.body.append(active);
+    const menu = b.menu();
+    if (!size[0] || !size[1]) {
+      assert.deepEqual(menu.style, {});
+      Object.assign(menu.style, { top: '37px', left: '21px', maxHeight: '123px', overflowY: 'scroll' });
+      b.redraw(menu);
+      assert.deepEqual(menu.style, { top: '37px', left: '21px', maxHeight: '123px', overflowY: 'scroll' });
+    }
+    else { assert.equal(menu.style.left, '90px'); assert.equal(menu.style.top, '292px'); }
+  }
+});
+
+test('localized image picker triggers the focusable labelled file input and mirrors its disabled state', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    const b = browser({ language, href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+      ? { item: browserItem(), canUpload: true } : { items: [], isHandler: false } });
+    await b.ready(); const dialog = b.document.querySelector('dialog');
+    for (const root of [dialog.querySelector('form'), dialog.querySelector('#wp-feedback-detail')]) {
+      const picker = buttonWith(root, language === 'en-US' ? 'Choose images' : '选择图片'), input = root.querySelector('input[type=file]');
+      assert.equal(picker.type, 'button'); assert.equal(Boolean(input.hidden), false); assert.notEqual(input.tabIndex, -1);
+      assert.equal(input.parentNode.tag, 'label'); assert.equal(picker.disabled, false);
+      await picker.fire('click'); assert.equal(input.clicks, 1);
+      input.files = [1, 2, 3].map(n => screenshot(n + '.png')); await input.fire('change');
+      assert.equal(input.disabled, true); assert.equal(picker.disabled, true);
+      await buttonWith(root, language === 'en-US' ? 'Remove' : '删除').fire('click');
+      assert.equal(input.disabled, false); assert.equal(picker.disabled, false);
+    }
+  }
+});
+
+test('back to list invalidates an outstanding detail read without losing drafts', async () => {
+  let release, reads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => {
+    if (!url.includes('/items/')) return { items: [browserItem()], isHandler: false };
+    if (++reads === 2) await new Promise(resolve => { release = resolve; });
+    return { item: browserItem(), canUpload: true };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const area = detail.querySelector('textarea'); area.value = 'Keep draft'; await area.fire('input');
+  const refreshing = buttonWith(dialog, '刷新').fire('click'); await b.tick(); assert.ok(release);
+  await buttonWith(detail, '返回列表').fire('click');
+  const scrollCount = b.scrolls.length; release(); await refreshing;
+  assert.equal(detail.hidden, true); assert.equal(b.scrolls.length, scrollCount);
+  await dialog.querySelector('.wp-feedback-entry').fire('click');
+  assert.equal(detail.hidden, false); assert.equal(detail.querySelector('textarea').value, 'Keep draft');
+});
+
+test('back to list during post-comment refresh stays collapsed when the response arrives', async () => {
+  let releaseList, listReads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST' || url.includes('/items/')) return { item: browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem()], isHandler: false };
+  } });
+  await b.ready(); const detail = b.document.querySelector('#wp-feedback-detail');
+  detail.querySelector('textarea').value = 'Comment';
+  const submitting = detail.querySelector('form').fire('submit'); await b.tick(); assert.ok(releaseList);
+  await buttonWith(detail, '返回列表').fire('click'); assert.equal(detail.hidden, true);
+  const detailReads = b.reads.filter(r => r.url === base + '/items/item1').length;
+  releaseList(); await submitting; await b.tick();
+  assert.equal(detail.hidden, true);
+  assert.equal(b.reads.filter(r => r.url === base + '/items/item1').length, detailReads);
+});
+
+test('back to list during dialog reopen wins over its pending list refresh', async () => {
+  let releaseList, listReads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => {
+    if (url.includes('/items/')) return { item: browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem()], isHandler: false };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  dialog.close(); const reopening = b.open(); await b.tick(); assert.ok(releaseList);
+  await buttonWith(detail, '返回列表').fire('click');
+  releaseList(); await reopening;
+  assert.equal(detail.hidden, true);
+  assert.equal(b.reads.filter(r => r.url === base + '/items/item1').length, 1);
+});
+
+test('back to list during post-submission refresh stays collapsed', async () => {
+  let releaseList, listReads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST' || url.includes('/items/')) return { item: browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem()], isHandler: false };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const submitting = dialog.querySelector('form').fire('submit'); await b.tick(); assert.ok(releaseList);
+  await buttonWith(detail, '返回列表').fire('click'); assert.equal(detail.hidden, true);
+  const reads = b.reads.length, scrolls = b.scrolls.length;
+  releaseList(); await submitting; await b.tick();
+  assert.equal(detail.hidden, true); assert.equal(b.reads.length, reads); assert.equal(b.scrolls.length, scrolls);
+});
+
+test('another detail selected during post-submission refresh keeps its focus and content', async () => {
+  let releaseList, listReads = 0;
+  const second = { ...browserItem(), id: 'item2', title: 'Second' };
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') return { item: browserItem() };
+    if (url.includes('/items/')) return { item: url.endsWith('item2') ? second : browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem(), second], isHandler: false };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const submitting = dialog.querySelector('form').fire('submit'); await b.tick(); assert.ok(releaseList);
+  await dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click');
+  const heading = detail.querySelector('h3'), reads = b.reads.length, scrolls = b.scrolls.length;
+  releaseList(); await submitting; await b.tick();
+  assert.equal(detail.hidden, false); assert.match(detail.textContent, /Second/);
+  assert.equal(b.reads.length, reads); assert.equal(b.scrolls.length, scrolls); assert.equal(b.document.activeElement, heading);
+});
+
+test('invalid legacy hashes show the existing guidance without requesting a detail', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    const b = browser({ language, href: origin + '/?wp-feedback=1#bad!' });
+    assert.equal(b.location.hash, ''); assert.equal(b.reads.length, 0);
+    await b.ready(); const dialog = b.document.querySelector('dialog');
+    assert.equal(dialog.open, true);
+    assert.match(dialog.textContent, language === 'en-US' ? /Unable to open feedback\. Please refresh and try again\./ : /无法打开反馈，请刷新后重试。/);
+    assert.deepEqual(b.reads.map(r => r.url), [base]);
+  }
+});
+
+test('switching details clears the previous item while loading and collapses invalid or failed responses', async () => {
+  for (const language of ['zh-CN', 'en-US']) for (const failure of ['invalid', 'network', 404, 500]) {
+    let release;
+    const first = { ...browserItem(), title: 'Previous title' }, second = { ...browserItem(), id: 'item2', title: 'Second' };
+    const b = browser({ language, href: origin + '/?wp-feedback=item1', request: async url => {
+      if (url.endsWith('/items/item2')) {
+        await new Promise(resolve => { release = resolve; });
+        if (failure === 'network') throw new Error('Network failed');
+        return failure === 'invalid' ? { item: { ...second, id: 'bad/id' }, canUpload: true } : { status: failure, error: 'Cannot open feedback' };
+      }
+      return url.includes('/items/') ? { item: first, canUpload: true } : { items: [first, second], isHandler: false };
+    } });
+    await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+    assert.match(detail.textContent, /Previous title/);
+    const switching = dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click'); await b.tick(); assert.ok(release);
+    assert.equal(detail.hidden, false); assert.doesNotMatch(detail.textContent, /Previous title/);
+    assert.equal(detail.querySelector('.wp-feedback-loading').textContent, language === 'en-US' ? 'Loading…' : '加载中…');
+    release(); await switching;
+    assert.equal(detail.hidden, true); assert.equal(detail.textContent, '');
+    const expected = failure === 'invalid'
+      ? language === 'en-US' ? 'Unable to open feedback. Please refresh and try again.' : '无法打开反馈，请刷新后重试。'
+      : failure === 'network' ? 'Network failed' : 'Cannot open feedback';
+    assert.ok(dialog.querySelectorAll('.wp-feedback-message').some(n => n.textContent === expected));
+    assert.deepEqual(b.reads.map(r => r.url), [base, base + '/items/item1', base + '/items/item2']);
+  }
+});
+
+test('first detail load shows localized progress before rendering', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    let release;
+    const b = browser({ language, request: async url => {
+      if (url.includes('/items/')) { await new Promise(resolve => { release = resolve; }); return { item: browserItem(), canUpload: true }; }
+      return { items: [browserItem()], isHandler: false };
+    } });
+    await b.ready(); const dialog = await b.open(), detail = dialog.querySelector('#wp-feedback-detail');
+    const opening = dialog.querySelector('.wp-feedback-entry').fire('click'); await b.tick(); assert.ok(release);
+    assert.equal(detail.hidden, false);
+    assert.equal(detail.querySelector('.wp-feedback-loading').textContent, language === 'en-US' ? 'Loading…' : '加载中…');
+    release(); await opening;
+    assert.equal(detail.querySelector('.wp-feedback-loading'), null); assert.ok(detail.querySelector('h3'));
+  }
+});
+
+test('close stays outside the content scroller and disabled image pickers use a blocked cursor', async () => {
+  const b = browser(); await b.ready(); const dialog = await b.open();
+  const close = dialog.querySelector('.wp-feedback-close'), content = dialog.querySelector('.wp-feedback-content');
+  assert.ok(content); assert.equal(close.parentNode, dialog); assert.equal(content.contains(close), false);
+  assert.equal(dialog.children[0], close);
+  assert.ok(content.contains(dialog.querySelector('form')));
+  const css = b.document.head.querySelector('style').textContent;
+  assert.match(css, /\.wp-feedback-dialog \{[^}]*overflow:hidden;[^}]*padding:0;/);
+  assert.match(css, /\.wp-feedback-content \{[^}]*max-height:calc\(100dvh - 26px\);[^}]*overflow:auto;/);
+  assert.match(css, /\.wp-feedback-close \{[^}]*position:absolute; right:12px; top:10px;[^}]*color:var\(--wp-ink-2,/);
+  assert.match(css, /\.wp-feedback-close:hover \{ background:var\(--wp-hover,/);
+  assert.match(css, /\.wp-feedback-dialog h3 \{ margin:8px 32px 8px 0;/);
+  assert.match(css, /@media\(max-width:400px\) \{ \.wp-feedback-content \{ padding:16px;/);
+  assert.match(css, /\.wp-feedback-loading \{ color:var\(--wp-ink-3,/);
+  assert.match(css, /\.wp-feedback-picker button:disabled \{ cursor:not-allowed; \}/);
+  await close.fire('click'); assert.equal(dialog.open, false);
+});
+
+test('failed same-item refresh clears the editor and preserves drafts for retry', async () => {
+  let fail = false;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+    ? fail ? { status: 500, error: 'Refresh failed' } : { item: browserItem(), canUpload: true }
+    : { items: [browserItem()], isHandler: false } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const area = detail.querySelector('textarea'); area.value = 'Keep draft'; await area.fire('input');
+  await detail.fire('paste', pasteFiles([screenshot('pending.png')]));
+  fail = true; await buttonWith(dialog, '刷新').fire('click');
+  assert.equal(detail.hidden, true); assert.equal(detail.textContent, ''); assert.equal(detail.onpaste, null);
+  assert.match(dialog.textContent, /Refresh failed/);
+  fail = false; await dialog.querySelector('.wp-feedback-entry').fire('click');
+  assert.equal(detail.querySelector('textarea').value, 'Keep draft'); assert.equal(detail.querySelectorAll('img').length, 1);
+});
+
+test('late detail successes and failures cannot replace a newer selected item', async () => {
+  for (const fail of [false, true]) {
+    let release;
+    const second = { ...browserItem(), id: 'item2', title: 'Second' };
+    const b = browser({ request: async url => {
+      if (url.endsWith('/items/item1')) {
+        await new Promise(resolve => { release = resolve; });
+        if (fail) throw new Error('Late failure');
+        return { item: browserItem(), canUpload: true };
+      }
+      return url.includes('/items/') ? { item: second, canUpload: true } : { items: [browserItem(), second], isHandler: false };
+    } });
+    await b.ready(); const dialog = await b.open(), detail = dialog.querySelector('#wp-feedback-detail');
+    const first = dialog.querySelector('.wp-feedback-entry').fire('click'); await b.tick(); assert.ok(release);
+    await dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click');
+    const heading = detail.querySelector('h3'), scrolls = b.scrolls.length;
+    release(); await first;
+    assert.equal(detail.hidden, false); assert.match(detail.textContent, /Second/); assert.doesNotMatch(dialog.textContent, /Late failure/);
+    assert.equal(b.document.activeElement, heading); assert.equal(b.scrolls.length, scrolls);
+  }
 });

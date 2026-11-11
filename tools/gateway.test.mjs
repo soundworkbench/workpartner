@@ -9,6 +9,8 @@ import { fork, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { organizationData, nextModelConfig } from '../gateway/organization/resolve.mjs';
+import crypto from 'node:crypto';
+import { installPreviewClient } from '../preview/client.mjs';
 import { issueToken, tokenUser } from '../gateway/market-auth.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 
@@ -741,7 +743,7 @@ test('feedback live allow list gates sessions; allowed users submit and list wit
   assert.equal((await f.request('/_wp/api/feedback')).status, 401);
   f.org.feedback.allow = ['user1'];
   fs.writeFileSync(path.join(f.dir, 'organization.json'), JSON.stringify(f.org));
-  const page = await f.request('/_wp/feedback', { headers }); assert.equal(page.status, 200); assert.match(page.body, /提交反馈/);
+  const page = await f.request('/_wp/feedback', { headers }); assert.equal(page.status, 302); assert.equal(page.headers.location, '/?wp-feedback=1'); assert.equal(page.body, '');
   const created = await f.request('/_wp/api/feedback', { method: 'POST', headers: { ...headers, origin: 'https://' + f.org.publicHost, 'content-type': 'application/json' }, body: JSON.stringify({ type: 'bug', title: '集成问题', body: '复现说明' }) });
   assert.equal(created.status, 201, created.body);
   const listing = await f.request('/_wp/api/feedback', { headers }); assert.equal(listing.status, 200);
@@ -760,4 +762,85 @@ test('feedback bot routes accept only service tokens, independent of the user al
   const response = await f.request(route, { headers: { authorization: 'Bearer fixture-feedback-token' } });
   assert.equal(response.status, 200); assert.deepEqual(JSON.parse(response.body), { items: [], next: 0 });
   assert.equal((await f.request('/_wp/api/feedback', { headers: { authorization: 'Bearer fixture-feedback-token' } })).status, 401);
+});
+
+
+// Real gateway handlers, without listening: also runnable in a sandbox that denies local ports.
+// Expected preview bytes are the original serializer, with no feedback-aware helper involved.
+test('client.js preview on/off × admission preserves original bytes and only appends for provisioned allow-listed users', t => {
+  for (const preview of [false, true]) for (const enabled of [false, true]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-feedback-client-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const org = fixtureOrganization(t);
+    for (const key of Object.keys(org.features)) org.features[key] = false;
+    org.features.preview = preview; org.features.feedback = enabled;
+    org.publicHost = 'workspace.example.test'; org.previewHost = 'preview.example.test';
+    org.model.baseUrl = 'http://models.example.test/v1';
+    org.extensions.gatewayModule = '';
+    org.feedback = { ...org.feedback, allow: ['member'], handlers: [] };
+    Object.assign(org.runtime, { gatewayPort: 0, sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'),
+      stateDirectory: path.join(dir, 'state'), secureDirectory: path.join(dir, 'secure'), nextDirectory: path.join(dir, 'workspaces') });
+    const people = [
+      { slug: 'member', unionId: 'member-union', backend: 'legacy' },
+      { slug: 'outsider', unionId: 'outsider-union', backend: 'legacy' },
+    ];
+    fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
+    fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
+    fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+    const baseline = user => preview
+      ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});`
+      : '// Workspace preview is disabled.';
+    const script = `
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import http from 'node:http';
+let server;
+http.Server.prototype.listen = function () { server = this; return this; };
+await import(${JSON.stringify(pathToFileURL(path.join(root, 'gateway/gateway.mjs')).href)});
+const handle = server.listeners('request')[0];
+const people = ${JSON.stringify(people)};
+const baselines = ${JSON.stringify(people.map(baseline))};
+const request = async who => {
+  let status, headers, body;
+  const data = Buffer.from(JSON.stringify({ u: who, n: 'Fixture', e: Math.floor(Date.now() / 1000) + 600 })).toString('base64url');
+  const mac = crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
+  await handle({ method: 'GET', url: '/_wp/preview/client.js', headers: { host: 'workspace.example.test', ...(who ? { cookie: 'wp_sid=' + data + '.' + mac } : {}) } },
+    { writeHead(code, h) { status = code; headers = h; }, end(value) { body = value ?? ''; } });
+  return { status, headers, body };
+};
+for (const [index, person] of people.entries()) {
+  const result = await request(person.unionId);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.headers, ${JSON.stringify(preview
+    ? { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }
+    : { 'content-type': 'text/javascript', 'cache-control': 'no-store' })});
+  if (${enabled} && index === 0) {
+    assert.ok(result.body.startsWith(baselines[index] + '\\n;'));
+    assert.match(result.body.slice(baselines[index].length), /wp-feedback-dialog/);
+    assert.ok(!result.body.includes(person.unionId));
+  } else assert.equal(result.body, baselines[index]);
+}
+for (const who of [null, 'pending-union']) {
+  const result = await request(who);
+  if (${preview}) {
+    assert.equal(result.status, 302);
+    assert.equal(result.headers.location, 'https://workspace.example.test/_wp/login?next=%2F_wp%2Fpreview%2Fclient.js');
+    assert.equal(result.body, '');
+  } else { assert.equal(result.status, 200); assert.equal(result.body, '// Workspace preview is disabled.'); }
+}
+// Policy changes apply to the very next client request without a gateway restart.
+const file = ${JSON.stringify(path.join(dir, 'organization.json'))};
+const config = JSON.parse(fs.readFileSync(file)); config.feedback.allow = []; fs.writeFileSync(file, JSON.stringify(config));
+assert.equal((await request('member-union')).body, baselines[0]);
+config.feedback.handlers = ['outsider-union']; fs.writeFileSync(file, JSON.stringify(config));
+const handler = await request('outsider-union');
+if (${enabled}) assert.ok(handler.body.startsWith(baselines[1] + '\\n;'));
+else assert.equal(handler.body, baselines[1]);
+`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir },
+    });
+    assert.equal(result.status, 0, `preview=${preview} feedback=${enabled}: ` + result.stdout + result.stderr + (result.error?.message || ''));
+  }
 });
