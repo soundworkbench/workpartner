@@ -700,10 +700,33 @@
     };
     if (window.requestIdleCallback) window.requestIdleCallback(load, { timeout: 1000 }); else setTimeout(load, 0);
   }
+  // The home composer keeps its text only in memory; keep an unsent draft in this browser so
+  // reloading or opening the page in another window does not lose it.
+  var DRAFT_KEY = 'wp_guid_draft';
+  function draftSave(value) {
+    try { if (value && value.trim()) localStorage.setItem(DRAFT_KEY, value); else localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+  }
+  function draftRestore() {
+    var input = document.querySelector('[data-testid="guid-input"]');
+    if (!input || input.dataset.wpDraft) return;
+    input.dataset.wpDraft = '1';
+    var draft = null;
+    try { draft = localStorage.getItem(DRAFT_KEY); } catch (e) {}
+    if (!draft || input.value) return;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, draft);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    // The synthetic input event cancels the pending autofocus; ask for it again.
+    if (window.wpComposerFocus) window.wpComposerFocus.request();
+  }
+  document.addEventListener('input', function (e) {
+    if (e.target.matches && e.target.matches('[data-testid="guid-input"]')) draftSave(e.target.value);
+  });
   function guidSend() {
     var el = document.querySelector('[data-testid="guid-input"]'), btn = document.querySelector('[data-testid="guid-send-btn"]');
     var t = el ? String(el.value !== undefined ? el.value : el.textContent).trim() : '';
-    if (t && t.charAt(0) !== '/' && btn && !btn.disabled && !btn.classList.contains('arco-btn-loading')) ghostShow(t);
+    var sending = t && btn && !btn.disabled && !btn.classList.contains('arco-btn-loading');
+    if (sending) draftSave('');
+    if (sending && t.charAt(0) !== '/') ghostShow(t);
   }
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && e.target.matches && e.target.matches('[data-testid="guid-input"]')) guidSend();
@@ -771,6 +794,7 @@
     var w = sider ? Math.max(0, Math.round(sider.getBoundingClientRect().right)) + 'px' : '0px';
     if (document.documentElement.style.getPropertyValue('--wp-sider-w') !== w) document.documentElement.style.setProperty('--wp-sider-w', w);
     preloadHome();
+    draftRestore();
     if (admin) { ghostHandoff(); return; }
     marketPage();
     messageTableScroll();

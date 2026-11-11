@@ -94,6 +94,57 @@ test('runtime picker updates defaults and preserves saved personal choices witho
   assert.ok(engine.modelsFor('codex', null, engine.homePick('codex').model).some(m => m.id === 'runtime-codex'));
 });
 
+test('home composer draft survives a new window and is cleared on send', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-draft-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  materializeAppearance(dir, organizationData({}));
+  const overlay = fs.readFileSync(path.join(root, 'image/rebrand/overlay/wp-overlay.js'), 'utf8')
+    .replace('  /* __WP_COPY__ */', fs.readFileSync(path.join(dir, 'copy.js'), 'utf8'));
+  const end = overlay.lastIndexOf('})();');
+  assert.ok(end > 0);
+  const store = new Map();
+  const localStorage = { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
+  class HTMLTextAreaElement { set value(v) { this._v = v; } get value() { return this._v; } }
+  function load() {
+    const listeners = {};
+    const input = Object.assign(new HTMLTextAreaElement(), { dataset: {}, events: 0,
+      matches: s => s.includes('guid-input'), dispatchEvent() { this.events++; } });
+    input.value = '';
+    const send = { disabled: false, classList: { contains: () => false } };
+    const window = new EventTarget();
+    window.fetch = async () => ({ json: async () => ({ data: {} }) });
+    window.WpSmoothText = { SmoothText: class {}, protectedLines: () => [], repairStreamingMarkdown: s => s };
+    const context = vm.createContext({ window, fetch: window.fetch, Event, HTMLTextAreaElement, localStorage,
+      document: { body: {}, documentElement: {}, querySelectorAll: () => [],
+        querySelector: s => s.includes('guid-input') ? input : s.includes('guid-send-btn') ? send : null,
+        addEventListener(name, fn) { (listeners[name] ||= []).push(fn); } },
+      location: { hash: '#/guid' }, innerWidth: 320, MutationObserver: class { observe() {} }, requestAnimationFrame() {},
+      setTimeout() {}, clearTimeout() {}, setInterval() {},
+    });
+    vm.runInContext(overlay.slice(0, end) + 'window.draft = { draftRestore, guidSend };' + overlay.slice(end), context);
+    return { input, draft: window.draft, type(v) { input.value = v; (listeners.input || []).forEach(fn => fn({ target: input })); } };
+  }
+  const first = load();
+  first.draft.draftRestore();
+  assert.equal(first.input.value, '');
+  first.type('unsent task description');
+  assert.equal(store.get('wp_guid_draft'), 'unsent task description');
+
+  const second = load();
+  second.draft.draftRestore();
+  assert.equal(second.input.value, 'unsent task description');
+  assert.equal(second.input.events, 1);
+  second.draft.draftRestore();
+  assert.equal(second.input.events, 1, 'restores only once per mounted input');
+
+  second.type('');
+  assert.equal(store.has('wp_guid_draft'), false);
+  second.type('/skill text');
+  assert.equal(store.get('wp_guid_draft'), '/skill text');
+  second.draft.guidSend();
+  assert.equal(store.has('wp_guid_draft'), false, 'sending drops the stored draft');
+});
+
 test('neutral image inputs assemble without a private organization', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-image-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
