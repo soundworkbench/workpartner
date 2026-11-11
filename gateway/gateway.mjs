@@ -40,6 +40,7 @@ const legacyRuntime = migration.kind === 'k8s' ? undefined : migration.guardRunt
 const aionui = createAionui({
   runtime, owns: migration.owns, kind: migration.kind, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
   userImages: migration.kind === 'k8s' ? organization.runtime.k8s?.userImages : undefined,
+  uid: organization.runtime.uid, reconcileExclude: organization.runtime.k8s?.reconcileExclude,
   secretDir: `${organization.runtime.secureDirectory}/aionui`,
   sharedSkills: organization.features.marketSkills ? {
     container: organization.market.containerDirectory, preinstalled: organization.market.preinstalled,
@@ -88,6 +89,7 @@ const services = await createGatewayServices({ dataTools, organization, runtime,
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
+aionui.startReconcileImages(users, organization.runtime.k8s?.reconcileImagesIntervalMs);
 const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });

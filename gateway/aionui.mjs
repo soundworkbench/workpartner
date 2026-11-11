@@ -57,6 +57,36 @@ export function upgradeHead(req, headers) {
 
 const sleepFor = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 消息桥（cc-connect）本地接口的套接字，位于 image/home/cc-connect-feishu.toml 的 data_dir 下。 */
+export const BRIDGE_SOCKET = "/data/.cc-connect/data/run/api.sock";
+
+// 在本人容器里执行：经消息桥本地接口列出会话（/sessions），逐个读 /assistant/state 的 busy。
+// 只输出 {"busy":true|false}；任一会话读不到状态（接口缺失、409 正在接收消息、其他错误）就以非零退出，由网关按旧规则判断。
+function bridgeTurnReader() {
+  const http = require("node:http");
+  const socketPath = process.argv[1];
+  const get = (p) => new Promise((resolve, reject) => {
+    const req = http.get({ socketPath, path: p, timeout: 3000 }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+  });
+  (async () => {
+    const list = await get("/sessions");
+    if (list.status !== 200) throw new Error(`sessions ${list.status}`);
+    for (const s of JSON.parse(list.body) || []) {
+      const r = await get(`/assistant/state?${new URLSearchParams({ project: s.project, session_key: s.session_key })}`);
+      if (r.status !== 200) throw new Error(`state ${r.status}`);
+      if (JSON.parse(r.body).busy === true) return true;
+    }
+    return false;
+  })().then((busy) => process.stdout.write(JSON.stringify({ busy })), (e) => { process.stderr.write(e.message); process.exit(3); });
+}
+const bridgeTurnScript = `(${bridgeTurnReader.toString()})()`;
+
 /**
  * @param o.runtime Personal runtime for lifecycle, storage and endpoint resolution.
  * @param o.modelConfig Current non-secret model defaults and catalog.
@@ -70,7 +100,9 @@ const sleepFor = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param o.busyRecheckMs 镜像过期但本人有对话正在处理时，多久之后再查一次（默认 30 秒；期间继续用旧容器）
  * @param o.maxDeferMs 因为有任务在跑而推迟重建，连续观察到忙最多多久（默认 30 分钟）；超过就强制重建并记日志
  * @param o.newRoundGapMs 距上次查到忙超过多久就当新一轮重新计推迟时间（默认 10 分钟，与 busyRecheckMs 无关）
- * @param o.topTimeoutMs 查消息桥进程（Docker /top）的超时（默认 5 秒），超时按空闲处理
+ * @param o.topTimeoutMs 查消息桥进程和对话状态的超时（默认 5 秒），进程查询超时按空闲处理
+ * @param o.uid 在本人容器里查消息桥状态时使用的用户
+ * @param o.reconcileExclude 后台巡检不碰的用户 slug
  * @param o.now 当前毫秒数（测试用）
  */
 export function createAionui(o) {
@@ -138,12 +170,7 @@ export function createAionui(o) {
     return resolving.get(slug);
   }
 
-  async function resolveUpstream(user) {
-    const { slug } = user;
-    const info = await runtime.inspect(slug);
-    if (!owns(user) || jobs.has(slug)) return null;
-    const hasPass = fs.existsSync(passFile(slug));
-    const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
+  async function isStale(slug, info, modelConfig) {
     const targetImage = o.userImages?.[slug] ?? o.image;
     let stale = info.exists && info.image !== targetImage;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
     if (info.exists && !stale) {
@@ -156,6 +183,19 @@ export function createAionui(o) {
     if (info.exists && modelConfig && !(info.env || []).includes(`WORKPARTNER_MODEL_CONFIG=${modelConfig}`)) stale = true;
     if (info.exists && o.sharedSkills && !(info.env || []).includes(`WORKPARTNER_SHARED_SKILLS=${o.sharedSkills.container}`)) stale = true;
     if (info.exists && o.sharedSkills && !(info.env || []).includes(`WORKPARTNER_MARKET_PREINSTALLED=${JSON.stringify(o.sharedSkills.preinstalled)}`)) stale = true;
+    return stale;
+  }
+
+  // background：后台巡检，只替换正在运行、有口令、镜像或环境过期且空闲的容器；忙时跳过，不计入强制重建的推迟时长。
+  // 其余情况返回旧容器地址或 null，与网页请求共用同一个 resolving，避免两边同时重建。
+  async function resolveUpstream(user, background = false) {
+    const { slug } = user;
+    const info = await runtime.inspect(slug);
+    if (!owns(user) || jobs.has(slug)) return null;
+    if (background && !info.running) return null;
+    const hasPass = fs.existsSync(passFile(slug));
+    const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
+    let stale = await isStale(slug, info, modelConfig);
     if (!stale) { busySince.delete(slug); lastBusyAt.delete(slug); forcePending.delete(slug); }
     let forced = false;
     let current = null;   // 旧容器仍可用时的地址
@@ -164,7 +204,10 @@ export function createAionui(o) {
       const address = info.address;
       // 重建会打断正在进行的对话：有对话在处理就这次不重建，继续用旧容器，下次请求再查。
       if (address) current = { name: info.name, address, imageId: info.imageId };
-      if (stale && address) {
+      if (stale && address && background) {
+        const what = await busyNow(slug, address);
+        if (what) { log(`后台巡检：新版工作伙伴镜像已更新，${slug} ${what}，暂不重建`); stale = false; }
+      } else if (stale && address) {
         if (forcePending.has(slug) && now() - forcePending.get(slug) > newRoundGapMs) forcePending.delete(slug);
         if (forcePending.has(slug)) forced = true;
         else {
@@ -174,7 +217,9 @@ export function createAionui(o) {
       }
       if (address && !stale) return current;
     }
+    if (background && !(stale && current)) return current;
     if (jobs.size >= maxJobs) {
+      if (background) return current;
       // 已强制但任务已满：先用旧容器（照常可用），强制标记保留到有空位时再重建
       if (forced && !forcePending.has(slug)) forcePending.set(slug, now());
       return forced ? current : null;
@@ -202,14 +247,16 @@ export function createAionui(o) {
     })().catch((e) => { joined.delete(slug); log(`新版工作伙伴准备失败 ${slug}：${e.message}`); })
       .finally(() => jobs.delete(slug));
     jobs.set(slug, job);
+    if (background) log(`后台巡检：${slug} 空闲，按新版工作伙伴镜像重建`);
     return null;
   }
 
   // 本人容器里有没有任务在跑，两处任一处在跑就算忙：
   // 1) AionUi 网页对话：列表里没结束的（status 不是 finished）逐个看 runtime.is_processing；
-  // 2) 消息桥：cc-connect 没有查当前会话状态的接口，改看容器进程树里 cc-connect 有没有子进程（它自己起的 codex / claude）。
+  // 2) 消息桥：先看容器进程树里 cc-connect 有没有子进程（它起的 codex / claude）；没有就是空闲。
+  //    有子进程时问消息桥本地接口（BRIDGE_SOCKET）各会话有没有回合在跑：Claude Code 引擎在对话结束后保留空闲进程
+  //    （idle_timeout 内），只看进程会把刚用过飞书的人都当成忙。接口读不到时退回旧规则：有子进程就算忙。
   //    AionUi 自己起的 agent 挂在 aioncore 下，不在 cc-connect 的子树里，所以两边分得开。
-  //    取舍：Claude Code 引擎的消息桥会在对话结束后保留空闲进程（idle_timeout 内），这时也算忙，最长推迟到 maxDeferMs。
   // 接口出错或超时按空闲处理（容器答不了话时重建正好能恢复）。查到在忙后 busyRecheckMs 内不再查。
   // 连续观察到忙超过 maxDeferMs（is_processing 卡住或进程不退出）就不再推迟，强制重建。
   // 上限只计连续观察：与上次查到忙间隔超过 newRoundGapMs（默认 10 分钟）说明中间没人访问，当新一轮；到上限前每次都照常查当前状态。
@@ -217,13 +264,11 @@ export function createAionui(o) {
   async function processing(slug, address) {
     const t = now();
     if (t < (busyUntil.get(slug) ?? 0)) return true;
-    const web = await aionuiBusy(slug, address);
-    const bridge = await bridgeBusy(slug);
-    if (!web && !bridge) {
+    const what = await busyNow(slug, address);
+    if (!what) {
       busyUntil.delete(slug); busySince.delete(slug); lastBusyAt.delete(slug);
       return false;
     }
-    const what = [web && "有对话正在处理", bridge && "消息桥有任务在跑"].filter(Boolean).join("、");
     if (!busySince.has(slug) || t - lastBusyAt.get(slug) > newRoundGapMs) busySince.set(slug, t);
     lastBusyAt.set(slug, t);
     if (t - busySince.get(slug) >= maxDeferMs) {
@@ -233,6 +278,13 @@ export function createAionui(o) {
     busyUntil.set(slug, t + busyRecheckMs);
     log(`新版工作伙伴镜像已更新，${slug} ${what}，暂不重建`);
     return true;
+  }
+
+  // 两处都空闲返回空串，否则返回忙的原因。
+  async function busyNow(slug, address) {
+    const web = await aionuiBusy(slug, address);
+    const bridge = await bridgeBusy(slug);
+    return [web && "有对话正在处理", bridge && "消息桥有任务在跑"].filter(Boolean).join("、");
   }
 
   async function aionuiBusy(slug, address) {
@@ -252,17 +304,31 @@ export function createAionui(o) {
     return false;
   }
 
+  const withTimeout = (work) => {
+    let timer;
+    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("超时")), topTimeoutMs); });
+    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+  };
+
   async function bridgeBusy(slug) {
-    try {
-      let timer;
-      const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("超时")), topTimeoutMs); });
-      const procs = await Promise.race([runtime.processes(slug, topTimeoutMs), timeout])
-        .finally(() => clearTimeout(timer));
-      const roots = new Set(procs.filter((p) => /(^|\/)cc-connect$/.test(p.args.split(/\s+/)[0])).map((p) => p.pid));
-      return procs.some((p) => roots.has(p.ppid));
-    } catch (e) {
+    let procs;
+    try { procs = await withTimeout(runtime.processes(slug, topTimeoutMs)); }
+    catch (e) {
       log(`查 ${slug} 消息桥进程失败（${e.message}），按空闲处理`);
       return false;
+    }
+    const roots = new Set(procs.filter((p) => /(^|\/)cc-connect$/.test(p.args.split(/\s+/)[0])).map((p) => p.pid));
+    if (!procs.some((p) => roots.has(p.ppid))) return false;
+    try {
+      const result = await withTimeout(runtime.exec(slug, ["node", "-e", bridgeTurnScript, BRIDGE_SOCKET],
+        { ...(o.uid !== undefined ? { user: String(o.uid) } : {}), timeout: topTimeoutMs }));
+      if (result.exitCode !== 0) throw new Error(`退出码 ${result.exitCode}`);
+      const { busy } = JSON.parse(result.stdout);
+      if (typeof busy !== "boolean") throw new Error("输出无效");
+      return busy;
+    } catch (e) {
+      log(`查 ${slug} 消息桥对话状态失败（${e.message}），有子进程按忙处理`);
+      return true;
     }
   }
 
@@ -338,7 +404,33 @@ export function createAionui(o) {
     keepRunningTimer = setInterval(tick, intervalMs);
     keepRunningTimer.unref();
   }
-  const close = () => clearInterval(keepRunningTimer);
 
-  return { upstream, session, forget, keepRunning, startKeepRunning, close, pending: (slug) => jobs.get(slug) };
+  // 后台替换镜像或环境过期的空闲容器，不等网页请求（只用飞书的人也能换上新镜像）。忙的跳过，下一轮再看；
+  // 同时进行的任务仍受 maxJobs 限制，排不上的留到下一轮；reconcileExclude 里的人不碰。
+  const reconcileExclude = new Set(o.reconcileExclude || []);
+  let reconcileTimer, reconciling;
+  function reconcileImages(users) {
+    if (o.kind !== 'k8s') return Promise.resolve();
+    if (reconciling) return reconciling;
+    reconciling = (async () => {
+      for (const user of users()) {
+        const { slug } = user;
+        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || jobs.has(slug) || resolving.has(slug)) continue;
+        const check = resolveUpstream(user, true).finally(() => resolving.delete(slug));
+        resolving.set(slug, check);
+        await check.catch(error => log(`后台巡检失败 ${slug}：${error.message}`));
+      }
+    })().finally(() => { reconciling = undefined; });
+    return reconciling;
+  }
+  function startReconcileImages(users, intervalMs = 0) {
+    clearInterval(reconcileTimer);
+    if (o.kind !== 'k8s' || intervalMs === 0) return;
+    if (!Number.isFinite(intervalMs) || intervalMs < 0) throw new Error('Invalid reconcileImagesIntervalMs');
+    reconcileTimer = setInterval(() => reconcileImages(users).catch(error => log(`后台巡检出错：${error.message}`)), intervalMs);
+    reconcileTimer.unref();
+  }
+  const close = () => { clearInterval(keepRunningTimer); clearInterval(reconcileTimer); };
+
+  return { upstream, session, forget, keepRunning, startKeepRunning, reconcileImages, startReconcileImages, close, pending: (slug) => jobs.get(slug) };
 }

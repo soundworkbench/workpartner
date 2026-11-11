@@ -28,6 +28,8 @@ export interface Organization {
       publishedDirectory?: string; publishedFiles?: string[];
       apiTimeoutMs?: number; podStartTimeoutMs?: number; terminationGraceSeconds?: number;
       inspectCacheMs?: number; keepRunningIntervalMs?: number; loadGatewayExtension?: boolean;
+      /** Background replacement of idle stale workspaces; 0 or unset disables it. */
+      reconcileImagesIntervalMs?: number; reconcileExclude?: string[];
       /** File helper cache and staging lease durations, independent of inspectCacheMs. */
       cacheMs?: number; leaseTtlMs?: number;
       /** Prefer the mounted ServiceAccount; never commit a credential-bearing kubeconfig. */
