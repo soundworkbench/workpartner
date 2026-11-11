@@ -8,6 +8,21 @@ const json = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
 };
+/** Dollar amounts as people read them: sub-cent values keep up to 4 significant digits, others 2–4 decimals so a sub-cent spend stays visible. */
+export function formatUsd(value) {
+  const amount = Math.round(value * 1e6) / 1e6;
+  if (amount > 0 && amount < .01) return '$' + String(Number(amount.toPrecision(4)));
+  return '$' + amount.toFixed(4).replace(/0{1,2}$/, '');
+}
+/** One line per language shared by the Tools tab wording, `wp-data balance` and agent replies. */
+export function usageSummary(usage) {
+  const part = ({ usedUsd, limitUsd }) => [formatUsd(usedUsd), formatUsd(Math.max(0, limitUsd - usedUsd)), formatUsd(limitUsd)];
+  const [dailyUsed, dailyLeft, dailyLimit] = part(usage.daily), [monthlyUsed, monthlyLeft, monthlyLimit] = part(usage.monthly);
+  return {
+    zh: `今天已用 ${dailyUsed} · 剩余 ${dailyLeft} / ${dailyLimit}；本月已用 ${monthlyUsed} · 剩余 ${monthlyLeft} / ${monthlyLimit}`,
+    en: `Today used ${dailyUsed} · ${dailyLeft} left of ${dailyLimit}; this month used ${monthlyUsed} · ${monthlyLeft} left of ${monthlyLimit}`,
+  };
+}
 async function bytes(stream, limit) {
   const chunks = []; let size = 0;
   for await (const chunk of stream) {
@@ -277,10 +292,11 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       return (rows[0]?.charged_micro ?? 0) / 1e6;
     }
     const [daily, monthly] = await Promise.all([spend(1), spend(date.getUTCDate())]);
-    return { timezone: 'UTC', date: day, month: day.slice(0, 7),
+    const value = { timezone: 'UTC', date: day, month: day.slice(0, 7),
       resetMessage: '北京时间每天 08:00、每月 1 日 08:00 重置额度',
       daily: { usedUsd: daily, limitUsd: limits.daily / 1e6 },
       monthly: { usedUsd: monthly, limitUsd: limits.monthly / 1e6 }, call: { limitUsd: limits.call / 1e6 } };
+    return { ...value, summary: usageSummary(value) };
   }
   return async (req, res, url) => {
     const blocked = config?.blockedPrefixes?.some(prefix => url.pathname === prefix || url.pathname.startsWith(prefix + '/'));
@@ -365,7 +381,8 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       // A queued acknowledgement is not a completed, chargeable result.
       if (response.status === 202) throw fail(502, '任务尚未完成，请核实用量，不要自动重试 / Job pending; check usage and do not retry automatically');
       const cost = response.headers.get(headers.cost);
-      json(res, 200, { data: result, costUsd: cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null,
+      const costUsd = cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null;
+      json(res, 200, { data: result, costUsd, costText: costUsd === null ? null : formatUsd(costUsd),
         callId: response.headers.get(headers.callId), ...(ep.fileResult ? { fileResult: ep.fileResult } : {}) });
     } catch (error) { json(res, error.status || 503, { error: error.status ? error.message : '数据服务暂不可用 / Data service unavailable' }); }
     return true;
