@@ -306,11 +306,8 @@ html body .sider-action-btn { background: transparent !important; }
   html body:not(:has(.app-titlebar--mobile)) header[class*="chat-layout"] {
     height: 50px !important; min-height: 50px !important; box-sizing: border-box; padding-block: 0 !important;
   }
-  html.wp-automation body:not(:has(.app-titlebar--mobile)) .shrink-0:has(> div > [data-testid="scheduled-tasks-header"]) { padding-top: 8px !important; }
 }
 @media (max-width: 767px) {
-  html body .app-titlebar__button[aria-label="检索会话"] { display: none !important; }
-  html body .app-titlebar__button[aria-label="Search messages"] { display: none !important; }
   .wp-sider-toggle { display: none !important; }
 }
 .wp-sider-open {
@@ -354,7 +351,6 @@ html body [class*="_newChatTrigger"] > span:first-child:has([class*="_newChatIco
 .wp-sider-toggle svg, .wp-sider-open svg, .wp-nav svg, .wp-pick-btn svg { fill: none !important; stroke: currentColor !important; color: inherit !important; }
 html body aside.layout-sider [class*="_newChatTrigger"] + div { display: none !important; }        /* 批量选择 */
 html body aside.layout-sider .shrink-0.h-1px { display: none !important; }                       /* 分隔线 */
-html body aside.layout-sider .conversation-search-trigger-full { display: none !important; }   /* 手机侧栏自带的搜索，用上面统一的一行 */
 /* Reserve the compact layout before its toolbar and model data finish mounting. */
 @media (max-width: 767px) { html body .sendbox-panel { box-sizing: border-box; min-height: 80px; } }
 .wp-pick-row { min-height: 32px; flex-shrink: 0; display: flex; justify-content: flex-end; margin: 6px -4px -6px 0; }
@@ -366,6 +362,32 @@ html body aside.layout-sider .conversation-search-trigger-full { display: none !
 .wp-nav-row:hover { background: var(--wp-sidebar-hover); }
 .wp-nav-row.wp-active { background: var(--wp-row-selected); color: var(--wp-row-selected-ink); }
 .wp-nav-icon { color: var(--wp-ink-2); }
+/* 搜索：这一行就地变成输入框；有字时结果替换对话列表（含“最近对话”和归档入口）。 */
+.wp-nav-row.wp-nav-editing, .wp-nav-row.wp-nav-editing:hover { background: var(--wp-row-selected); box-shadow: inset 0 0 0 1px var(--wp-line); cursor: text; }
+.wp-nav-editing .wp-nav-text { display: none; }
+.wp-nav-input {
+  flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: transparent;
+  color: var(--wp-ink); font: inherit; font-size: 14px;
+}
+.wp-nav-input::placeholder { color: var(--wp-ink-3); }
+.wp-search-results { display: none; }
+html.wp-search-active aside.layout-sider [class*="_scrollArea"] { display: none !important; }
+html.wp-search-active .wp-search-results { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; }
+.wp-search-result {
+  display: flex; flex-direction: column; gap: 2px; flex: none; width: 100%; box-sizing: border-box; padding: 7px 12px;
+  border: 0; border-radius: 12px; background: transparent; color: var(--wp-ink); font: inherit; text-align: left; cursor: pointer;
+}
+.wp-search-result:hover { background: var(--wp-sidebar-hover); }
+.wp-search-result:focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: -2px; }
+.wp-search-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.wp-search-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.wp-search-time { flex: none; font-size: 11px; color: var(--wp-ink-4); }
+.wp-search-snippet {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  font-size: 12px; line-height: 18px; color: var(--wp-ink-3); overflow-wrap: anywhere;
+}
+.wp-search-snippet mark { background: transparent; color: var(--wp-ink); font-weight: 600; }
+.wp-search-state { margin: 6px 12px; font-size: 13px; color: var(--wp-ink-3); }
 /* 与搜索、自动化相同的 16px / 1.3px 线稿；保留原生新建动作及收起态。 */
 html body [class*="_newChatTrigger"] [class*="_newChatIcon"] {
   display: inline-block; width: 16px; height: 16px; flex: none; color: var(--wp-ink-2); background: currentColor;
@@ -497,6 +519,10 @@ html body .wp-scroll-bottom > div { width: 32px; height: 32px; }
 .wp-missing-chat button { padding: 8px 16px; border: 1px solid var(--wp-line); border-radius: 8px; background: var(--wp-send); color: var(--wp-send-ink); cursor: pointer; }
 .wp-missing-chat button:focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: 3px; }
 
+/* 对话框里的多行输入和时间框与单行输入同底色（AionUi 只给单行输入换了底）；不提高优先级，悬停、聚焦、禁用仍按原生。 */
+:where(.arco-modal) .arco-textarea, :where(.arco-modal) .arco-picker { background-color: var(--fill-0); }
+/* 下拉列表放得下“新建自动化”频率的全部选项；空间不够时原生弹层向上展开。 */
+:where(.arco-modal) .arco-select-popup .arco-select-popup-inner { max-height: 240px; }
 /* 自动化开关：轨道和滑块用不同颜色，开关位置与颜色共同表示状态。 */
 html[data-theme="dark"].wp-automation body .arco-switch { background: #575757 !important; }
 html[data-theme="dark"].wp-automation body .arco-switch.arco-switch-checked { background: #82C7A5 !important; }

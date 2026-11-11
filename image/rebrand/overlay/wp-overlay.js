@@ -141,7 +141,7 @@
     const userIndex = messages.findLastIndex(message => !message.hidden && message.position === 'right');
     if (userIndex < 0) return null;
     const visible = messages.slice(userIndex + 1).some(message => {
-      if (message.hidden || message.position === 'right') return false;
+      if (message.hidden || message.position === 'right' || window.wpUI.engineNotice(message)) return false;
       if (message.type === 'text') return !!message.content?.content?.trim();
       if (message.type === 'thinking') {
         return message.content?.status !== 'done' || (message.content.duration ?? message.content.duration_ms ?? 0) >= 1000;
@@ -318,6 +318,12 @@
     if (Array.isArray(detail)) detail = detail.join(' ');
     return typeof detail === 'string' ? detail : '';
   }
+  // 引擎写进对话的运行警告（Codex 不认识模型名时改用通用参数的提示）对同事没有意义，不显示。
+  var ENGINE_NOTICES = [/^Model metadata for `[^`]*` not found\. Defaulting to fallback metadata/];
+  function engineNotice(message) {
+    var content = message.type === 'tips' && message.content && message.content.content;
+    return typeof content === 'string' && ENGINE_NOTICES.some(function (pattern) { return pattern.test(content); });
+  }
   function toolSummary(item) {
     var detail = toolDetail(item) || item.description || '';
     if (detail === item.name || toolLabel(detail) !== detail) return '';
@@ -331,7 +337,7 @@
       return t('workingFor').replace('{duration}', duration);
     },
     fileCount: function (count) { return t(count === 1 ? 'fileCountOne' : 'fileCount').replace('{count}', String(count)); },
-    dateTime: dateTime, attachmentSummary: attachmentSummary, toolLabel: toolLabel, toolDetail: toolDetail, toolSummary: toolSummary };
+    dateTime: dateTime, attachmentSummary: attachmentSummary, engineNotice: engineNotice, toolLabel: toolLabel, toolDetail: toolDetail, toolSummary: toolSummary };
   // ---------- 原生设置 ----------
   function text(el, value) { if (el && el.textContent !== value) el.textContent = value; }
   function settingsReady() {
@@ -900,7 +906,7 @@
 
   // ---------- 左侧栏：与原来的工作伙伴一致 ----------
   // 品牌行（形象 + 工作伙伴 + 收起按钮）→ 新对话 → 搜索 → 自动化 → 最近对话（行尾相对时间）→ 左下角本人头像和姓名。
-  // 桌面上不要顶部标题栏：收起按钮放在品牌行右侧，收起后左上角出现展开按钮；搜索调用 AionUi 自己的会话检索。
+  // 桌面上不要顶部标题栏：收起按钮放在品牌行右侧，收起后左上角出现展开按钮。
   var ICONS = {
     newChat: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 2.5H4A1.5 1.5 0 0 0 2.5 4v8A1.5 1.5 0 0 0 4 13.5h8a1.5 1.5 0 0 0 1.5-1.5V8.5M8 10.5l-2.5.5.5-2.5 6-6a1.4 1.4 0 0 1 2 2l-6 6ZM11 3.5l2 2"/></svg>',
     search: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="7.2" cy="7.2" r="4.6"/><path d="M10.6 10.6 14 14"/></svg>',
@@ -968,6 +974,137 @@
       update();
     };
   }
+  // ---------- 侧栏搜索：“搜索”一行就地变成输入框，有字时结果替换下面的对话列表 ----------
+  // 检索用 AionUi 自己的会话消息检索（rebrand.py 交给 window.wpConversationSearch），点结果像原生一样跳到那条消息。
+  // Esc、点别处或清空后离开输入框，恢复这一行和对话列表；侧栏收起时一并结束。
+  var SEARCH_PAGE = 20, SNIPPET = 110, searching = null;
+  function closeDrawer(aside) {
+    if (document.querySelector('.app-titlebar--mobile') && aside && aside.getBoundingClientRect().right > 0) {
+      var toggle = titlebarButton(0); if (toggle) toggle.click();
+    }
+  }
+  function searchOpen(row) {
+    if (searching) { searching.input.focus(); return; }
+    if (!window.wpConversationSearch) return;
+    var input = document.createElement('input');
+    input.type = 'text'; input.className = 'wp-nav-input'; input.autocomplete = 'off'; input.spellcheck = false;
+    input.setAttribute('enterkeyhint', 'search'); input.setAttribute('aria-controls', 'wp-search-results');
+    var results = document.createElement('div');
+    results.id = 'wp-search-results'; results.className = 'wp-search-results'; results.setAttribute('role', 'region');
+    var s = searching = { row: row, input: input, results: results, query: '', seq: 0, timer: 0, items: [], page: 0, more: false, loading: false, failed: false,
+      // 点这一行的图标或空白处时不让输入框失焦。
+      keep: function (e) { if (e.target !== input) e.preventDefault(); } };
+    input.addEventListener('input', function () { searchQuery(input.value.trim()); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); searchClose(true); }
+      else if (e.key === 'Enter') e.stopPropagation();
+    });
+    input.addEventListener('blur', function () { if (searching === s && !s.query) searchClose(false); });
+    results.addEventListener('scroll', function () {
+      if (results.scrollHeight - results.scrollTop - results.clientHeight < 48) searchMore();
+    }, { passive: true });
+    row.addEventListener('mousedown', s.keep);
+    row.classList.add('wp-nav-editing'); row.removeAttribute('role'); row.removeAttribute('tabindex');
+    row.appendChild(input);
+    searchSync(row.closest('aside.layout-sider'));
+    input.focus();
+  }
+  function searchClose(focusRow) {
+    var s = searching;
+    if (!s) return;
+    searching = null; clearTimeout(s.timer);
+    s.row.removeEventListener('mousedown', s.keep);
+    s.input.remove(); s.results.remove();
+    s.row.classList.remove('wp-nav-editing'); s.row.setAttribute('role', 'button'); s.row.tabIndex = 0;
+    document.documentElement.classList.remove('wp-search-active');
+    if (focusRow && s.row.isConnected) s.row.focus();
+  }
+  function searchSync(aside) {
+    var s = searching;
+    if (!s) return;
+    if (!aside || !s.row.isConnected || aside.classList.contains('collapsed')) { searchClose(false); return; }
+    s.input.placeholder = t('search'); s.input.setAttribute('aria-label', t('search')); s.results.setAttribute('aria-label', t('search'));
+    var list = aside.querySelector('[class*="_scrollArea"]');
+    if (list && s.results.nextElementSibling !== list) list.parentNode.insertBefore(s.results, list);
+  }
+  function searchQuery(query) {
+    var s = searching;
+    if (!s || query === s.query) return;
+    s.query = query; s.seq++; clearTimeout(s.timer);
+    document.documentElement.classList.toggle('wp-search-active', !!query);
+    if (!query) { s.items = []; s.results.replaceChildren(); return; }
+    s.timer = setTimeout(function () { searchFetch(0); }, 250);
+  }
+  function searchMore() {
+    var s = searching;
+    if (s && s.query && s.more && !s.loading) searchFetch(s.page + 1);
+  }
+  function searchFetch(page) {
+    var s = searching, seq = s.seq;
+    s.loading = true;
+    window.wpConversationSearch(s.query, page, SEARCH_PAGE).then(function (data) {
+      if (searching !== s || s.seq !== seq) return;
+      var items = (data && Array.isArray(data.items) ? data.items : []).filter(function (item) {
+        return !engineNotice({ type: item.message_type, content: { content: item.preview_text } });
+      });
+      s.items = page ? s.items.concat(items) : items; s.page = page; s.more = !!(data && data.has_more); s.failed = false;
+      s.loading = false; searchRender();
+    }, function (error) {
+      if (searching !== s || s.seq !== seq) return;
+      console.error('Conversation search failed', error);
+      if (!page) { s.items = []; s.failed = true; }
+      s.more = false; s.loading = false; searchRender();
+    });
+  }
+  function searchSnippet(value, query) {
+    var text = attachmentSummary(value).replace(/\s+/g, ' ').trim();
+    if (text.length <= SNIPPET) return text;
+    var at = text.toLowerCase().indexOf(query.toLowerCase());
+    var start = at < 0 ? 0 : Math.max(0, Math.min(at - 34, text.length - SNIPPET)), end = start + SNIPPET;
+    return (start > 0 ? '…' : '') + text.slice(start, end).trim() + (end < text.length ? '…' : '');
+  }
+  function searchMark(el, value, query) {
+    var lower = value.toLowerCase(), needle = query.toLowerCase(), from = 0, at;
+    while ((at = lower.indexOf(needle, from)) >= 0) {
+      if (at > from) el.appendChild(document.createTextNode(value.slice(from, at)));
+      var mark = document.createElement('mark'); mark.textContent = value.slice(at, at + needle.length); el.appendChild(mark);
+      from = at + needle.length;
+    }
+    el.appendChild(document.createTextNode(value.slice(from)));
+  }
+  function searchGo(item) {
+    var aside = searching.row.closest('aside.layout-sider');
+    searchClose(false);
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    // AionUi 的哈希路由从 history.state.usr 取跳转状态；与原生检索一样带上目标消息，对话页滚到那条并高亮。
+    var index = history.state && typeof history.state.idx === 'number' ? history.state.idx + 1 : 0;
+    history.pushState({ usr: { targetMessageId: item.message_id, fromConversationSearch: true }, key: Math.random().toString(36).slice(2, 10), idx: index },
+      '', '#/conversation/' + item.conversation.id);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+    closeDrawer(aside);
+  }
+  function searchRender() {
+    var s = searching;
+    var nodes = s.items.map(function (item) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'wp-search-result';
+      b.innerHTML = '<span class="wp-search-head"><span class="wp-search-title"></span><span class="wp-search-time"></span></span><span class="wp-search-snippet"></span>';
+      b.querySelector('.wp-search-title').textContent = attachmentSummary(item.conversation.name) || t('newChat');
+      b.querySelector('.wp-search-time').textContent = item.message_created_at ? ago(item.message_created_at) : '';
+      searchMark(b.querySelector('.wp-search-snippet'), searchSnippet(item.preview_text, s.query), s.query);
+      b.addEventListener('click', function () { searchGo(item); });
+      return b;
+    });
+    if (!nodes.length) {
+      var state = document.createElement('p');
+      state.className = 'wp-search-state'; state.textContent = t(s.failed ? 'searchFailed' : 'searchEmpty');
+      nodes.push(state);
+    }
+    s.results.replaceChildren.apply(s.results, nodes);
+  }
+  document.addEventListener('pointerdown', function (e) {
+    if (searching && !searching.row.contains(e.target) && !searching.results.contains(e.target)) searchClose(false);
+  }, true);
   var sidebarFade = edgeFade('bottom');
   var messageFade = edgeFade('top');
   function sidebar(aside) {
@@ -1000,17 +1137,14 @@
     if (newRow && !aside.querySelector('.wp-nav')) {
       var nav = document.createElement('div');
       nav.className = 'wp-nav';
-      nav.appendChild(navRow('search', 'search', t('search'), function () { var b = document.querySelector('.app-titlebar__menu button[aria-label="检索会话"],.app-titlebar__menu button[aria-label="Search messages"]') || document.querySelector('button.conversation-search-trigger-full'); if (b) b.click(); }));
+      var searchNav = navRow('search', 'search', t('search'), function () { searchOpen(searchNav); });
+      nav.appendChild(searchNav);
       nav.appendChild(navRow('auto', 'clock', t('automation'), function () { location.hash = '#/scheduled'; }));
-      nav.appendChild(navRow('market', 'market', t('market'), function () {
-        location.hash = '#/market';
-        if (document.querySelector('.app-titlebar--mobile') && aside.getBoundingClientRect().right > 0) {
-          var toggle = titlebarButton(0); if (toggle) toggle.click();
-        }
-      }));
+      nav.appendChild(navRow('market', 'market', t('market'), function () { location.hash = '#/market'; closeDrawer(aside); }));
       newRow.parentNode.insertBefore(nav, newRow.nextSibling);
     }
     text(aside.querySelector('[data-wp-nav="search"] .wp-nav-text'), t('search'));
+    searchSync(aside);
     text(aside.querySelector('[data-wp-nav="auto"] .wp-nav-text'), t('automation'));
     document.querySelector('.wp-sider-open').setAttribute('aria-label', t('expand'));
     if (head && head.querySelector('.wp-sider-toggle')) head.querySelector('.wp-sider-toggle').setAttribute('aria-label', t('collapse'));
