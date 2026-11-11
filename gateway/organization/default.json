@@ -162,11 +162,19 @@
     "template": ""
   },
   "features": {
+    "feedback": false,
     "feishuAuthorization": false,
     "feishuOnboarding": true,
     "marketSkills": true,
     "autoTitle": true,
     "preview": true
+  },
+  "feedback": {
+    "allow": [],
+    "handlers": [],
+    "botTokenFile": "/secure/feedback-bot.token",
+    "maxImageBytes": 5242880,
+    "maxImagesPerItem": 6
   },
   "market": {
     "approvers": [],
