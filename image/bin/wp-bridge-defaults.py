@@ -19,6 +19,10 @@ BACKGROUND_PROMPT = ('本会话来自消息应用，后台任务完成时会唤�
                      '内存和并发上限照旧。')
 # Rendered organization template in the image; bridge.upgradeKeys take their values from it.
 TEMPLATE = Path('/opt/workpartner/home/cc-connect-feishu.toml')
+# Bridge provider whose model list mirrors the web picker catalog; it sets no key or
+# base URL, so the agent keeps the container's model endpoint and key.
+PROVIDER = 'workpartner'
+HEADER = re.compile(r'(?m)^[ \t]*\[')
 
 
 def replace_key(source, path, key, value):
@@ -62,6 +66,76 @@ def replace_key(source, path, key, value):
     return candidates[0]
 
 
+def provider_block(provider, newline):
+    lines = ['[[projects.agent.providers]]', f'name = {json.dumps(provider["name"])}']
+    if 'model' in provider:
+        lines.append(f'model = {json.dumps(provider["model"], ensure_ascii=False)}')
+    lines.append('models = [')
+    lines += [f'  {{ model = {json.dumps(entry["model"], ensure_ascii=False)}, alias = {json.dumps(entry["alias"], ensure_ascii=False)} }},'
+              for entry in provider['models']]
+    lines.append(']')
+    return newline.join(lines) + newline
+
+
+def set_provider(source, index, catalog, original_model):
+    """Replace only the managed provider of one project and make it active unless another is chosen."""
+    parsed = tomllib.loads(source)
+    agent = parsed['projects'][index]['agent']
+    providers = agent.get('providers', [])
+    if not isinstance(providers, list):
+        raise ValueError('Unsupported bridge providers')
+    previous = next((p for p in providers if p.get('name') == PROVIDER), {})
+    models = [{'model': entry['key'], 'alias': entry['name']} for entry in catalog]
+    provider = {'name': PROVIDER, 'models': models}
+    # A model chosen with /model is kept while listed; one that only followed the
+    # previous default follows the current option.
+    chosen = previous.get('model')
+    if chosen and chosen != original_model and chosen in [entry['model'] for entry in models]:
+        provider['model'] = chosen
+    elif 'model' in agent.get('options', {}):
+        provider['model'] = agent['options']['model']
+    if previous != provider:
+        while any(p.get('name') == PROVIDER for p in tomllib.loads(source)['projects'][index]['agent'].get('providers', [])):
+            source = remove_provider(source, index)
+        expected = tomllib.loads(source)
+        expected['projects'][index]['agent'].setdefault('providers', []).append(provider)
+        newline = '\r\n' if '\r\n' in source else '\n'
+        block = provider_block(provider, newline)
+        candidates = (source[:pos] + prefix + block + source[pos:]
+                      for pos in reversed([m.start() for m in HEADER.finditer(source)] + [len(source)]) for prefix in ('', newline))
+        for candidate in candidates:
+            try:
+                if tomllib.loads(candidate) == expected:
+                    source = candidate
+                    break
+            except ValueError:
+                pass
+        else:
+            raise ValueError('Cannot safely place managed bridge provider')
+    if not tomllib.loads(source)['projects'][index]['agent'].get('options', {}).get('provider'):
+        source = replace_key(source, ('projects', index, 'agent', 'options'), 'provider', PROVIDER)
+    return source
+
+
+def remove_provider(source, index):
+    """Remove the first managed provider table (with its subtables) of one project."""
+    expected = tomllib.loads(source)
+    agent = expected['projects'][index]['agent']
+    agent['providers'] = [p for p in agent['providers'] if p.get('name') != PROVIDER] + \
+        [p for p in agent['providers'] if p.get('name') == PROVIDER][1:]
+    if not agent['providers']:
+        del agent['providers']
+    bounds = [m.start() for m in HEADER.finditer(source)] + [len(source)]
+    for i, start in enumerate(bounds):
+        for end in bounds[i + 1:]:
+            try:
+                if tomllib.loads(source[:start] + source[end:]) == expected:
+                    return source[:start] + source[end:]
+            except ValueError:
+                pass
+    raise ValueError('Cannot safely remove managed bridge provider')
+
+
 def template_upgrades(config, template, upgrades):
     """Yield template values for declared keys a person has not set or still has at a superseded default."""
     for entry in upgrades:
@@ -91,7 +165,7 @@ def template_upgrades(config, template, upgrades):
                 yield path, key, source[key]
 
 
-def migrate(target, model, effort, *, apply=True, template=None, upgrades=()):
+def migrate(target, model, effort, *, apply=True, template=None, upgrades=(), catalog=None):
     """Atomically update all projects, or leave the original untouched on failure."""
     target = Path(target).resolve()
     if not target.exists():
@@ -103,6 +177,7 @@ def migrate(target, model, effort, *, apply=True, template=None, upgrades=()):
     projects = tomllib.loads(source).get('projects')
     if not isinstance(projects, list) or not projects:
         raise ValueError('Missing bridge projects')
+    original_models = [project.get('agent', {}).get('options', {}).get('model') for project in projects]
     for index in range(len(projects)):
         for table, key, value in [('', 'type', 'claudecode'), ('options', 'mode', 'bypassPermissions'),
                                   ('options', 'model', model), ('options', 'reasoning_effort', effort),
@@ -111,6 +186,9 @@ def migrate(target, model, effort, *, apply=True, template=None, upgrades=()):
             source = replace_key(source, path, key, value)
     for path, key, value in template_upgrades(tomllib.loads(source), template or {}, upgrades):
         source = replace_key(source, path, key, value)
+    if catalog:
+        for index, original_model in enumerate(original_models):
+            source = set_provider(source, index, catalog, original_model)
     updated = source.encode('utf-8')
     if updated == original:
         return False
@@ -147,11 +225,12 @@ def refresh(target, model=None, effort=None, *, apply=True):
         model = model or os.environ.get('PARTNER_BRIDGE_MODEL')
         effort = effort or os.environ.get('PARTNER_DEFAULT_EFFORT')
         selected = organization()
+        runtime = json.loads(os.environ.get('WORKPARTNER_MODEL_CONFIG') or '{}')
         if not model or not effort:
             # Container exec inherits its creation environment, not exports made
             # by PID 1. Onboarding must also resolve the injected runtime config.
-            if os.environ.get('WORKPARTNER_MODEL_CONFIG'):
-                defaults = json.loads(os.environ['WORKPARTNER_MODEL_CONFIG'])['defaults']
+            if runtime:
+                defaults = runtime['defaults']
             else:
                 if selected is None:
                     raise FileNotFoundError('organization.json')
@@ -160,7 +239,9 @@ def refresh(target, model=None, effort=None, *, apply=True):
             effort = effort or defaults['effort']
         upgrades = ((selected or {}).get('bridge') or {}).get('upgradeKeys') or []
         template = tomllib.loads(TEMPLATE.read_text()) if upgrades and TEMPLATE.is_file() else None
-        return migrate(target, model, effort, apply=apply, template=template, upgrades=upgrades)
+        # The injected catalog already carries this user's model.userCatalog entries.
+        catalog = (runtime.get('catalog') or {}).get('claude')
+        return migrate(target, model, effort, apply=apply, template=template, upgrades=upgrades, catalog=catalog)
     except Exception as error:
         # Parser and OS exception messages can contain credentials; print type only.
         print(f'Warning: bridge defaults unchanged ({type(error).__name__}); continuing', file=sys.stderr)
