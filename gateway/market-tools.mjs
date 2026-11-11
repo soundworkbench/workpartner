@@ -39,6 +39,7 @@ export function createMarketTools({ organization, authenticate, keyFor, discover
     if (!user) return reply(401, { error: 'login_required' });
     if (req.method !== 'GET') return reply(405, { error: 'read_only' });
     if (!config) return reply(200, { groups: [], tools: [] });
+    const skill = config.skill ? { skill: config.skill } : {};
     let key;
     const safe = value => key ? line(value).replaceAll(key, '[redacted]') : line(value);
     const localized = value => Object.fromEntries(['zh', 'en'].map(lang => [lang, safe(value[lang])]));
@@ -56,12 +57,12 @@ export function createMarketTools({ organization, authenticate, keyFor, discover
           title: Object.fromEntries(['zh', 'en'].map(lang => [lang, safe(display[tool.name]?.[lang]?.name) || safe(tool.title) || safe(tool.name)])),
           description: Object.fromEntries(['zh', 'en'].map(lang => [lang, safe(display[tool.name]?.[lang]?.description) || safe(tool.description)])) };
       });
-      return reply(200, { groups: metadataGroups(visible.map(tool => presentation(tool.name))), tools: rows });
+      return reply(200, { ...skill, groups: metadataGroups(visible.map(tool => presentation(tool.name))), tools: rows });
     } catch (error) {
-      if (error.message === 'MCP hub denied') return reply(200, { groups: metadataGroups([]), tools: [] });
+      if (error.message === 'MCP hub denied') return reply(200, { ...skill, groups: metadataGroups([]), tools: [] });
       // Keep a failed discovery in the configured category card areas so data tools remain usable.
       const rows = [presentation(''), ...Object.keys(config.tools || {}).filter(name => !hidden.has(name)).map(presentation)];
-      return reply(503, { error: 'temporarily_unavailable', groups: metadataGroups(rows) });
+      return reply(503, { error: 'temporarily_unavailable', ...skill, groups: metadataGroups(rows) });
     }
   };
 }

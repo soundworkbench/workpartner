@@ -1105,15 +1105,17 @@
     });
     updateMarket();
   }
-  /** Register a synchronous renderer for skills/tools; it may return cleanup. The returned disposer unregisters this renderer. */
-  window.wpMarket = { tryExample: function (example) {
+  /** Register a synchronous renderer for skills/tools; it may return cleanup. The returned disposer unregisters this renderer.
+   *  tryExample(text, skill) drafts a new conversation; a skill is inserted as the slash menu inserts it, before the text. */
+  window.wpMarket = { tryExample: function (example, skill) {
+    var draft = skill ? '/' + skill + ' ' + example : example;
     location.hash = '#/guid';
     var timer, observer = new MutationObserver(fill);
     function fill() {
       var input = document.querySelector('[data-testid="guid-input"]');
       if (!input) return;
       observer.disconnect(); clearTimeout(timer);
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, example);
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, draft);
       input.dispatchEvent(new Event('input', { bubbles: true })); input.focus();
     }
     observer.observe(document.body, { subtree: true, childList: true });

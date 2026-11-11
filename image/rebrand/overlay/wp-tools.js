@@ -1,4 +1,5 @@
 // A single category/filter/card renderer for all organization tool sources.
+// A source may name the skill its cards belong to; “Try it” then drafts with that skill selected.
 (function () {
   'use strict';
   var sources = [], refresh = null;
@@ -60,7 +61,7 @@
         var description = element('p', 'wp-skill-description', tool.description[language]); description.title = tool.description[language];
         var footer = element('div', 'wp-data-foot'); footer.append(element('span', 'wp-data-price', tool.included ? copy.included : tool.priceLabel));
         var button = element('button', 'wp-skill-action', copy.tryIt), prompt = tool.example ? tool.example[language] : starter(tool); button.type = 'button';
-        button.addEventListener('click', function () { window.wpMarket.tryExample(prompt); }); footer.append(button);
+        button.addEventListener('click', function () { window.wpMarket.tryExample(prompt, tool.skill); }); footer.append(button);
         card.append(heading, description, footer); cards.append(card);
       });
       visible += 12; more.hidden = visible >= tools.length;
@@ -69,7 +70,9 @@
       var current = ++cardRevision, group = groups.find(function (row) { return row.id === selected; });
       cards.replaceChildren(); more.hidden = true; retry.hidden = true; status.textContent = copy.loading;
       if (!group) { status.textContent = copy.empty; return; }
-      var results = await Promise.allSettled(group.entries.map(function (entry) { return entry.loadTools(platformId); }));
+      var results = await Promise.allSettled(group.entries.map(async function (entry) {
+        return (await entry.loadTools(platformId)).map(function (tool) { return Object.assign({}, tool, { skill: entry.skill }); });
+      }));
       if (disposed || current !== cardRevision) return;
       tools = results.filter(function (result) { return result.status === 'fulfilled'; }).flatMap(function (result) { return result.value; });
       var failed = results.some(function (result) { return result.status === 'rejected'; });
@@ -89,7 +92,7 @@
         result.value.categories.forEach(function (entry) {
           var group = combined.get(entry.id);
           if (!group) { group = { id: entry.id, name: entry.name, platforms: [], entries: [] }; combined.set(entry.id, group); }
-          group.entries.push(entry);
+          group.entries.push(Object.assign({}, entry, { skill: result.value.skill || '' }));
           entry.platforms.forEach(function (platform) { if (!group.platforms.some(function (row) { return row.id === platform.id; })) group.platforms.push(platform); });
         });
         if (result.value.renderHeader) { var cleanup = result.value.renderHeader(top); if (cleanup) cleanups.push(cleanup); }

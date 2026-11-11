@@ -56,6 +56,7 @@
     }
     var data = await request('/_wp/data/tools');
     return {
+      skill: 'data-tools',
       renderHeader: data.groups.some(function (group) { return group.platforms.length; }) ? renderHeader : null,
       categories: data.groups.map(function (group) {
         return { id: group.name.en, name: group.name, platforms: group.platforms, loadTools: async function (platformId) {
