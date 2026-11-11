@@ -106,10 +106,11 @@ export function createDockerRuntime(o = {}) {
     const r = await transport("POST", `/containers/create?name=${container}`, {
       Image: o.image, User: `${uid}:${uid}`, Hostname: container,
       Env: [`${o.modelBaseEnvironment || "MODEL_BASE_URL"}=${o.modelBaseUrl}`, `PARTNER_USER_NAME=${user.name || ""}`,
+        ...(o.sharedSkills ? [`WORKPARTNER_SHARED_SKILLS=${o.sharedSkills.container}`, `WORKPARTNER_MARKET_PREINSTALLED=${JSON.stringify(o.sharedSkills.preinstalled)}`] : []),
         ...(modelConfig ? [`WORKPARTNER_MODEL_CONFIG=${modelConfig}`] : [])],
       Labels: { [o.userLabel || "workpartner.next-user"]: slug },
       HostConfig: {
-        Binds: [`${o.hostData}/${slug}:/data`, `${o.hostSecure}/${key}:${o.modelKeyFile || "/etc/partner/model.key"}:ro`, ...oldWork],
+        Binds: [`${o.hostData}/${slug}:/data`, `${o.hostSecure}/${key}:${o.modelKeyFile || "/etc/partner/model.key"}:ro`, ...(o.sharedSkills ? [`${o.sharedSkills.host}:${o.sharedSkills.container}:ro`] : []), ...oldWork],
         NetworkMode: network, RestartPolicy: { Name: "unless-stopped" },
         Memory: o.memory, NanoCpus: o.nanoCpus, PidsLimit: o.pidsLimit,
       },

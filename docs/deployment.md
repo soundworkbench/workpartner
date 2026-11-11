@@ -43,7 +43,7 @@ Run Linux checks before building an image. After building, run `WORKPARTNER_TEST
 
 An administrator supplies a dedicated HTTPS hostname with its identity callback set to `https://<host>/_wp/callback`, an existing test application secret file, and existing test model keys. This guide does not create or rotate credentials. Use empty preview directories, and keep them separate from any running deployment.
 
-Copy `org/default` to an external organization directory. Edit its `organization.json`: set `publicHost`, `identity.appId`, `model.baseUrl`, `runtime.nextImage` to `workpartner-user:local`, `runtime.hostData` to the absolute host preview data directory, and `runtime.hostSecure` to the absolute host preview secret directory. The default `runtime.nextDirectory` is `/workspaces`; create `<data>/workspaces`, `<data>/users`, `<data>/state`, and `<secrets>/aionui`, and put an empty JSON array in `<data>/users.json`. Give UID 1001 access to its user volumes. Store the existing identity secret at `<secrets>/identity-app.secret`. Place pre-created test model key files in `<secrets>/model-pool/*.key`; the gateway assigns one to each newly admitted test user. Do not use production keys or user lists.
+Copy `org/default` to an external organization directory. Edit its `organization.json`: set `publicHost`, `identity.appId`, `model.baseUrl`, `runtime.nextImage` to `workpartner-user:local`, `runtime.hostData` to the absolute host preview data directory, and `runtime.hostSecure` to the absolute host preview secret directory. The default `runtime.nextDirectory` is `/workspaces`; create `<data>/workspaces`, `<data>/users`, `<data>/state`, `<data>/shared-skills`, and `<secrets>/aionui`, and put an empty JSON array in `<data>/users.json`. Give UID 1001 access to its user volumes. Store the existing identity secret at `<secrets>/identity-app.secret`. Place pre-created test model key files in `<secrets>/model-pool/*.key`; the gateway assigns one to each newly admitted test user. Do not use production keys or user lists.
 
 Set `model.defaults.codex` and `model.defaults.claude` to available test models before building. With `ORG_DIR` set to the absolute host organization directory and `PKG` set to the verified build inputs, build the user image with that organization:
 
@@ -67,6 +67,7 @@ docker run -d --name workpartner-preview-gateway --hostname workpartner-preview-
   -v "$DATA_DIR/workspaces:/workspaces" \
   -v "$DATA_DIR/users:/users" \
   -v "$DATA_DIR/state:/state" \
+  -v "$DATA_DIR/shared-skills:/shared-skills" \
   -v "$SECURE_DIR:/secure" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   workpartner-gateway:local

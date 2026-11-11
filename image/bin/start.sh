@@ -32,9 +32,11 @@ bash /opt/workpartner/agent-baseline/install.sh /data/.claude /data/.claude/hook
 ANTHROPIC_MODEL=$(python3 -I -c 'import json, os; print(json.load(open("/data/.claude/settings.json")).get("model") or os.environ["ANTHROPIC_MODEL"])') || exit 1
 export ANTHROPIC_MODEL
 cp -R /opt/workpartner/skills/. /data/.claude/skills/
-# Codex 直接链到镜像里的同一份公司技能；镜像里删掉的技能，留下的断链一并清掉。本人同名目录优先，不覆盖。
+# Codex links to the image skills; existing personal directories take priority.
 for d in /opt/workpartner/skills/*/; do ln -sfnT "${d%/}" "$CODEX_HOME/skills/$(basename "$d")" 2>/dev/null; done
-find "$CODEX_HOME/skills" -maxdepth 1 -xtype l -delete
+# Keep dangling company links: withdrawing a skill must not make a future startup adopt personal files.
+# Broken skill links remain until explicitly removed; company links are managed by wp-skill.
+python3 -I /opt/workpartner/bin/wp-market refresh-preinstalled || echo "警告：预装的共享技能暂不可用" >&2
 # 引擎启动前校正早期模型名，再比较组织默认值。
 if [ -f "$CODEX_HOME/config.toml" ]; then
   python3 -I /opt/workpartner/bin/wp-normalize-codex-model.py "$CODEX_HOME/config.toml" || echo "警告：未更新 Codex 配置，继续启动" >&2

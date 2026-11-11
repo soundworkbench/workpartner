@@ -152,6 +152,8 @@ export function createAionui(o) {
       stale = !!target && info.imageId !== target;
     }
     if (info.exists && modelConfig && !(info.env || []).includes(`WORKPARTNER_MODEL_CONFIG=${modelConfig}`)) stale = true;
+    if (info.exists && o.sharedSkills && !(info.env || []).includes(`WORKPARTNER_SHARED_SKILLS=${o.sharedSkills.container}`)) stale = true;
+    if (info.exists && o.sharedSkills && !(info.env || []).includes(`WORKPARTNER_MARKET_PREINSTALLED=${JSON.stringify(o.sharedSkills.preinstalled)}`)) stale = true;
     if (!stale) { busySince.delete(slug); lastBusyAt.delete(slug); forcePending.delete(slug); }
     let forced = false;
     let current = null;   // 旧容器仍可用时的地址

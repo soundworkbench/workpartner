@@ -17,7 +17,7 @@ export function skillExecutor(runtime, uid = 1001) {
       }
       const source = temporary && `/data/${temporary}/${filename}`;
       const args = action === 'install' ? [...(overwrite ? ['--overwrite'] : []), action, '--', source]
-        : action === 'delete' ? [action, '--', name] : ['list'];
+        : ['delete', 'export', 'shared-install'].includes(action) ? [action, '--', name] : ['list'];
       const result = await runtime.exec(user.slug, ['/opt/workpartner/bin/wp-skill', ...args], { user: String(uid), strictOutput: true });
       if (result.exitCode !== 0) throw new Error('worker failed');
       return JSON.parse(result.stdout);
@@ -78,8 +78,8 @@ export function createMarketSkills({ authenticate, runtime, origin, uid = 1001, 
       if (result.error) {
         json(res, ERROR_STATUS[result.error] || 400, { error: result.error, message: result.message, ...(result.name ? { name: result.name } : {}) });
       } else if (req.method === 'GET') {
-        json(res, 200, { skills: result.skills.map(({ id, name, description, displayName, displayDescription, preinstalled }) =>
-          ({ id, name, description, displayName, displayDescription, preinstalled })) });
+        json(res, 200, { skills: result.skills.map(({ id, name, description, displayName, displayDescription, preinstalled, shared, withdrawn }) =>
+          ({ id, name, description, displayName, displayDescription, preinstalled, shared, withdrawn })) });
       } else json(res, 200, { name: result.name });
     } catch (error) {
       json(res, 503, { error: 'temporarily_unavailable', message: '技能操作尚未确认完成，请刷新列表后重试。' });

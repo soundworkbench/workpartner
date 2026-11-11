@@ -18,6 +18,8 @@ export interface Organization {
       /** Optional resolver ndots (integer 1–15); omitted preserves cluster defaults. */
       dnsNdots?: number;
       storageClass?: string; dataVolumeSize?: string; newUserNodeSelector?: Record<string, string>;
+      /** Same-named claims in system/user namespaces must expose the same shared filesystem. */
+      sharedSkillsClaim?: string;
       memoryRequest?: string; cpuRequest?: string; userPriorityClass?: string;
       userResources?: Record<string, { memory?: string | number; cpu?: string | number }>;
       gatewayResources?: { cpu?: string; memory?: string };
@@ -51,6 +53,7 @@ export interface Organization {
     hostData: string; hostSecure: string; hostConfig: string;
   };
   appearance: { authorizationStyle?: string; brandDirectory: string; timezoneFallback: string; themeColor: string; avatarColor: string; gateway: Record<string, string>; copy?: Record<string, unknown> };
+  market: { approvers: string[]; reservedPrefixes: string[]; protectedNames: string[]; sharedDirectory: string; containerDirectory: string; preinstalled: string[] };
   image: { officialSkillsArchive?: string; homeDirectory: string; instructions: string; legacyInstructions: string; skillTranslations: string; skills: string[] };
   bridge: { template: string };
   tools?: { legacyRollout?: string };

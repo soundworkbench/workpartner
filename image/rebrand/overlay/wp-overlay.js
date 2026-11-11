@@ -1073,7 +1073,7 @@
   }
   function updateMarket() {
     marketLocale = locale();
-    text(marketHost.querySelector('h1'), t('market'));
+    text(marketHost.querySelector('h1'), locale() === 'zh-CN' ? '技能市场' : 'Skill market');
     marketHost.querySelector('[role="tablist"]').setAttribute('aria-label', t('market'));
     marketHost.querySelectorAll('[role="tab"]').forEach(function (button) {
       var selected = button.dataset.tab === marketTab;
@@ -1106,7 +1106,19 @@
     updateMarket();
   }
   /** Register a synchronous renderer for skills/tools; it may return cleanup. The returned disposer unregisters this renderer. */
-  window.wpMarket = { register: function (tab, render) {
+  window.wpMarket = { tryExample: function (example) {
+    location.hash = '#/guid';
+    var timer, observer = new MutationObserver(fill);
+    function fill() {
+      var input = document.querySelector('[data-testid="guid-input"]');
+      if (!input) return;
+      observer.disconnect(); clearTimeout(timer);
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, example);
+      input.dispatchEvent(new Event('input', { bubbles: true })); input.focus();
+    }
+    observer.observe(document.body, { subtree: true, childList: true });
+    timer = setTimeout(function () { observer.disconnect(); }, 10000); fill();
+  }, register: function (tab, render) {
     if (['skills', 'tools'].indexOf(tab) < 0 || typeof render !== 'function') throw new TypeError('Expected skills/tools and a renderer');
     var entry = { render: render };
     marketRenderers.set(tab, entry);

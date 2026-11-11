@@ -104,6 +104,28 @@ function fixture(t, options = {}) {
 }
 const writes = c => c.calls.filter(([method]) => ['create', 'patch', 'remove'].includes(method));
 
+test('shared skills use a read-only PVC without adding hostPath access to personal Pods or jobs', async t => {
+  const { client, secureDir } = fixture(t);
+  const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    secureDirectory: secureDir, k8s: { namespace: 'users', storageClass: 'local-data', sharedSkillsClaim: 'reviewed-library' } },
+    model: { keyPrefix: 'model-' }, features: { marketSkills: true },
+    market: { containerDirectory: '/opt/reviewed', preinstalled: ['meeting-notes'] } };
+  const runtime = createRuntime(organization, { client });
+  await runtime.create({ slug: 'person' });
+  const pod = client.objects.get(stsPath).spec.template.spec;
+  assert.deepEqual(pod.volumes.find(volume => volume.name === 'shared-skills'),
+    { name: 'shared-skills', persistentVolumeClaim: { claimName: 'reviewed-library', readOnly: true } });
+  assert.deepEqual(pod.containers[0].volumeMounts.find(mount => mount.name === 'shared-skills'),
+    { name: 'shared-skills', mountPath: '/opt/reviewed', readOnly: true });
+  assert.equal(pod.volumes.some(volume => volume.hostPath), false);
+  const env = Object.fromEntries(pod.containers[0].env.map(({ name, value }) => [name, value]));
+  assert.equal(env.WORKPARTNER_SHARED_SKILLS, '/opt/reviewed');
+  assert.deepEqual(JSON.parse(env.WORKPARTNER_MARKET_PREINSTALLED), ['meeting-notes']);
+  await runtime.runOnce('person');
+  const job = client.calls.find(([method, route]) => method === 'create' && route === `${core}/pods`)[2].spec;
+  assert.equal(job.volumes.some(volume => volume.name === 'shared-skills'), false);
+});
+
 test('user and job Pods set ndots only when explicitly configured', async t => {
   for (const dnsNdots of [undefined, 1, 4, 15]) await t.test(String(dnsNdots), async t => {
     const { runtime, client } = fixture(t, { dnsNdots, clusterDomain: 'cluster.invalid' });
