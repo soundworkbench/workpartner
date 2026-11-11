@@ -88,7 +88,7 @@ assert.equal(typeof context.personalRuntime.inspect, 'function');
   assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
 });
 
-async function fixture(t, { disabled = false, extension = false, userImages } = {}) {
+async function fixture(t, { disabled = false, extension = false, userImages, feedback } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-services-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
@@ -105,6 +105,15 @@ async function fixture(t, { disabled = false, extension = false, userImages } = 
     sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'), cookieFile: path.join(dir, 'cookies.json'),
     nextDirectory: path.join(dir, 'workspaces'), stateDirectory: path.join(dir, 'state'), secureDirectory: path.join(dir, 'secure') });
   if (userImages !== undefined) org.runtime.k8s = { userImages };
+  if (feedback) {
+    org.features.feedback = feedback.enabled;
+    org.feedback = { ...org.feedback, allow: feedback.allow || [], handlers: [], botTokenFile: path.join(dir, 'feedback-bot.token') };
+    fs.writeFileSync(org.feedback.botTokenFile, 'fixture-feedback-token\n');
+    if (feedback.store !== undefined) {
+      fs.mkdirSync(path.join(org.runtime.stateDirectory, 'feedback'), { recursive: true });
+      fs.writeFileSync(path.join(org.runtime.stateDirectory, 'feedback/store.json'), feedback.store);
+    }
+  }
   org.identity.appId = 'fixture-app'; org.identity.appSecretFile = path.join(dir, 'identity.secret');
   fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
   fs.writeFileSync(org.identity.appSecretFile, 'fixture-app-secret');
@@ -679,4 +688,76 @@ test('without migration forwarding, previews, internal tokens and keep-running p
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   assert.equal(inspections, 0, 'Docker inspect fields may be undefined and no keep-running timer starts');
+});
+
+test('feedback disabled uses default gateway authentication and 404 without creating state', async t => {
+  const f = await fixture(t, { disabled: true, feedback: { enabled: false, allow: ['*'] } });
+  const cookie = await f.login();
+  for (const route of ['/_wp/feedback', '/_wp/api/feedback', '/_wp/api/feedback/bot/changes']) {
+    const signed = await f.request(route, { headers: { cookie } });
+    assert.equal(signed.status, 404, route); assert.equal(signed.body, '');
+    for (const headers of [{}, { authorization: 'Bearer fixture-feedback-token' }]) {
+      const response = await f.request(route, { headers });
+      assert.equal(response.status, 302, route);
+      assert.equal(response.headers.location, '/_wp/login?next=' + encodeURIComponent(route));
+      assert.equal((await f.request(route, { method: 'POST', headers })).status, 401);
+    }
+  }
+  assert.equal(fs.existsSync(path.join(f.dir, 'state/feedback')), false);
+});
+
+test('feedback pending sessions get 404 while the existing preparing page is unchanged', async t => {
+  const f = await fixture(t, { disabled: true, feedback: { enabled: true, allow: ['*'] } });
+  const cookie = await f.login();
+  fs.writeFileSync(f.org.runtime.usersFile, '[]');
+  for (const route of ['/_wp/feedback', '/_wp/api/feedback']) {
+    const result = await f.request(route, { headers: { cookie } });
+    assert.equal(result.status, 404); assert.equal(result.body, '');
+  }
+  const preparing = await f.request('/_wp/preparing', { headers: { cookie } });
+  assert.equal(preparing.status, 200); assert.match(preparing.body, /工作伙伴待开通/);
+});
+
+test('corrupt feedback store leaves gateway login and identity routes available', async t => {
+  const store = '{"private-submission":"secret-token",oops}';
+  const f = await fixture(t, { disabled: true, feedback: { enabled: true, allow: ['*'], store } });
+  const cookie = await f.login();
+  assert.equal((await f.request('/_wp/me', { headers: { cookie } })).status, 200);
+  for (const route of ['/_wp/feedback', '/_wp/api/feedback', '/_wp/api/feedback/bot/changes']) {
+    const response = await f.request(route, { headers: { cookie } });
+    assert.equal(response.status, 503); assert.match(response.body, /反馈功能暂时不可用/);
+  }
+  assert.equal(fs.readFileSync(path.join(f.dir, 'state/feedback/store.json'), 'utf8'), store);
+  assert.doesNotMatch(f.output(), /private-submission|secret-token|oops/);
+});
+
+test('feedback live allow list gates sessions; allowed users submit and list without restarting', async t => {
+  const f = await fixture(t, { disabled: true, feedback: { enabled: true, allow: [] } });
+  const cookie = await f.login(), headers = { cookie };
+  for (const route of ['/_wp/feedback', '/_wp/api/feedback']) {
+    const r = await f.request(route, { headers }); assert.equal(r.status, 404); assert.equal(r.body, '');
+  }
+  assert.equal((await f.request('/_wp/feedback')).status, 302);
+  assert.equal((await f.request('/_wp/api/feedback')).status, 401);
+  f.org.feedback.allow = ['user1'];
+  fs.writeFileSync(path.join(f.dir, 'organization.json'), JSON.stringify(f.org));
+  const page = await f.request('/_wp/feedback', { headers }); assert.equal(page.status, 200); assert.match(page.body, /提交反馈/);
+  const created = await f.request('/_wp/api/feedback', { method: 'POST', headers: { ...headers, origin: 'https://' + f.org.publicHost, 'content-type': 'application/json' }, body: JSON.stringify({ type: 'bug', title: '集成问题', body: '复现说明' }) });
+  assert.equal(created.status, 201, created.body);
+  const listing = await f.request('/_wp/api/feedback', { headers }); assert.equal(listing.status, 200);
+  assert.equal(JSON.parse(listing.body).items[0].id, JSON.parse(created.body).item.id);
+  assert.ok(!listing.body.includes(f.user.unionId));
+  fs.writeFileSync(path.join(f.dir, 'organization.json'), '{');
+  assert.equal((await f.request('/_wp/api/feedback', { headers })).status, 404);
+});
+
+test('feedback bot routes accept only service tokens, independent of the user allow list', async t => {
+  const f = await fixture(t, { disabled: true, feedback: { enabled: true, allow: [] } });
+  const cookie = await f.login(), route = '/_wp/api/feedback/bot/changes';
+  for (const headers of [{}, { cookie }, { authorization: 'Bearer incorrect' }, { authorization: 'Bearer ' + issueToken('fixture-session-key', f.user) }]) {
+    assert.equal((await f.request(route, { headers })).status, 401);
+  }
+  const response = await f.request(route, { headers: { authorization: 'Bearer fixture-feedback-token' } });
+  assert.equal(response.status, 200); assert.deepEqual(JSON.parse(response.body), { items: [], next: 0 });
+  assert.equal((await f.request('/_wp/api/feedback', { headers: { authorization: 'Bearer fixture-feedback-token' } })).status, 401);
 });

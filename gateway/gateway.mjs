@@ -94,6 +94,11 @@ aionui.startReconcileImages(users, organization.runtime.k8s?.reconcileImagesInte
 const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
+import { createFeedback } from './feedback.mjs';
+const feedback = organization.features.feedback ? createFeedback({ organization, organizationData,
+  authenticate: req => userFor(req).user, tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()),
+  sessionAuthenticate: sessionOf,
+}) : undefined;
 
 function sessionOf(req) {
   const [data, mac] = String(cookieOf(req, "wp_sid") || legacy?.sessionCookieNames?.map(name => cookieOf(req, name)).find(Boolean) || "").split(".");
@@ -287,6 +292,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith("/_wp/ds-tools/")) { res.writeHead(404); return res.end(); } // Internal port only.
     if (await marketTools(req, res, url)) return;
     if (organization.features.marketSkills && await marketSkills(req, res, url)) return;
+    if (feedback && await feedback(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
