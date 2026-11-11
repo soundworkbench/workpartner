@@ -9,12 +9,13 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
     function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value); }
     // Runs in <head>, before the main UI router. Match feedback.mjs /items/:id.
     const url = new URL(location.href), parameter = url.searchParams.get('wp-feedback');
-    let autoOpen = false, initialId = '';
+    let autoOpen = false, initialId = '', invalidInitialId = false;
     if (parameter !== null) {
       const legacyHash = parameter === '1' && url.hash && !url.hash.startsWith('#/');
       const candidate = parameter === '1' && legacyHash ? url.hash.slice(1) : parameter;
       initialId = (parameter !== '1' || legacyHash) && validId(candidate) ? candidate : '';
       autoOpen = parameter === '1' || Boolean(initialId);
+      invalidInitialId = Boolean(legacyHash && !validId(candidate));
       // Parse only each key; keep all unrelated query segments byte-for-byte.
       const parts = location.search.slice(1).split('&').filter(part => {
         try { return decodeURIComponent(part.split('=')[0].replace(/\+/g, ' ')) !== 'wp-feedback'; }
@@ -56,8 +57,8 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
     const draftFiles = [];
     function reveal(target) {
       // scrollIntoView may also scroll ancestor containers, including the page.
-      dialog.scrollTop = Math.max(0, dialog.scrollTop + target.getBoundingClientRect().top
-        - dialog.getBoundingClientRect().top - dialog.clientTop - 16);
+      ui.content.scrollTop = Math.max(0, ui.content.scrollTop + target.getBoundingClientRect().top
+        - ui.content.getBoundingClientRect().top - ui.content.clientTop - 16);
     }
     const unexpected = () => {
       try { if (ui.message) ui.message.textContent = t('暂时无法处理，请稍后重试。', 'Unable to continue. Please try again.'); }
@@ -140,13 +141,14 @@ function installFeedback({ maxImageBytes: maxBytes, maxImagesPerItem: maxImages 
     function styles() {
       const style = node('style');
       style.textContent = `
-.wp-feedback-dialog { position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(800px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:auto; padding:24px; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; color-scheme:light; }
+.wp-feedback-dialog { position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(800px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:hidden; padding:0; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; color-scheme:light; }
+.wp-feedback-content { max-height:calc(100dvh - 26px); overflow:auto; padding:24px; }
 html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
 .wp-feedback-dialog::backdrop { background:var(--wp-feedback-backdrop, rgba(0,0,0,.35)); }
 .wp-feedback-dialog * { box-sizing:border-box; min-width:0; }
 .wp-feedback-dialog [hidden] { display:none!important; }
 .wp-feedback-dialog h2 { margin:0 32px 12px 0; font-size:18px; }
-.wp-feedback-dialog h3 { margin:8px 0; font-size:16px; }
+.wp-feedback-dialog h3 { margin:8px 32px 8px 0; font-size:16px; }
 .wp-feedback-dialog section { border-top:1px solid var(--wp-line, #ddd); padding-top:16px; margin-top:16px; }
 .wp-feedback-dialog label { display:block; margin:10px 0; }
 .wp-feedback-dialog fieldset { border:0; padding:0; margin:0; }
@@ -158,12 +160,14 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
 .wp-feedback-dialog button { cursor:pointer; max-width:100%; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:6px 12px; background:var(--wp-send, #3C3F43); color:var(--wp-send-ink, #FCFCFC); font:inherit; font-size:13px; overflow-wrap:anywhere; }
 .wp-feedback-dialog button:hover { background:var(--wp-send-hover, #2E3237); }
 .wp-feedback-dialog button:disabled { opacity:.5; cursor:wait; }
+.wp-feedback-dialog .wp-feedback-picker button:disabled { cursor:not-allowed; }
 .wp-feedback-dialog .wp-feedback-secondary, .wp-feedback-dialog .wp-feedback-entry { background:var(--wp-hover, #eee); color:var(--wp-ink, #222); }
 .wp-feedback-dialog .wp-feedback-secondary:hover, .wp-feedback-dialog .wp-feedback-entry:hover { background:var(--wp-active, #ddd); }
 .wp-feedback-dialog :focus-visible { outline:2px solid var(--wp-focus-line, #888); outline-offset:2px; }
-.wp-feedback-dialog .wp-feedback-close { position:absolute; right:12px; top:10px; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-3, #777); }
+.wp-feedback-dialog .wp-feedback-close { position:absolute; right:12px; top:10px; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-2, #666); }
 .wp-feedback-dialog .wp-feedback-close:hover { background:var(--wp-hover, #eee); }
 .wp-feedback-dialog a { color:var(--wp-ink, #222); }
+.wp-feedback-loading { color:var(--wp-ink-3, #777); }
 .wp-feedback-muted { color:var(--wp-ink-2, #666); }
 .wp-feedback-message, .wp-feedback-text { white-space:pre-wrap; overflow-wrap:anywhere; }
 .wp-feedback-message { color:var(--wp-ink-2, #666); }
@@ -179,7 +183,7 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
 .wp-feedback-images img { max-width:100%; max-height:220px; object-fit:contain; }
 .wp-feedback-images a { display:inline-block; max-width:100%; margin:4px; }
 .wp-feedback-comment { border-top:1px solid var(--wp-line, #ddd); padding-top:10px; margin-top:10px; }
-@media(max-width:400px) { .wp-feedback-dialog { padding:16px; } }
+@media(max-width:400px) { .wp-feedback-content { padding:16px; } }
 `;
       document.head.append(style);
     }
@@ -258,12 +262,13 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
       form.append(fields, draftQueue.label, draftQueue.hint, draftQueue.thumbs, ui.submit, ui.submitMessage);
       form.addEventListener('paste', draftQueue.paste); form.addEventListener('submit', safe(submit));
       const listSection = node('section'), row = node('div', undefined, 'wp-feedback-row');
-      ui.listTitle = node('h3'); ui.scope = button('', () => { if (detailBusy) return; all = !all; return list(); }, true); ui.scope.hidden = true;
+      ui.listTitle = node('h3'); ui.listTitle.setAttribute('tabindex', '-1'); ui.scope = button('', () => { if (detailBusy) return; all = !all; return list(); }, true); ui.scope.hidden = true;
       ui.refresh = button('', async () => { if (detailBusy) return; if (await list()) await openDetail(currentId); }, true);
       translations.push(() => { ui.refresh.textContent = t('刷新', 'Refresh'); });
       row.append(ui.listTitle, ui.scope, ui.refresh); ui.list = node('div', undefined, 'wp-feedback-list'); ui.message = message();
       listSection.append(row, ui.list, ui.message); ui.detail = node('section'); ui.detail.id = 'wp-feedback-detail'; ui.detail.hidden = true;
-      dialog.append(title, close, introduction, draft, listSection, ui.detail); document.body.append(dialog);
+      ui.content = node('div', undefined, 'wp-feedback-content');
+      ui.content.append(title, introduction, draft, listSection, ui.detail); dialog.append(ui.content, close); document.body.append(dialog);
       dialog.addEventListener('click', safe(event => {
         if (event.target !== dialog) return;
         const r = dialog.getBoundingClientRect();
@@ -335,29 +340,42 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
       } catch (error) {
         ui.submitMessage.textContent = (pendingItem ? t(`反馈 #${pendingItem.no} 已保存；截图未全部上传，可删除或重试。`,
           `Feedback #${pendingItem.no} was saved. Some screenshots remain; remove them or retry. `) : '') + error.message;
-      } finally { draftBusy = false; controls(); await list(); }
-      // Render the refreshed list first: changing its height moves the detail below it.
-      if (savedKey) await openDetail(savedKey, true);
+      } finally {
+        draftBusy = false; controls();
+        const version = detailVersion;
+        await list();
+        // Render the refreshed list first: changing its height moves the detail below it.
+        if (savedKey && version === detailVersion) await openDetail(savedKey, true);
+      }
     }
     async function openDetail(key, scroll = false) {
       if (detailBusy || revoked) return;
-      currentId = key; const version = ++detailVersion, section = ui.detail;
-      if (!key) { section.hidden = true; return; }
-      if (!validId(key)) { ui.message.textContent = invalidItem(); reveal(ui.message); return; }
-      section.hidden = false;
-      // Keep the existing editor until a read succeeds; failed refreshes must not erase input.
+      const section = ui.detail;
+      const refreshing = key === currentId && !scroll && !section.hidden && Boolean(section.querySelector('form'));
+      currentId = key; const version = ++detailVersion;
+      const clear = () => {
+        detailQueue?.dispose(); detailQueue = null; section.onpaste = null;
+        section.replaceChildren(); section.hidden = true; ui.back = null;
+      };
+      if (!key) { clear(); return; }
+      if (!validId(key)) { clear(); ui.message.textContent = invalidItem(); reveal(ui.message); return; }
+      // A same-item refresh keeps its live editor so an in-flight write can invalidate the read.
+      if (!refreshing) clear();
+      section.querySelector('.wp-feedback-loading')?.remove();
+      section.append(node('p', t('加载中…', 'Loading…'), 'wp-feedback-loading')); section.hidden = false;
+      ui.message.textContent = '';
       try {
         const data = await api('/items/' + encodeURIComponent(key));
         if (version !== detailVersion || revoked) return;
         const item = data.item;
-        if (!validId(item?.id)) { ui.message.textContent = invalidItem(); reveal(ui.message); return; }
+        if (!validId(item?.id)) { clear(); ui.message.textContent = invalidItem(); reveal(ui.message); return; }
         detailQueue?.dispose(); section.onpaste = null;
         ui.back = button(t('返回列表', 'Back to list'), () => {
           if (detailBusy) return;
-          currentId = ''; ++detailVersion; section.hidden = true; section.onpaste = null;
-          detailQueue?.dispose(); detailQueue = null; reveal(ui.listTitle);
+          currentId = ''; ++detailVersion; clear(); reveal(ui.listTitle); ui.listTitle.focus({ preventScroll: true });
         }, true);
-        section.replaceChildren(ui.back, node('h3', '#' + item.no + ' · ' + typeText(item.type) + ' · ' + item.title), badge(item),
+        const heading = node('h3', '#' + item.no + ' · ' + typeText(item.type) + ' · ' + item.title); heading.setAttribute('tabindex', '-1');
+        section.replaceChildren(ui.back, heading, badge(item),
           node('p', item.author.name + ' · ' + date(item.createdAt), 'wp-feedback-muted'), node('p', item.body, 'wp-feedback-text'));
         if (item.typeChangedFrom) section.append(node('p', t('此反馈已从问题调整为需求。', 'This issue was changed to a feature request.'), 'wp-feedback-muted'));
         if (item.approval.state !== 'none') {
@@ -386,6 +404,7 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
           const queue = fileQueue(draft.files, () => stored.length, () => detailBusy, msg); detailQueue = queue;
           const upload = button(t('上传截图', 'Upload screenshots'), async () => {
             if (detailBusy || !draft.files.length) return;
+            section.querySelector('.wp-feedback-loading')?.remove();
             detailBusy = true; ++detailVersion; upload.disabled = true; controls(); queue.render(); msg.textContent = t('正在上传…', 'Uploading…');
             try {
               while (draft.files.length) {
@@ -412,6 +431,7 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
         area.addEventListener('input', safe(() => { draft.comment = area.value; })); label.append(area); form.append(label, send, msg);
         form.addEventListener('submit', safe(async event => {
           event.preventDefault(); if (detailBusy) return;
+          section.querySelector('.wp-feedback-loading')?.remove();
           detailBusy = true; const writeVersion = ++detailVersion;
           send.disabled = true; area.disabled = true; controls(); draft.comment = area.value;
           let saved = false;
@@ -422,11 +442,15 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
         }));
         section.append(form);
         if (scroll) reveal(section);
-      } catch (error) { if (version === detailVersion) { ui.message.textContent = error.message; reveal(ui.message); } }
+        heading.focus({ preventScroll: true });
+      } catch (error) { if (version === detailVersion && !revoked) { clear(); ui.message.textContent = error.message; reveal(ui.message); } }
     }
-    const init = safe(() => {
+    const init = safe(async () => {
       observer = new MutationObserver(safe(menus)); observer.observe(document.body, { childList: true, subtree: true }); menus();
-      if (autoOpen) return show(initialId);
+      if (autoOpen) {
+        await show(initialId);
+        if (invalidInitialId && !revoked && !currentId) { ui.message.textContent = invalidItem(); reveal(ui.message); }
+      }
     });
     window.addEventListener('pagehide', safe(() => { draftQueue?.dispose(); detailQueue?.dispose(); }));
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();

@@ -538,7 +538,7 @@ function browser({ href = origin + '/', language, storedLanguage, maxImageBytes 
     async fire(type, values = {}) { const event = { target: this, preventDefault() {}, stopPropagation() {}, ...values }; for (const fn of this.listeners[type] || []) await fn(event); if (this['on' + type]) await this['on' + type](event); }
     showModal() { this.open = true; }
     close() { this.open = false; this.fire('close'); }
-    focus() { document.activeElement = this; }
+    focus(options) { document.activeElement = this; this.focusOptions = options; }
     scrollIntoView() { scrolls.push({ element: this, kind: 'intoView' }); }
     get scrollTop() { return this._scrollTop || 0; }
     set scrollTop(top) { this._scrollTop = top; scrolls.push({ element: this, top }); }
@@ -552,9 +552,9 @@ function browser({ href = origin + '/', language, storedLanguage, maxImageBytes 
     get offsetWidth() { return 220; }
     getBoundingClientRect() {
       if (this.rect) return this.rect;
-      if (this.tag === 'dialog') return { top: 12, bottom: 628, left: 12, right: 348, width: 336, height: 616 };
+      if (this.tag === 'dialog' || this.className === 'wp-feedback-content') return { top: 12, bottom: 628, left: 12, right: 348, width: 336, height: 616 };
       let parent = this.parentNode;
-      while (parent && parent.tag !== 'dialog') parent = parent.parentNode;
+      while (parent && parent.className !== 'wp-feedback-content') parent = parent.parentNode;
       const top = parent ? (this.id === 'wp-feedback-detail' ? 1400 : this.className === 'wp-feedback-message' ? 1200 : 800) - parent.scrollTop : 550;
       return { top, bottom: top + 40, left: 10, right: 230, width: 220, height: 40 };
     }
@@ -766,11 +766,12 @@ test('an overlay exception inside observer/event callbacks cannot escape into th
 });
 
 function assertDialogScrolledTo(b, target) {
-  const dialog = b.document.querySelector('dialog');
+  const content = b.document.querySelector('.wp-feedback-content');
+  assert.ok(content);
   assert.ok(b.scrolls.length, 'must scroll after rendering the target');
-  assert.ok(b.scrolls.every(s => s.element === dialog && s.kind !== 'intoView'), 'only the dialog may scroll');
-  const gap = target.getBoundingClientRect().top - dialog.getBoundingClientRect().top;
-  assert.ok(gap >= dialog.clientTop && gap <= 32, `target near dialog top: ${gap}`);
+  assert.ok(b.scrolls.every(s => s.element === content && s.kind !== 'intoView'), 'only the dialog content may scroll');
+  const gap = target.getBoundingClientRect().top - content.getBoundingClientRect().top;
+  assert.ok(gap >= content.clientTop && gap <= 32, `target near dialog top: ${gap}`);
 }
 
 test('initial detail and successful submission scroll inside the dialog after the list renders', async () => {
@@ -782,6 +783,9 @@ test('initial detail and successful submission scroll inside the dialog after th
     await b.tick();
     assert.deepEqual(b.reads.slice(-2).map(r => r.url), [base, base + '/items/item1'], 'refresh list before positioning detail');
     assertDialogScrolledTo(b, dialog.querySelector('#wp-feedback-detail'));
+    const heading = dialog.querySelector('#wp-feedback-detail').querySelector('h3');
+    assert.equal(b.document.activeElement, heading); assert.ok(dialog.contains(b.document.activeElement));
+    assert.equal(heading.getAttribute('tabindex'), '-1'); assert.equal(heading.focusOptions.preventScroll, true);
   }
 });
 
@@ -807,6 +811,8 @@ test('back to list collapses details and list clicks still switch between items'
     assert.equal(detail.hidden, true);
     const title = dialog.querySelectorAll('h3').find(n => n.textContent === (language === 'en-US' ? 'My feedback' : '我的反馈'));
     assertDialogScrolledTo(b, title);
+    assert.ok(dialog.contains(b.document.activeElement)); assert.equal(b.document.activeElement, title);
+    assert.equal(title.getAttribute('tabindex'), '-1'); assert.equal(title.focusOptions.preventScroll, true);
     await dialog.querySelector('.wp-feedback-entry').fire('click');
     assert.equal(detail.hidden, false); assert.match(detail.textContent, /<img onerror=bad>/);
   }
@@ -1006,4 +1012,145 @@ test('back to list during dialog reopen wins over its pending list refresh', asy
   releaseList(); await reopening;
   assert.equal(detail.hidden, true);
   assert.equal(b.reads.filter(r => r.url === base + '/items/item1').length, 1);
+});
+
+test('back to list during post-submission refresh stays collapsed', async () => {
+  let releaseList, listReads = 0;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST' || url.includes('/items/')) return { item: browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem()], isHandler: false };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const submitting = dialog.querySelector('form').fire('submit'); await b.tick(); assert.ok(releaseList);
+  await buttonWith(detail, '返回列表').fire('click'); assert.equal(detail.hidden, true);
+  const reads = b.reads.length, scrolls = b.scrolls.length;
+  releaseList(); await submitting; await b.tick();
+  assert.equal(detail.hidden, true); assert.equal(b.reads.length, reads); assert.equal(b.scrolls.length, scrolls);
+});
+
+test('another detail selected during post-submission refresh keeps its focus and content', async () => {
+  let releaseList, listReads = 0;
+  const second = { ...browserItem(), id: 'item2', title: 'Second' };
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') return { item: browserItem() };
+    if (url.includes('/items/')) return { item: url.endsWith('item2') ? second : browserItem(), canUpload: true };
+    if (++listReads === 2) await new Promise(resolve => { releaseList = resolve; });
+    return { items: [browserItem(), second], isHandler: false };
+  } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const submitting = dialog.querySelector('form').fire('submit'); await b.tick(); assert.ok(releaseList);
+  await dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click');
+  const heading = detail.querySelector('h3'), reads = b.reads.length, scrolls = b.scrolls.length;
+  releaseList(); await submitting; await b.tick();
+  assert.equal(detail.hidden, false); assert.match(detail.textContent, /Second/);
+  assert.equal(b.reads.length, reads); assert.equal(b.scrolls.length, scrolls); assert.equal(b.document.activeElement, heading);
+});
+
+test('invalid legacy hashes show the existing guidance without requesting a detail', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    const b = browser({ language, href: origin + '/?wp-feedback=1#bad!' });
+    assert.equal(b.location.hash, ''); assert.equal(b.reads.length, 0);
+    await b.ready(); const dialog = b.document.querySelector('dialog');
+    assert.equal(dialog.open, true);
+    assert.match(dialog.textContent, language === 'en-US' ? /Unable to open feedback\. Please refresh and try again\./ : /无法打开反馈，请刷新后重试。/);
+    assert.deepEqual(b.reads.map(r => r.url), [base]);
+  }
+});
+
+test('switching details clears the previous item while loading and collapses invalid or failed responses', async () => {
+  for (const language of ['zh-CN', 'en-US']) for (const failure of ['invalid', 'network', 404, 500]) {
+    let release;
+    const first = { ...browserItem(), title: 'Previous title' }, second = { ...browserItem(), id: 'item2', title: 'Second' };
+    const b = browser({ language, href: origin + '/?wp-feedback=item1', request: async url => {
+      if (url.endsWith('/items/item2')) {
+        await new Promise(resolve => { release = resolve; });
+        if (failure === 'network') throw new Error('Network failed');
+        return failure === 'invalid' ? { item: { ...second, id: 'bad/id' }, canUpload: true } : { status: failure, error: 'Cannot open feedback' };
+      }
+      return url.includes('/items/') ? { item: first, canUpload: true } : { items: [first, second], isHandler: false };
+    } });
+    await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+    assert.match(detail.textContent, /Previous title/);
+    const switching = dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click'); await b.tick(); assert.ok(release);
+    assert.equal(detail.hidden, false); assert.doesNotMatch(detail.textContent, /Previous title/);
+    assert.equal(detail.querySelector('.wp-feedback-loading').textContent, language === 'en-US' ? 'Loading…' : '加载中…');
+    release(); await switching;
+    assert.equal(detail.hidden, true); assert.equal(detail.textContent, '');
+    const expected = failure === 'invalid'
+      ? language === 'en-US' ? 'Unable to open feedback. Please refresh and try again.' : '无法打开反馈，请刷新后重试。'
+      : failure === 'network' ? 'Network failed' : 'Cannot open feedback';
+    assert.ok(dialog.querySelectorAll('.wp-feedback-message').some(n => n.textContent === expected));
+    assert.deepEqual(b.reads.map(r => r.url), [base, base + '/items/item1', base + '/items/item2']);
+  }
+});
+
+test('first detail load shows localized progress before rendering', async () => {
+  for (const language of ['zh-CN', 'en-US']) {
+    let release;
+    const b = browser({ language, request: async url => {
+      if (url.includes('/items/')) { await new Promise(resolve => { release = resolve; }); return { item: browserItem(), canUpload: true }; }
+      return { items: [browserItem()], isHandler: false };
+    } });
+    await b.ready(); const dialog = await b.open(), detail = dialog.querySelector('#wp-feedback-detail');
+    const opening = dialog.querySelector('.wp-feedback-entry').fire('click'); await b.tick(); assert.ok(release);
+    assert.equal(detail.hidden, false);
+    assert.equal(detail.querySelector('.wp-feedback-loading').textContent, language === 'en-US' ? 'Loading…' : '加载中…');
+    release(); await opening;
+    assert.equal(detail.querySelector('.wp-feedback-loading'), null); assert.ok(detail.querySelector('h3'));
+  }
+});
+
+test('close stays outside the content scroller and disabled image pickers use a blocked cursor', async () => {
+  const b = browser(); await b.ready(); const dialog = await b.open();
+  const close = dialog.querySelector('.wp-feedback-close'), content = dialog.querySelector('.wp-feedback-content');
+  assert.ok(content); assert.equal(close.parentNode, dialog); assert.equal(content.contains(close), false);
+  assert.ok(content.contains(dialog.querySelector('form')));
+  const css = b.document.head.querySelector('style').textContent;
+  assert.match(css, /\.wp-feedback-dialog \{[^}]*overflow:hidden;[^}]*padding:0;/);
+  assert.match(css, /\.wp-feedback-content \{[^}]*max-height:calc\(100dvh - 26px\);[^}]*overflow:auto;/);
+  assert.match(css, /\.wp-feedback-close \{[^}]*position:absolute; right:12px; top:10px;[^}]*color:var\(--wp-ink-2,/);
+  assert.match(css, /\.wp-feedback-close:hover \{ background:var\(--wp-hover,/);
+  assert.match(css, /\.wp-feedback-dialog h3 \{ margin:8px 32px 8px 0;/);
+  assert.match(css, /@media\(max-width:400px\) \{ \.wp-feedback-content \{ padding:16px;/);
+  assert.match(css, /\.wp-feedback-loading \{ color:var\(--wp-ink-3,/);
+  assert.match(css, /\.wp-feedback-picker button:disabled \{ cursor:not-allowed; \}/);
+  await close.fire('click'); assert.equal(dialog.open, false);
+});
+
+test('failed same-item refresh clears the editor and preserves drafts for retry', async () => {
+  let fail = false;
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url => url.includes('/items/')
+    ? fail ? { status: 500, error: 'Refresh failed' } : { item: browserItem(), canUpload: true }
+    : { items: [browserItem()], isHandler: false } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const area = detail.querySelector('textarea'); area.value = 'Keep draft'; await area.fire('input');
+  await detail.fire('paste', pasteFiles([screenshot('pending.png')]));
+  fail = true; await buttonWith(dialog, '刷新').fire('click');
+  assert.equal(detail.hidden, true); assert.equal(detail.textContent, ''); assert.equal(detail.onpaste, null);
+  assert.match(dialog.textContent, /Refresh failed/);
+  fail = false; await dialog.querySelector('.wp-feedback-entry').fire('click');
+  assert.equal(detail.querySelector('textarea').value, 'Keep draft'); assert.equal(detail.querySelectorAll('img').length, 1);
+});
+
+test('late detail successes and failures cannot replace a newer selected item', async () => {
+  for (const fail of [false, true]) {
+    let release;
+    const second = { ...browserItem(), id: 'item2', title: 'Second' };
+    const b = browser({ request: async url => {
+      if (url.endsWith('/items/item1')) {
+        await new Promise(resolve => { release = resolve; });
+        if (fail) throw new Error('Late failure');
+        return { item: browserItem(), canUpload: true };
+      }
+      return url.includes('/items/') ? { item: second, canUpload: true } : { items: [browserItem(), second], isHandler: false };
+    } });
+    await b.ready(); const dialog = await b.open(), detail = dialog.querySelector('#wp-feedback-detail');
+    const first = dialog.querySelector('.wp-feedback-entry').fire('click'); await b.tick(); assert.ok(release);
+    await dialog.querySelectorAll('.wp-feedback-entry')[1].fire('click');
+    const heading = detail.querySelector('h3'), scrolls = b.scrolls.length;
+    release(); await first;
+    assert.equal(detail.hidden, false); assert.match(detail.textContent, /Second/); assert.doesNotMatch(dialog.textContent, /Late failure/);
+    assert.equal(b.document.activeElement, heading); assert.equal(b.scrolls.length, scrolls);
+  }
 });
