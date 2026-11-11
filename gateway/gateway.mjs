@@ -21,6 +21,7 @@ import { marketNotifications } from './market-notifications.mjs';
 import { createMarketSkills, skillExecutor } from "./market-skills.mjs";
 
 import { createDataTools } from './data-tools.mjs';
+import { createMarketTools } from "./market-tools.mjs";
 
 const organization = resolveOrganization();
 const PORT = organization.runtime.gatewayPort;
@@ -84,6 +85,7 @@ const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
 const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
+const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
 
 function sessionOf(req) {
@@ -266,6 +268,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith("/_wp/feishu/") && !userFor(req).user) return redirect(res, "/_wp/login?next=%2F_wp%2Ffeishu%2F");
     if (await feishuSettings?.(req, res, url)) return;
     if (url.pathname.startsWith("/_wp/ds-tools/")) { res.writeHead(404); return res.end(); } // Internal port only.
+    if (await marketTools(req, res, url)) return;
     if (organization.features.marketSkills && await marketSkills(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));

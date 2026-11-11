@@ -2,6 +2,7 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { hubConfig } from './mcp-hub.mjs';
 import defaults from './default.json' with { type: 'json' };
 
 /** Fill omitted organization fields from the neutral configuration. */
@@ -53,6 +54,7 @@ export function organizationData(environment = process.env) {
     if (typeof market[key] !== 'string' || !/^\/[a-zA-Z0-9_/-]+$/.test(market[key]) || market[key].split('/').includes('..') || market[key] === '/') throw new Error(`Invalid market.${key}`);
   }
   if (market.preinstalled.some(name => !/^[a-z0-9][a-z0-9-]{0,63}$/.test(name))) throw new Error('Invalid market.preinstalled');
+  hubConfig(data.mcpHub);
   return { ...data, directory };
 }
 
