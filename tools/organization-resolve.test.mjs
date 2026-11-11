@@ -127,3 +127,13 @@ test('startup exports quick-line configuration and preserves a container overrid
     assert.equal(child.stdout.trim(), override ?? "fast'model");
   }
 });
+
+test('bridge upgrade keys name template keys outside the managed agent tables', t => {
+  const upgradeKeys = [{ key: 'queue_batch.debounce_ms' }, { key: 'projects.platforms.options.reaction_emoji', from: ['OnIt', 1, true] }];
+  assert.deepEqual(resolveOrganization(fixture(t, { bridge: { template: 'bridge.toml', upgradeKeys } })).bridge.upgradeKeys, upgradeKeys);
+  for (const value of [null, {}, 'queue_batch.debounce_ms', [null], [{}], [{ key: 'debounce_ms' }], [{ key: 'queue_batch.debounce ms' }],
+    [{ key: 'projects.agent.options.model' }], [{ key: 'projects.name' }], [{ key: 'stream_preview.enabled', from: 'OnIt' }],
+    [{ key: 'stream_preview.enabled', from: [null] }]]) {
+    assert.throws(() => resolveOrganization(fixture(t, { bridge: { template: 'bridge.toml', upgradeKeys: value } })), /bridge\.upgradeKeys/);
+  }
+});

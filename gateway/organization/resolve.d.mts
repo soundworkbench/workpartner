@@ -62,7 +62,7 @@ export interface Organization {
     defaultCategory?: string; categories?: { zh: string; en: string }[];
     platform?: { id: string; name: { zh: string; en: string } };
     tools?: Record<string, { category?: string; platform?: { id: string; name: { zh: string; en: string } }; example?: { zh: string; en: string } }> };
-  bridge: { template: string };
+  bridge: { template: string; upgradeKeys?: { key: string; from?: (string | number | boolean)[] }[] };
   tools?: { legacyRollout?: string };
   features: { feishuAuthorization: boolean; feishuOnboarding: boolean; marketSkills: boolean; autoTitle: boolean; preview: boolean };
   extensions: { configFiles: string[]; gatewayModule: string };
