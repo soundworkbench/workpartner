@@ -42,6 +42,7 @@
             "requests": {{gatewayResources}},
             "limits": {{gatewayResources}}
           },
+          "readinessProbe": {"tcpSocket": {"port": "gateway"}, "periodSeconds": 2},
           "livenessProbe": {"tcpSocket": {"port": "gateway"}, "initialDelaySeconds": 30, "periodSeconds": 10},
           "volumeMounts": [
             {"name": "organization", "mountPath": "/organization", "readOnly": true},

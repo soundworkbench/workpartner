@@ -340,7 +340,7 @@ StatefulSet 只能有 0/1 副本，`OnDelete` 更新。重复 create 保留副�
 
    后续重渲染使用 `--only Namespace,ServiceAccount,Role,RoleBinding,PriorityClass,Deployment,Service,EndpointSlice,NetworkPolicy,StorageClass`，排除 ConfigMap，避免清空已有镜像登记。即使 --only 也校验完整配置。
 5. **镜像分发。** 将用户镜像导入全部可能运行用户/维护 Pod 的节点，网关镜像导入选定网关节点并核实 ID，步骤见下一节。任何节点失败都先处理，不切换用户。所有相关容器（包括 init）使用 imagePullPolicy=Never。
-6. **网关上线。** 应用 Deployment 文件，检查 Pod、Service、RBAC、状态及凭据挂载。模板是单副本 Recreate、TCP liveness probe。迁移场景此时已配置 ownersFile 路径，尚无有效归属时请求 503 是预期保护；在完成第 7 步前不接入用户流量。Docker peer 仅在内部可达位置发布，验证跨 CNI/Docker 的 DNAT 路径，避免依赖会被 guard 阻止的宿主监听。网关 Pod 访问同节点 Docker 服务（包括迁移 peer）时，应直连该节点网桥上的 Docker 发布端口，不要经指向网桥地址的 Kubernetes Service；确保网关调度在该 Docker 节点，原因见[模型出口与 Docker 中继](#model-egress-routing)。
+6. **网关上线。** 应用 Deployment 文件，检查 Pod、Service、RBAC、状态及凭据挂载。模板是单副本 Recreate、TCP readiness 与 liveness probe。迁移场景此时已配置 ownersFile 路径，尚无有效归属时请求 503 是预期保护；在完成第 7 步前不接入用户流量。Docker peer 仅在内部可达位置发布，验证跨 CNI/Docker 的 DNAT 路径，避免依赖会被 guard 阻止的宿主监听。网关 Pod 访问同节点 Docker 服务（包括迁移 peer）时，应直连该节点网桥上的 Docker 发布端口，不要经指向网桥地址的 Kubernetes Service；确保网关调度在该 Docker 节点，原因见[模型出口与 Docker 中继](#model-egress-routing)。
 7. **归属文件与入口。** 在共享父目录原子放入 `version:1/default:docker/users:{}` 初始文件，两网关确认读取一致后再接流量；已有归属文件必须保留，不能重新清空。配置两端 peerOrigin，验证未迁移用户转发、旧版用户及 WebSocket。测试网关通过部署参考的登录、文件、模型、预览、技能上传、授权、重置口令、镜像重建检查，再按单用户步骤切换。网关 Pod 重启不应影响用户 Pod。
 
 迁移先试点一人观察 48 小时，再按批准节奏每批约 10 人、逐人 verify、每批 status 无报警并观察。切换 default 到 k8s 前，为仍需 Docker 的 AionUi 用户保留显式条目，避免未迁移用户因缺省归属变化被错误接管；新用户之后由 newUserNodeSelector 和 StorageClass 落盘。正式入口切换及首批迁移遵循规格中的授权条件。
@@ -371,6 +371,14 @@ bash tools/k8s/distribute-image.sh --unpin "$OLD_IMAGE" \
 ```
 
 没有独立 `--pin` 子命令，分发时自动 pin。unpin 仅去标签，允许 kubelet 后续回收，不删除镜像、不删除登记、不恢复旧 tag；替换回滚须重新分发原镜像。运行时看到登记不等于节点仍有镜像；回收后重新使用前应重新分发。
+
+## 更新时用户会看到什么
+
+**网关。** 网关保持单副本 Recreate：飞书连接和技能市场状态都只能有一个写入者，两个网关不能同时在线。换网关镜像时旧 Pod 先退出、新 Pod 再启动，期间所有人的请求中断，通常十几秒。readiness probe 每 2 秒检查一次入口端口，新网关开始监听后才进入 Service 端点；hostPort 入口不经过 Service，只在新网关监听后才有应答。网关 Pod 重启不影响用户 Pod。
+
+**个人工作区。** 镜像或环境过期的工作区按[组织配置](organization.md)的空闲规则替换。替换或重启进行中，本人打开或刷新页面会看到每 3 秒自动刷新的“正在更新，约 1 分钟”（浏览器首选英文时显示英文），就绪后自动进入；首次开通仍显示“正在准备”。页面里的接口、脚本、图片请求在这段时间收到 503（`Retry-After: 3`，JSON `{"error":"workspace_starting"}`），不会再把说明页当成接口数据或脚本。
+
+**排查重启耗时。** 网关在每次准备完成后记一行各阶段耗时，例如 `新版工作伙伴已就绪 <slug>：停止 1.2s、删除 0.4s、创建 0.3s、启动容器 9.8s、网页就绪 6.1s，共 17.8s`；失败时同样列出已完成的阶段。“启动容器”从调整副本数到主容器运行，包括调度、卷挂载和 `fix-owner` 初始化容器，细分看 Pod 的 conditions 时间。容器日志里的 `[startup] configured`、`bridge-started`、`web-answered` 是入口脚本从启动起算的毫秒数，分别对应准备脚本跑完、消息桥启动、网页版接口应答。消息桥与网页版同时启动，不等网页版就绪。
 
 ## 单用户接管与回滚（K7）
 

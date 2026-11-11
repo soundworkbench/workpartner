@@ -2,6 +2,9 @@
 # 新版工作伙伴容器入口：AionUi 网页版 + Claude Code 消息桥，两个入口共用 /data/work。
 # 钥匙只从只读挂载读进环境变量，不落盘。AionUi 只在容器网络里监听，入口只有网关。
 set -u
+# Startup milestones go to the container log so slow restarts can be traced to a step.
+started=${EPOCHREALTIME//[!0-9]/}
+mark() { echo "[startup] $1 +$(( (${EPOCHREALTIME//[!0-9]/} - started) / 1000 ))ms" >&2; }
 export HOME=/data
 # The image carries only its selected organization and non-secret configuration.
 ORG_ENV=$(mktemp) || exit 1
@@ -65,19 +68,23 @@ wp_init_hooks
 cd /data/work
 trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
 AIONUI_PORT=${AIONUI_PORT:-25808}
+mark configured
 /opt/aionui/aionui-web start --static-dir /opt/aionui/static-wp --remote --port "$AIONUI_PORT" --no-open --data-dir /data/aionui-data &
 service_pids=("$!")
+# 消息桥：本人扫码建好机器人（生成 config.toml）之后才启动；没有就只跑网页版。
+# 它不依赖网页版，和网页版同时启动，更新重启时飞书尽早重新连上。
+if [ -f /data/.cc-connect/config.toml ]; then
+  /opt/workpartner/bin/cc-connect --config /data/.cc-connect/config.toml &
+  service_pids+=("$!")
+  mark bridge-started
+fi
 
 # 每次启动校正助手（只开 ChatGPT 和 Claude，ChatGPT 排第一；没有 Claude 权限就只开 ChatGPT），第一次还写中文和默认助手。
 # 失败不影响启动，下次启动重试。
 for _ in $(seq 60); do curl -sf -o /dev/null "http://127.0.0.1:$AIONUI_PORT/api/assistants" && break; sleep 1; done
+mark web-answered
 python3 -I /opt/workpartner/bin/wp-seed.py "http://127.0.0.1:$AIONUI_PORT"
 
-# 消息桥：本人扫码建好机器人（生成 config.toml）之后才启动；没有就只跑网页版。
-if [ -f /data/.cc-connect/config.toml ]; then
-  /opt/workpartner/bin/cc-connect --config /data/.cc-connect/config.toml &
-  service_pids+=("$!")
-fi
 # 网关启用预览时先写入个人 relay key；独立启动且没有 key 时只运行对话入口。
 if [ -f /data/.zp-preview-relay-key ]; then
   node /opt/workpartner/preview/workspace.mjs "$PARTNER_GATEWAY_ORIGIN" &

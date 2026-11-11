@@ -15,6 +15,7 @@ import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } f
 import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
 import { createChatTitles } from "./title.mjs";
+import { isNavigation, notReady, updatingText } from "./starting.mjs";
 
 import { createSharedSkillStore, createSharedSkillsHandler } from './market-shared.mjs';
 import { marketNotifications } from './market-notifications.mjs';
@@ -111,6 +112,12 @@ function page(res, status, title, text, refresh) {
   res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${refresh ? '<meta http-equiv="refresh" content="3">' : ""}<title>${organization.productName?.zh || "工作伙伴"}</title><body style="font-family:-apple-system,'PingFang SC','Noto Sans CJK SC',sans-serif;display:grid;place-items:center;height:90vh;color:${organization.appearance?.gateway?.accent || "#333"}"><div style="text-align:center"><h2 style="font-weight:600">${title}</h2><p style="color:#555">${text}</p></div></body>`);
 }
 
+/** Workspace not ready: a self-refreshing page for page loads, 503 for requests made by the page. */
+function preparing(req, res, title, text) {
+  if (!isNavigation(req)) return notReady(res);
+  page(res, 200, title, text, true);
+}
+
 async function resolve(req) {
   const { who, user } = userFor(req);
   if (!user) return { deny: who };
@@ -119,7 +126,7 @@ async function resolve(req) {
     try { await prepareNextFeishu?.(user); }
     catch (error) { console.error(`[feishu] ${user.slug}: CLI configuration unavailable (${error.code || error.name}); routing to personal container continues`); }
     const up = await aionui.upstream(user);
-    if (!up) return { user, backend: "aionui" };
+    if (!up) return { user, backend: "aionui", updating: aionui.updating(user.slug) };
     const cookie = await aionui.session(user.slug, up);
     return { user, up, cookie, backend: "aionui", port: up.address.port, headers: aionuiHeaders, responseHeaders: aionuiResponseHeaders,
       etag: (req) => aionuiEtag(up.imageId, req),
@@ -156,7 +163,7 @@ function proxy(req, res, r, body, retried) {
     }
     ur.pipe(res);
   });
-  up.on("error", () => { r.lost(); if (!res.headersSent) page(res, 200, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。", true); });
+  up.on("error", () => { r.lost(); if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。"); });
   up.end(body);
 }
 
@@ -320,7 +327,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname.startsWith("/_wp/")) { res.writeHead(404); return res.end(); }
     if (r.missing) return page(res, 503, "工作空间还没建好", "请联系管理员。");
-    if (!r.cookie) return page(res, 200, "正在准备你的工作空间", "通常不超过半分钟，页面会自动刷新。", true);
+    if (!r.cookie) {
+      if (r.updating) return preparing(req, res, ...updatingText(req));
+      return preparing(req, res, "正在准备你的工作空间", "通常不超过半分钟，页面会自动刷新。");
+    }
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", async () => {
@@ -332,7 +342,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     console.log("出错", e.message);
     if (!res.headersSent && e.code === 'WORKSPACE_NOT_OWNED') return page(res, 503, "工作区迁移中", "请稍后重试。");
-    if (!res.headersSent) page(res, 200, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。", true);
+    if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。");
   }
 });
 
