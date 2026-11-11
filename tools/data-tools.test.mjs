@@ -226,3 +226,16 @@ test('catalog rejects defaults outside the parameter policy and unbounded waits 
   }
   assert.equal(parseDataTools(catalog).tools[0].endpoints[0].id, ep.id);
 });
+
+test('an optional attribution names the data source in the generated skill', t => {
+  const { catalog } = fixture(t);
+  assert.doesNotMatch(dataToolsSkill(catalog), /metadata:|source-url|Source:/);
+  const attributed = parseDataTools({ ...catalog, attribution: { name: 'Example Data', url: 'https://data.example.com' } });
+  const skill = dataToolsSkill(attributed), frontmatter = skill.split('\n---\n')[0];
+  assert.match(frontmatter, /^description: "通过 Example Data 查询已开放大类的外部数据：研究。Use external data via Example Data from: Research\."$/m);
+  assert.match(frontmatter, /^metadata:\n  source-name: "Example Data"\n  source-url: "https:\/\/data\.example\.com"$/m);
+  assert.match(skill, /注明“来源：Example Data”和对应的原始来源。When citing this data, state “Source: Example Data” and the original source\./);
+  for (const attribution of [{ name: 'Example Data', url: 'http://data.example.com' }, { name: ' ', url: 'https://data.example.com' }, 'Example Data']) {
+    assert.throws(() => parseDataTools({ ...catalog, attribution }), /Invalid data attribution/);
+  }
+});

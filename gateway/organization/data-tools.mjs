@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 
+/** A named HTTPS link shown as a skill's source. */
+export const sourceLink = value => object(value) && typeof value.name === 'string' && value.name.trim().length > 0
+  && value.name.length <= 80 && typeof value.url === 'string' && /^https:\/\/[^\s"'<>]+$/.test(value.url);
+
 /** Parse a capability file, rejecting ambiguous commands and incomplete request policies. */
 export function parseDataTools(value) {
   if (value?.schemaVersion !== 1 || !Array.isArray(value.tools)) throw new Error('Invalid data tools catalog');
@@ -15,6 +19,7 @@ export function parseDataTools(value) {
     || !Array.isArray(value.directory.blockedEndpoints) || !Array.isArray(value.directory.blockedProviders)) throw new Error('Invalid data category policy');
   if (value.presentation !== undefined && (!object(value.presentation)
     || !['tasks', 'endpoints'].every(key => object(value.presentation[key]) && Object.values(value.presentation[key]).every(row => object(row) && typeof row.title === 'string' && row.title.trim() && typeof row.description === 'string' && row.description.trim())))) throw new Error('Invalid data presentation copy');
+  if (value.attribution !== undefined && !sourceLink(value.attribution)) throw new Error('Invalid data attribution');
   const ids = new Set(), commands = new Set(), names = new Set();
   for (const tool of value.tools) {
     if (!/^[a-z][a-z0-9-]+$/.test(tool.name) || names.has(tool.name) || !tool.title?.zh || !tool.title?.en
@@ -65,10 +70,13 @@ export function loadDataTools(organization) {
 
 /** Generate the platform map and direct examples; examples never define endpoint access. */
 export function dataToolsSkill(catalog) {
+  const source = catalog.attribution;
   const lines = ['---', 'name: data-tools',
-    'description: ' + JSON.stringify(`查询已开放大类的外部数据：${(catalog.categories || []).map(row => row.zh).join('、')}。Use external data from: ${(catalog.categories || []).map(row => row.en).join(', ')}.`),
+    'description: ' + JSON.stringify(`${source ? `通过 ${source.name} ` : ''}查询已开放大类的外部数据：${(catalog.categories || []).map(row => row.zh).join('、')}。Use external data${source ? ` via ${source.name}` : ''} from: ${(catalog.categories || []).map(row => row.en).join(', ')}.`),
+    ...(source ? ['metadata:', `  source-name: ${JSON.stringify(source.name)}`, `  source-url: ${JSON.stringify(source.url)}`] : []),
     '---', '', '# 数据工具 / Data tools', '',
     '调用前先报单价；调用后报告实际花费和今天剩余额度，先用 `wp-data balance` 查看本人日/月/单次上限。结果引用数据来源。未知结果不要自动重试。',
+    ...(source ? [`回答引用这些数据时注明“来源：${source.name}”和对应的原始来源。When citing this data, state “Source: ${source.name}” and the original source.`] : []),
     'Quote the unit price before calling. After calling, report the actual cost and remaining daily budget; use `wp-data balance` for personal usage and daily/monthly/per-call limits. Cite sources. Never retry an unknown outcome automatically.',
     '今天额度用完时说明北京时间 08:00 恢复；本月额度用完时说明下月 1 日北京时间 08:00 恢复。Daily budgets reset at 08:00 Beijing time; monthly budgets reset at 08:00 on the first of next month.',
     '`wp-data search <想要的数据>` 在开放大类里找接口。`wp-data info <接口>` 查看参数、价格和返回样例。',

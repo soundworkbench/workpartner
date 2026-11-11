@@ -571,6 +571,7 @@ html body .message-item.text.justify-start + .message-item.text.justify-start { 
 .wp-skill-name{margin:0;font-size:15px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;color:var(--text-primary)}
 .wp-skill-badge{font-size:11px;line-height:1.7;color:var(--text-secondary);border-radius:5px;padding:1px 6px;background:var(--bg-2);white-space:nowrap}
 .wp-skill-description{margin:10px 0 0;font-size:13px;line-height:1.7;color:var(--text-secondary);overflow-wrap:anywhere;white-space:pre-line}
+.wp-skill-source{margin:6px 0 0;font-size:13px;line-height:1.6;color:var(--text-secondary)}.wp-skill-source a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 .wp-skill-delete{margin-top:16px}
 @media(max-width:767px){.wp-skills-toolbar{align-items:flex-start;gap:12px}.wp-skills-list{grid-template-columns:minmax(0,1fr)}.wp-skill-card{padding:18px}}
 /* Match the native tool's 14px icon slot; wrapped details align to the first line. */

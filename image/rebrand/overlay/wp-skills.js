@@ -8,7 +8,7 @@
       installed: '已安装，开新对话后生效；飞书个人智能体请发 /new。', removed: '已移除技能。', failed: '操作尚未确认完成，请刷新列表后重试。',
       file: '请选择 .zip 或单个 SKILL.md 文件。', large: '技能文件不能超过 10 MB。', submit: '分享给公司', submitted: '已提交 IT 审批，自己的版本仍可使用。',
       pending: '待审批', approved: '已通过', rejected: '未通过', withdrawn: '已下架', withdrawnRemovable: '已下架，可移除', removeLink: '移除', withdraw: '下架', confirmWithdraw: '下架后所有安装者都将无法使用，要继续吗？',
-      tryIt: '试一试', author: '作者：', installs: ' 人已安装', review: '审批', reviewTitle: '待我审批', title: '中文名', description: '一句话说明', example: '例句', cancel: '取消',
+      tryIt: '试一试', source: '数据来源：', author: '作者：', installs: ' 人已安装', review: '审批', reviewTitle: '待我审批', title: '中文名', description: '一句话说明', example: '例句', cancel: '取消',
       disabled: '管理员尚未开放分享，添加的技能仅自己可用。', noticeFailed: '审批卡片未送达，请审批人从审批页重发。',
       resend: '重发结果通知', history: '审批记录', submitTitle: '分享技能', resultFailed: '作者通知未送达' },
     'en-US': { add: 'Add skill', loading: 'Loading skills…', empty: 'No skills yet', official: 'Official', company: 'Company skills', mine: 'Mine',
@@ -17,7 +17,7 @@
       installed: 'Start a new chat to use the skill. Send /new in your personal messaging agent.', removed: 'Skill removed.', failed: 'The operation is unconfirmed. Refresh the list before retrying.',
       file: 'Choose a .zip file or a single SKILL.md file.', large: 'Skill files must be 10 MB or smaller.', submit: 'Share with company', submitted: 'Submitted for IT review. Your copy remains available.',
       pending: 'Pending review', approved: 'Approved', rejected: 'Rejected', withdrawn: 'Withdrawn', withdrawnRemovable: 'Withdrawn, can be removed', removeLink: 'Remove', withdraw: 'Withdraw', confirmWithdraw: 'All installers will lose access. Continue?',
-      tryIt: 'Try it', author: 'Author: ', installs: ' installs', review: 'Review', reviewTitle: 'Awaiting my review', title: 'Display name', description: 'Short description', example: 'Example', cancel: 'Cancel',
+      tryIt: 'Try it', source: 'Source: ', author: 'Author: ', installs: ' installs', review: 'Review', reviewTitle: 'Awaiting my review', title: 'Display name', description: 'Short description', example: 'Example', cancel: 'Cancel',
       disabled: 'Sharing is not enabled. Added skills are available only to you.', noticeFailed: 'The review card was not delivered. Reviewers can resend it from the review page.',
       resend: 'Resend result', history: 'Review history', submitTitle: 'Share skill', resultFailed: 'Author notification failed' }
   };
@@ -48,7 +48,12 @@
     function card(area, skill, badge) {
       var node = element('article', 'wp-skill-card'); node.dataset.skill = skill.name || skill.id;
       var top = element('div', 'wp-skill-top'); top.append(element('h3', 'wp-skill-name', skill.displayName || skill.name), element('span', 'wp-skill-badge', badge));
-      node.append(top, element('p', 'wp-skill-description', skill.displayDescription || skill.description)); area.appendChild(node); return node;
+      node.append(top, element('p', 'wp-skill-description', skill.displayDescription || skill.description));
+      if (skill.source) {
+        var source = element('p', 'wp-skill-source', copy.source), link = element('a', '', skill.source.name + (context.locale === 'en-US' ? ' (' : '（') + skill.source.url.replace(/^https:\/\/([^/?#]+).*$/, '$1') + (context.locale === 'en-US' ? ')' : '）'));
+        link.href = skill.source.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; source.appendChild(link); node.appendChild(source);
+      }
+      area.appendChild(node); return node;
     }
     function remove(cardNode, skill) {
       button(cardNode, skill.withdrawn ? copy.removeLink : skill.shared ? copy.uninstall : copy.remove, function () {
@@ -80,7 +85,7 @@
       list.replaceChildren(); var official = section(copy.official), company = section(copy.company), mine = section(copy.mine);
       // Preinstalled display names come from the Chinese translation table; English keeps the skill's own name and description.
       personal.filter(function (s) { return s.preinstalled; }).forEach(function (skill) {
-        card(official, context.locale === 'en-US' ? { name: skill.name, description: skill.description } : skill, copy.preinstalled);
+        card(official, context.locale === 'en-US' ? { name: skill.name, description: skill.description, source: skill.source } : skill, copy.preinstalled);
       });
       market.company.forEach(function (skill) {
         var authored = market.mine.some(function (s) { return s.name === skill.name; });
