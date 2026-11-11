@@ -22,13 +22,19 @@
     var override = c && overrides.get(c.id);
     return override ? override.value : storedArchived(c);
   }
+  function afterPaint() { requestAnimationFrame(function () { setTimeout(render, 0); }); }
   function changed(id) {
     revision++;
     // Project onto the existing row before React or a full-list response can delay the next paint.
     var row = document.getElementById('c-' + id);
-    if (row) row.style.display = archived(conversations.get(id)) ? 'none' : '';
-    else if (window.wpArchive.invalidate) window.wpArchive.invalidate();
-    render();
+    if (row) {
+      row.style.display = archived(conversations.get(id)) ? 'none' : '';
+      // Button/dialog housekeeping can scan a large list; run it after this row has painted.
+      afterPaint();
+    } else {
+      if (window.wpArchive.invalidate) window.wpArchive.invalidate();
+      render();
+    }
   }
   // Share one list request; any changes during it need just one trailing reload.
   function load(read) {
@@ -76,7 +82,7 @@
       else overrides.delete(id);
       changed(id);
       error(label('failed'));
-    } finally { pending.delete(id); revision++; render(); }
+    } finally { pending.delete(id); revision++; afterPaint(); }
   }
   function close() {
     if (!modal) return;

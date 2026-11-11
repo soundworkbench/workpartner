@@ -161,3 +161,20 @@ test('existing rows hide and roll back without rerendering the whole list', asyn
   a.respond(0, null, false); await operation;
   assert.equal(row.style.display, ''); assert.equal(invalidations, 0);
 });
+
+test('overlay-owned time updates do not rescan the page; native list changes still do', () => {
+  const source = fs.readFileSync(new URL('../image/rebrand/overlay/wp-overlay.js', import.meta.url), 'utf8');
+  const start = source.lastIndexOf('  new MutationObserver(function (records) {');
+  const end = source.indexOf('\n  document.addEventListener', start);
+  assert.ok(start > 0 && end > start);
+  let observe, scans = 0;
+  vm.runInNewContext(source.slice(start, end), {
+    MutationObserver: class { constructor(callback) { observe = callback; } observe() {} },
+    document: { documentElement: {} }, schedule: () => scans++,
+  });
+  const mutation = name => ({ type: 'childList', target: { closest: selector => selector.split(',').includes(name) } });
+  observe([mutation('.wp-time')]); observe([mutation('.zp-pet')]);
+  assert.equal(scans, 0);
+  observe([mutation('.wp-time'), mutation('.conversation-item')]);
+  assert.equal(scans, 1);
+});
