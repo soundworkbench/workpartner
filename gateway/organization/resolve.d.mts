@@ -8,7 +8,7 @@ export interface Organization {
   displayName: string;
   server: { publicHost: string; publicOrigin: string; legacyHosts: string[]; previewHost: string; projectHost: string };
   identity: { provider: 'feishu'; callbackPath: string; admission: 'pilot-group' | 'unrestricted'; appSecretFile: string; appId: string; pilotChatId: string };
-  model: { quickLineModel?: string; codexProvider: string; baseUrl: string; keyPrefix: string; keyMode: 'exec' | 'pool'; defaultsFile: string; keyEnvironment: string; baseEnvironment: string; nextBaseUrl: string; catalog?: Record<'codex' | 'claude', { default?: string; id?: string; key?: string; name?: string; also?: string[] }[]>; defaults: { codex: string; claude: string; opus: string; sonnet: string; haiku: string; effort: string; language: string; claudePrefix: string }; provision: null | { container: string; command: string[]; keyPattern: string; models: string[] } };
+  model: { quickLineModel?: string; codexProvider: string; baseUrl: string; keyPrefix: string; keyMode: 'exec' | 'pool'; defaultsFile: string; keyEnvironment: string; baseEnvironment: string; nextBaseUrl: string; catalog?: Record<'codex' | 'claude', { default?: string; id?: string; key?: string; name?: string; also?: string[] }[]>; userCatalog?: Record<string, Partial<Record<'codex' | 'claude', { default?: string; id?: string; key?: string; name?: string; also?: string[] }[]>>>; defaults: { codex: string; claude: string; opus: string; sonnet: string; haiku: string; effort: string; language: string; claudePrefix: string }; provision: null | { container: string; command: string[]; keyPattern: string; models: string[] } };
   runtime: {
     /** Omitted selects Docker; Kubernetes defaults are applied by the consuming modules. */
     kind?: 'docker' | 'k8s';
@@ -84,8 +84,8 @@ export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publ
 export function organizationData(environment?: NodeJS.ProcessEnv): OrganizationData;
 /** Resolve next image startup variables without reading a credential. */
 export function nextEnvironment(organization: OrganizationData, environment?: NodeJS.ProcessEnv): Record<string, string>;
-/** Resolve and validate model defaults and the runtime browser catalog. */
-export function nextModelConfig(organization: OrganizationData, environment?: NodeJS.ProcessEnv): {
+/** Resolve and validate model defaults and the runtime browser catalog; slug appends that user's model.userCatalog entries. */
+export function nextModelConfig(organization: OrganizationData, environment?: NodeJS.ProcessEnv, slug?: string): {
   quickLineModel?: string;
   defaults: Organization['model']['defaults'];
   catalog: Record<'codex' | 'claude', { id: string; key: string; name: string; also: string[] }[]>;

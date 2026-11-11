@@ -89,7 +89,7 @@ const bridgeTurnScript = `(${bridgeTurnReader.toString()})()`;
 
 /**
  * @param o.runtime Personal runtime for lifecycle, storage and endpoint resolution.
- * @param o.modelConfig Current non-secret model defaults and catalog.
+ * @param o.modelConfig (slug) => current non-secret model defaults and that user's catalog.
  * @param o.image Target personal image reference.
  * @param o.userImages Optional personal image references by user slug (Kubernetes only).
  * @param o.secretDir Gateway-only password directory.
@@ -195,7 +195,7 @@ export function createAionui(o) {
     if (!owns(user) || jobs.has(slug)) return null;
     if (background && !info.running) return null;
     const hasPass = fs.existsSync(passFile(slug));
-    const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
+    const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig(slug)) : null;
     let stale = await isStale(slug, info, modelConfig);
     if (!stale) { busySince.delete(slug); lastBusyAt.delete(slug); forcePending.delete(slug); }
     let forced = false;
