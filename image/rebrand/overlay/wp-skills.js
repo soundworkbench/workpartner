@@ -78,7 +78,10 @@
     function render(personal, market) {
       sharingEnabled = market.submissionsEnabled;
       list.replaceChildren(); var official = section(copy.official), company = section(copy.company), mine = section(copy.mine);
-      personal.filter(function (s) { return s.preinstalled; }).forEach(function (skill) { card(official, skill, copy.preinstalled); });
+      // Preinstalled display names come from the Chinese translation table; English keeps the skill's own name and description.
+      personal.filter(function (s) { return s.preinstalled; }).forEach(function (skill) {
+        card(official, context.locale === 'en-US' ? { name: skill.name, description: skill.description } : skill, copy.preinstalled);
+      });
       market.company.forEach(function (skill) {
         var authored = market.mine.some(function (s) { return s.name === skill.name; });
         var installed = personal.some(function (s) { return s.name === skill.name && s.shared; }), node = card(company, skill, authored ? copy.myShare : installed ? copy.installedBadge : copy.company);
