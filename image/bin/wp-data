@@ -112,7 +112,7 @@ def main(argv=None):
     if args.action == 'info' and not all(c.isalnum() or c in '_.-' for c in args.target):
         parser.error('Invalid endpoint ID')
     base = os.environ['PARTNER_GATEWAY_ORIGIN'].rstrip('/')
-    token = (Path.home() / '.wp-market-token').read_text().strip()
+    token = (Path.home() / '.zp-market-token').read_text().strip()
     if args.action == 'search':
         from urllib.parse import urlencode
         path = '/_wp/data/search?' + urlencode({'q': ' '.join([args.target] + args.parameters)})
