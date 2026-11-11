@@ -35,14 +35,14 @@ for (const entry of readdirSync(skills, { withFileTypes: true }).sort((a, b) => 
   if ([name, description, example].some(value => typeof value !== 'string' || !value.trim())) {
     throw new Error(`${meta.name}: 中文对照必须是非空文字`);
   }
-  lines.push(`- ${singleLine(name)}：${singleLine(description)} 例如：${singleLine(example)}`);
+  lines.push(name === meta.name ? singleLine(name) : `${singleLine(name)}（${singleLine(meta.name)}）`);
 }
 const catalog = [
   '### 你能做的事',
   '',
-  '被问到有哪些功能或工具、你能做什么时，按以下预装技能清单回答，不编造清单外的能力；不要把技能名称当作工具权限。',
+  '被问到能做什么时，按可用技能说明回答，不编造能力；技能名称不代表工具权限。以下是预装技能的显示名称：',
   '',
-  ...(lines.length ? lines : ['当前镜像没有预装技能。']),
+  lines.length ? lines.join('、') : '当前镜像没有预装技能。',
 ].join('\n');
 
 const source = readFileSync(template, 'utf8');
