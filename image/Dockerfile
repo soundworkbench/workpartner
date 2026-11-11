@@ -55,6 +55,7 @@ COPY image/home/ /opt/workpartner/home/
 COPY image/agent-baseline/ /opt/workpartner/agent-baseline/
 COPY organization/ /opt/workpartner/organization/
 COPY image/skills-zh.json /opt/workpartner/skills-zh.json
+COPY image/skill-descriptions.json /opt/workpartner/skill-descriptions.json
 # AionUi 自带的 Codex 0.144.6 不认识 gpt-6.1-sol（元数据缺失警告、模型标签错成 GPT-5.6-Sol），换成同一份 0.167.0。
 RUN for d in /opt/aionui/bundled-aioncore/linux-x64/managed-resources/cli/codex/*/linux-x64/vendor/*/bin; do \
       cp -f /opt/workpartner/bin/codex /opt/workpartner/bin/codex-code-mode-host "$d"/; done
@@ -71,6 +72,7 @@ RUN mkdir -p /tmp/skel/.claude/skills \
  && mv /tmp/skel/.claude/skills /opt/workpartner/skills && rm -rf /tmp/skel \
  && if [ -f /opt/workpartner/organization/official-skills.tar.gz ]; then python3 -I /opt/workpartner/bin/wp-feishu-skills.py /opt/workpartner/organization/official-skills.tar.gz /opt/workpartner/skills; fi \
  && cp -R /opt/workpartner/extra-skills/. /opt/workpartner/skills/ \
+ && python3 -I /opt/workpartner/bin/wp-compact-skills.py /opt/workpartner/skills /opt/workpartner/skill-descriptions.json \
  && node /opt/workpartner/bin/wp-skill-catalog.mjs /opt/workpartner/skills /opt/workpartner/skills-zh.json /opt/workpartner/home/CLAUDE.md \
  && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data \
  && chmod -R a+rX /opt/workpartner /opt/aionui \
