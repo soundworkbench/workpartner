@@ -104,6 +104,50 @@ function fixture(t, options = {}) {
 }
 const writes = c => c.calls.filter(([method]) => ['create', 'patch', 'remove'].includes(method));
 
+test('organization userImages selects registered images per user without changing other workspace settings', async t => {
+  const { client, secureDir } = fixture(t);
+  client.objects.set(registry, { data: { 'images.json': JSON.stringify({
+    'workspace:test': 'sha256:fixture', 'workspace:pilot': 'sha256:pilot',
+  }) } });
+  const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    secureDirectory: secureDir, k8s: { namespace: 'users', storageClass: 'local-data',
+      newUserNodeSelector: { pool: 'workers' }, userImages: { person: 'workspace:pilot' } } } };
+  const runtime = createRuntime(organization, { client });
+  await runtime.create({ slug: 'person' });
+  const pilot = clone(client.objects.get(stsPath));
+  assert.equal(pilot.spec.template.spec.containers[0].image, 'workspace:pilot');
+  assert.equal(pilot.spec.template.spec.initContainers[0].image, 'workspace:pilot');
+  assert.equal(pilot.metadata.annotations['workpartner/image-id'], 'sha256:pilot');
+
+  fs.writeFileSync(path.join(secureDir, 'model-other.key'), 'fixture-key');
+  await runtime.create({ slug: 'other' });
+  const otherPath = `${apps}/fixture-other`;
+  const other = clone(client.objects.get(otherPath));
+  assert.equal(other.spec.template.spec.containers[0].image, 'workspace:test');
+  assert.equal(other.spec.template.spec.initContainers[0].image, 'workspace:test');
+  assert.equal(other.metadata.annotations['workpartner/image-id'], 'sha256:fixture');
+
+  delete organization.runtime.k8s.userImages.person;
+  await runtime.create({ slug: 'person' });
+  const restored = client.objects.get(stsPath);
+  assert.equal(restored.spec.template.spec.containers[0].image, 'workspace:test');
+  assert.equal(restored.metadata.annotations['workpartner/image-id'], 'sha256:fixture');
+  const expectedPod = clone(pilot.spec.template.spec);
+  expectedPod.containers[0].image = expectedPod.initContainers[0].image = 'workspace:test';
+  assert.deepEqual(restored.spec.template.spec, expectedPod);
+  for (const userImages of [{}, undefined]) {
+    organization.runtime.k8s.userImages = userImages;
+    await createRuntime(organization, { client }).create({ slug: 'other' });
+    assert.deepEqual(client.objects.get(otherPath), other);
+  }
+});
+
+test('create rejects an unregistered per-user image even when nextImage is registered', async t => {
+  const { runtime, client } = fixture(t, { userImages: { person: 'workspace:unregistered' } });
+  await assert.rejects(runtime.create({ slug: 'person' }), /Runtime image is not registered/);
+  assert.deepEqual(writes(client), []);
+});
+
 test('shared skills use a read-only PVC without adding hostPath access to personal Pods or jobs', async t => {
   const { client, secureDir } = fixture(t);
   const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',

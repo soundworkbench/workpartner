@@ -88,7 +88,7 @@ assert.equal(typeof context.personalRuntime.inspect, 'function');
   assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
 });
 
-async function fixture(t, { disabled = false, extension = false } = {}) {
+async function fixture(t, { disabled = false, extension = false, userImages } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-services-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
@@ -104,6 +104,7 @@ async function fixture(t, { disabled = false, extension = false } = {}) {
   Object.assign(org.runtime, { gatewayPort: 0, internalPort: 0, uid: process.getuid(), nextImage: 'fixture-image',
     sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'), cookieFile: path.join(dir, 'cookies.json'),
     nextDirectory: path.join(dir, 'workspaces'), stateDirectory: path.join(dir, 'state'), secureDirectory: path.join(dir, 'secure') });
+  if (userImages !== undefined) org.runtime.k8s = { userImages };
   org.identity.appId = 'fixture-app'; org.identity.appSecretFile = path.join(dir, 'identity.secret');
   fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
   fs.writeFileSync(org.identity.appSecretFile, 'fixture-app-secret');
@@ -212,6 +213,19 @@ globalThis.fetch = async (url, init) => {
   }
   return { request, login, calls, upstreamHits, dir, org, user, output: () => output };
 }
+
+test('Docker gateway warns once and ignores per-user Kubernetes images', async t => {
+  for (const userImages of [{ user1: 'workspace:pilot' }, {}, undefined]) await t.test(JSON.stringify(userImages) ?? 'omitted', async t => {
+    const f = await fixture(t, { userImages });
+    const cookie = await f.login();
+    const response = await f.request('/', { headers: { cookie } });
+    assert.equal(response.status, 200, f.output());
+    assert.match(response.body, /workspace response/);
+    assert.equal(f.output().match(/runtime\.k8s\.userImages/g)?.length ?? 0, userImages?.user1 ? 1 : 0);
+    assert.ok(f.calls.some(call => call.path.startsWith('/images/fixture-image/')));
+    assert.equal(f.calls.some(call => call.path.includes('workspace:pilot') || call.method === 'DELETE' || call.path.includes('/stop')), false);
+  });
+});
 
 test('exported gateway serves authorization, skill uploads, automatic titles and private previews', async t => {
   const f = await fixture(t);

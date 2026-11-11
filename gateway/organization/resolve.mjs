@@ -45,6 +45,11 @@ export function organizationData(environment = process.env) {
   if (dnsNdots !== undefined && (!Number.isInteger(dnsNdots) || dnsNdots < 1 || dnsNdots > 15)) {
     throw new Error('runtime.k8s.dnsNdots must be an integer from 1 to 15');
   }
+  const userImages = data.runtime.k8s?.userImages;
+  if (userImages !== undefined && (!userImages || Object.getPrototypeOf(userImages) !== Object.prototype
+    || Object.entries(userImages).some(([slug, image]) => !slug.trim() || typeof image !== 'string' || !image || /\s/u.test(image)))) {
+    throw new Error('runtime.k8s.userImages must be an object mapping nonempty user slugs to nonempty image references without whitespace');
+  }
   quickLineModel(data.model.quickLineModel);
   const market = data.market;
   for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {
