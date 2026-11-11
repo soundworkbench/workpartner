@@ -124,6 +124,7 @@ export function createAionui(o) {
   const busyUntil = new Map();    // slug -> 查到有任务正在跑后，到这个时间前不再查、不重建
   const busySince = new Map();    // slug -> 这一轮连续观察到忙的起点
   const lastBusyAt = new Map();   // slug -> 最近一次查到忙的时间；与这次间隔超过 newRoundGapMs 说明中间没人访问，算新一轮
+  const updating = new Set();     // slug -> 进行中的任务在替换或重启已有容器（页面显示“正在更新”）
   const forcePending = new Map(); // slug -> 判定强制重建的时间：任务已满还没起任务；有空位时直接重建、不再重查；超过 newRoundGapMs 作废，回到正常判断
 
   async function ensureNetwork(slug) {
@@ -136,12 +137,12 @@ export function createAionui(o) {
     log(`新版工作伙伴容器已建 ${user.name || ""}（${user.slug}）`);
   }
 
-  // 等 AionUi 接口能答话（不需要登录的状态接口）。
+  // 等 AionUi 接口能答话（不需要登录的状态接口），最多约 60 秒。
   async function waitReady(address) {
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 240; i++) {
       const status = await call(address, "GET", "/api/auth/status").then((r) => r.status, () => 0);
       if (status && status < 500) return true;
-      await sleep(1000);
+      await sleep(250);
     }
     return false;
   }
@@ -227,25 +228,38 @@ export function createAionui(o) {
     if (stale) { busySince.delete(slug); lastBusyAt.delete(slug); busyUntil.delete(slug); forcePending.delete(slug); }   // 重建任务真正开始才清
     const needReset = !hasPass;
     if (needReset && now() - (lastReset.get(slug) ?? -Infinity) < resetBackoffMs) return null;
+    // 各阶段耗时写进日志，用来找重启慢在哪一步。
+    const phases = [];
+    let mark = Date.now();
+    const timed = async (name, work) => {
+      const result = await work();
+      const t = Date.now();
+      phases.push(`${name} ${((t - mark) / 1000).toFixed(1)}s`);
+      mark = t;
+      return result;
+    };
+    const began = mark;
+    if (info.exists) updating.add(slug);
     const job = (async () => {
       await ensureNetwork(slug);
       if (stale) {
-        if (info.running) await runtime.stop(slug);
-        await runtime.remove(slug);
+        if (info.running) await timed("停止", () => runtime.stop(slug));
+        await timed("删除", () => runtime.remove(slug));
       }
-      if (!info.exists || stale) await create(user, modelConfig);
+      if (!info.exists || stale) await timed("创建", () => create(user, modelConfig));
       if (needReset) {
-        if (info.running && !stale) await runtime.stop(slug);
+        if (info.running && !stale) await timed("停止", () => runtime.stop(slug));
         lastReset.set(slug, now());
-        await resetPassword(slug);
+        await timed("重置口令", () => resetPassword(slug));
       }
       const cur = await runtime.inspect(slug);
-      if (!cur.running) await runtime.start(slug);
+      if (!cur.running) await timed("启动容器", () => runtime.start(slug));
       sessions.delete(slug);
       const address = await runtime.address(slug);
-      if (!address || !await waitReady(address)) throw new Error("AionUi 没有就绪");
-    })().catch((e) => { joined.delete(slug); log(`新版工作伙伴准备失败 ${slug}：${e.message}`); })
-      .finally(() => jobs.delete(slug));
+      if (!address || !await timed("网页就绪", () => waitReady(address))) throw new Error("AionUi 没有就绪");
+      log(`新版工作伙伴已就绪 ${slug}：${phases.join("、")}，共 ${((Date.now() - began) / 1000).toFixed(1)}s`);
+    })().catch((e) => { joined.delete(slug); log(`新版工作伙伴准备失败 ${slug}：${e.message}（${phases.join("、") || "未完成任何阶段"}）`); })
+      .finally(() => { jobs.delete(slug); updating.delete(slug); });
     jobs.set(slug, job);
     if (background) log(`后台巡检：${slug} 空闲，按新版工作伙伴镜像重建`);
     return null;
@@ -432,5 +446,5 @@ export function createAionui(o) {
   }
   const close = () => { clearInterval(keepRunningTimer); clearInterval(reconcileTimer); };
 
-  return { upstream, session, forget, keepRunning, startKeepRunning, reconcileImages, startReconcileImages, close, pending: (slug) => jobs.get(slug) };
+  return { upstream, updating: (slug) => updating.has(slug), session, forget, keepRunning, startKeepRunning, reconcileImages, startReconcileImages, close, pending: (slug) => jobs.get(slug) };
 }

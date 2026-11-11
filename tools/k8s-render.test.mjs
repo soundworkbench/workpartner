@@ -173,6 +173,7 @@ test('gateway uses a single Recreate replica, Guaranteed resources, control-plan
     { name: 'internal', containerPort: 3091, protocol: 'TCP' },
   ]);
   assert.deepEqual(container.livenessProbe.tcpSocket, { port: 'gateway' });
+  assert.deepEqual(container.readinessProbe, { tcpSocket: { port: 'gateway' }, periodSeconds: 2 });
   assert.deepEqual(container.env, [{ name: 'WORKPARTNER_ORG_DIR', value: '/organization' }]);
 });
 
