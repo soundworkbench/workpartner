@@ -1,5 +1,5 @@
 #!/bin/bash
-# 新版工作伙伴容器入口：AionUi 网页版 + JConnect 消息桥，两个入口共用 /data/work；引擎默认 Codex（界面叫 ChatGPT），可选 Claude Code。
+# 新版工作伙伴容器入口：AionUi 网页版 + Claude Code 消息桥，两个入口共用 /data/work。
 # 钥匙只从只读挂载读进环境变量，不落盘。AionUi 只在容器网络里监听，入口只有网关。
 set -u
 export HOME=/data
@@ -14,6 +14,8 @@ ANTHROPIC_API_KEY=$(cat "$PARTNER_MODEL_KEY_FILE") || { echo "读不到模型钥
 export ANTHROPIC_API_KEY
 export "$PARTNER_MODEL_KEY_ENV=$ANTHROPIC_API_KEY"
 export DISABLE_AUTOUPDATER=1 CODEX_HOME=/data/.codex
+# Inherit the organization sub-agent default (or a deployment override).
+export CLAUDE_CODE_SUBAGENT_MODEL
 
 mkdir -p /data/work /data/.claude/skills "$CODEX_HOME/skills" || exit 1
 # AionUi 把上传的附件固定写到 /tmp/aionui：指到工作目录的“上传”文件夹，网页、文件栏和消息桥都看得到，容器重建也不丢。
@@ -44,6 +46,9 @@ fi
 python3 -I /opt/workpartner/bin/wp-model-defaults.py codex \
   /opt/workpartner/home/codex-config.toml "$CODEX_HOME/config.toml" \
   "$PARTNER_CODEX_MODEL" "$PARTNER_DEFAULT_EFFORT" || exit 1
+# Refresh existing bridge settings before it starts; a failed migration only warns.
+python3 -I /opt/workpartner/bin/wp-bridge-defaults.py /data/.cc-connect/config.toml \
+  || echo "警告：未更新消息桥配置，继续启动" >&2
 # 首次写整份说明；原样旧模板整份升级；个人说明只同步统一块，已有 AGENTS.md 不动。
 if ! instructions_error=$(python3 -I /opt/workpartner/bin/wp-sync-instructions.py \
   /opt/workpartner/home/CLAUDE.md /data/work "${PARTNER_USER_NAME:-同事}" 2>&1); then

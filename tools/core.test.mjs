@@ -126,7 +126,8 @@ test('neutral image inputs assemble without a private organization', async t => 
   assert.deepEqual(selected.image.skills, []);
   assert.equal(selected.bridge.template, '');
   assert.ok(fs.existsSync(path.join(dir, 'brand/skin.json')));
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'image/bin/legacy-instructions.json'))), []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'image/bin/legacy-instructions.json'))),
+    JSON.parse(fs.readFileSync(path.join(root, 'image/bin/legacy-instructions.json'))));
 });
 
 test('selected model defaults reach both engine templates and the browser catalog', t => {

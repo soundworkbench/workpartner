@@ -34,6 +34,12 @@ Set `bridge.template` to a template relative to the organization directory. The 
 
 Optional `model.quickLineModel` selects a fast model for a temporary Feishu quick reply line (up to 30 characters) while a turn runs. It must be a string without carriage returns or newlines; omitted or empty disables auto-configuration. It travels in `WORKPARTNER_MODEL_CONFIG` and as `QUICK_LINE_MODEL` in both Docker and Kubernetes personal containers. Changes follow the same idle-container replacement policy as model defaults, including removal, without rebuilding the image after the initial upgrade. Startup preserves `QUICK_LINE_MODEL`; a personal-container environment override takes precedence (an empty override disables it). Auto-configuration also requires `ANTHROPIC_BASE_URL` and `PARTNER_MODEL_KEY_FILE`. Explicit `[stream_preview.quick_line]` bridge settings take precedence; no section is needed in the template. The line never enters the final reply. Enabling it makes additional requests to the selected model; leave it disabled until the organization approves that usage.
 
+The personal messaging bridge uses Claude Code with `bypassPermissions` in the isolated workspace, `/data/work`, `model.defaults.claude` and `model.defaults.effort`. Onboarding and startup migrate existing bridge configurations using only the agent `type`, `mode`, `model` and `reasoning_effort` keys; bots, access lists, comments and other bytes are preserved. Repeated migrations do not write the file. A failure warns without stopping startup or onboarding. An organization-owned older template is migrated as well. Keep `agent_session_idle_timeout_mins` unset: closing the live agent prevents background completions from waking it. This does not change the web engine picker or personal web model choices.
+
+To preview an existing config offline, run `python3 -I tools/migrate-bridge.py /path/to/config.toml --model your-claude-model --effort medium`; add `--apply` to write it. Run it as the workspace owner, or as an administrator who can preserve file ownership. Back up the configuration and stop the bridge before applying an offline migration so its own configuration writer cannot race the migration. Startup performs the same migration before launching the bridge. This tool does not modify saved conversations or convert historical Codex sessions into Claude sessions.
+
+Child agents inherit `CLAUDE_CODE_SUBAGENT_MODEL`, defaulting to `model.defaults.haiku`; a container environment override is preserved. The shared background-task instructions are included even when `image.instructions` supplies older organization instructions. Their memory placeholders use the effective cgroup limit (including per-person overrides), falling back to `runtime.nextMemory`. The policy allows up to two background tasks, each using at most a quarter of the workspace limit, capped at 512 MiB. These are agent instructions; the container memory limit enforces the total budget. Verify immediate acknowledgment, answers to intervening messages, and unsolicited completion in the messaging app after deployment; source-level config checks cannot establish that live behavior.
+
 `image.homeDirectory` supplies organization home templates, including an optional `feishu-SKILL.md` authorization policy. `image.instructions` supplies the company instruction block; `image.legacyInstructions` supplies exact historical templates. Startup replaces only the marked company block in personal instructions, preserving the surrounding bytes; pristine historical templates upgrade in full. Existing `AGENTS.md` files remain intact.
 
 `image.skillTranslations` overrides entries from the generic `image/skills-zh.json`. `image.officialSkillsArchive` enables the official skill bundle. The public build supplies its reproducible archive from the two locked upstream source archives; direct materialization copies the configured local archive unless `WORKPARTNER_OFFICIAL_SKILLS_ARCHIVE` explicitly supplies a replacement. The installer retains references and licenses and groups the official skills under the generic `feishu` skill in the capability list. Organization-specific authorization instructions belong in the organization home policy.
@@ -77,5 +83,33 @@ Directory paths are `platformsPath`, `platformPath` and `endpointPath` (both wit
 Authenticated routes are `GET /_wp/data/tools`, `GET /_wp/data/catalog?platform=ID`, `GET /_wp/data/search?q=QUERY`, `GET /_wp/data/info/ID`, `POST /_wp/data/call/ID` and `GET /_wp/data/usage`. Both gateway listeners apply the same identity and category policy before optional extensions. Optional `blockedPrefixes`, exact `legacyPassthrough` paths for legacy users, and `usageAliases` support organization-owned transitions.
 
 The image includes `wp-data search`, `info`, `call` (with `key=value` or `--json`) and `balance`. Image preparation generates a `data-tools` skill with the category/platform map and direct examples. Existing startup exposes it to both agent engines and messaging sessions. The skill requires a unit-price quote before spending, actual cost and remaining allowance afterwards, and source citations. A call with an unknown outcome is never automatically retried. A usage-read failure after a completed call preserves the completed result.
+
+### Content generation and file results
+
+Add a localized category such as `{"en":"Content generation","zh":"内容生成"}` and its provider platforms to the same catalog. The provider's live platform category must match. Generation uses the existing data provider, personal identity and daily/monthly/per-call budgets; model gateway configuration does not change. Cards reuse the platform chip, price and fixed “Try it” prompt of other categories.
+
+Common endpoint examples can set `defaults`, `timeoutMs` and `fileResult`, for example:
+
+```json
+{
+  "defaults": { "model": "image-standard", "quality": "medium", "size": "1024x1024" },
+  "timeoutMs": 180000,
+  "fileResult": {
+    "path": "data",
+    "urlField": "url",
+    "base64Field": "b64_json",
+    "maxBytes": 8388608,
+    "maxFiles": 4
+  }
+}
+```
+
+Every default key must appear in the endpoint's allowed `parameters`. Defaults fill omitted input; agents may override allowed parameters, while `rules.fixed` and other limits still apply. The generated skill's command and the card's “Try it” prompt combine `template` with these defaults. `wp-data info` exposes the execution policy for both endpoint IDs and command aliases. Organization defaults take precedence over template values in generated examples.
+
+`timeoutMs` bounds the provider HTTP request, including the response body (1–600 seconds; default 60 seconds). The command reads this policy before calling and waits 20 seconds longer than the gateway. This supports slow image endpoints that hold the request open until generation completes. The provider must enforce budgets and charge only successful generations. The gateway passes through the successful cost and call ID; failed or timed-out requests are never retried automatically. A bare HTTP 202 acknowledgement is reported as pending, not as a completed image: job submission/polling APIs require a provider adapter that waits for completion. Do not resubmit an unknown or pending job.
+
+`fileResult.path` selects an image array or object inside the provider JSON using dot-separated keys; use `""` for the root. Configure one or both of `urlField` / `base64Field` to match its image objects. Base64 is decoded inside the personal container. URL downloads send no gateway or provider credentials and reject redirects. Both paths enforce `maxBytes` per image (up to 32 MiB), `maxFiles` (up to 10), and PNG/JPEG/GIF/WebP signatures. The gateway also caps the entire JSON response at 64 MiB. Returned image URLs must be directly downloadable HTTP(S) resources.
+
+The command saves files under `/data/work/outputs/images/<UTC-date>-<endpoint>-<unique-id>.<format>` and returns absolute `files` paths alongside `costUsd`, `callId` and personal usage. `WORKPARTNER_WORKSPACE` can select a different workspace for standalone use. Once saved, base64 payloads are omitted from command output. The generated skill tells every agent to show the saved images to the user. A local save failure returns a nonzero exit code with `fileError`, the successful generation cost and any files already saved; do not pay to regenerate. Workspace files are never uploaded automatically. Reference-image endpoints can accept existing public URLs as allowed parameters; local reference-image hosting is not implemented.
 
 The Tools tab reads the live directory, displays personal remaining daily/monthly allowance, horizontal category buttons, platform filters and priced cards. Common examples appear first and open a new conversation through “Try it”. The page never shows organization balances or provider names. Build a new personal image and gateway image when enabling these capabilities; organization catalogs and provider settings must also be mounted into the gateway.
