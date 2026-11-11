@@ -1073,7 +1073,7 @@
   }
   function updateMarket() {
     marketLocale = locale();
-    text(marketHost.querySelector('h1'), locale() === 'zh-CN' ? '技能市场' : 'Skill market');
+    text(marketHost.querySelector('h1'), t('market'));
     marketHost.querySelector('[role="tablist"]').setAttribute('aria-label', t('market'));
     marketHost.querySelectorAll('[role="tab"]').forEach(function (button) {
       var selected = button.dataset.tab === marketTab;

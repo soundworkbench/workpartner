@@ -1,0 +1,100 @@
+#!/usr/bin/python3
+"""Discover and call external data tools through the gateway using the existing personal container identity."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import urllib.error
+import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward personal credentials to a redirected destination."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['search', 'info', 'call', 'list', 'balance'])
+    parser.add_argument('target', nargs='?', help='Search query or endpoint ID')
+    parser.add_argument('parameters', nargs='*', metavar='key=value')
+    parser.add_argument('--json', dest='payload', help='JSON parameter object (a one-item array is supported for array APIs)')
+    args = parser.parse_args(argv)
+    if args.payload is not None and args.parameters:
+        parser.error('Use key=value or --json, not both')
+    data = None
+    if args.action == 'call':
+        if not args.target:
+            parser.error('call requires an endpoint ID')
+        if not all(character.isalnum() or character in '_.-' for character in args.target):
+            parser.error('Invalid tool name')
+        if args.payload is not None:
+            data = json.loads(args.payload)
+        else:
+            data = {}
+            for item in args.parameters:
+                key, separator, value = item.partition('=')
+                if not separator or not key or key in data:
+                    parser.error('Expected unique key=value parameters')
+                try:
+                    data[key] = json.loads(value)
+                except ValueError:
+                    data[key] = value
+    elif args.payload is not None or (args.action != 'search' and args.parameters):
+        parser.error('Only call accepts parameters')
+    if args.action in ['search', 'info'] and not args.target:
+        parser.error('A query or endpoint ID is required')
+    if args.action in ['list', 'balance'] and args.target:
+        parser.error(args.action + ' takes no parameters')
+    if args.action == 'info' and not all(c.isalnum() or c in '_.-' for c in args.target):
+        parser.error('Invalid endpoint ID')
+    base = os.environ['PARTNER_GATEWAY_ORIGIN'].rstrip('/')
+    token = (Path.home() / '.wp-market-token').read_text().strip()
+    if args.action == 'search':
+        from urllib.parse import urlencode
+        path = '/_wp/data/search?' + urlencode({'q': ' '.join([args.target] + args.parameters)})
+    elif args.action == 'info':
+        path = '/_wp/data/info/' + args.target
+    elif args.action == 'balance':
+        path = '/_wp/data/usage'
+    elif args.action == 'list':
+        path = '/_wp/data/tools'
+    else:
+        path = '/_wp/data/call/' + args.target
+    request = urllib.request.Request(base + path, data=None if data is None else json.dumps(data).encode(),
+                                     headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=80) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            result = json.load(error)
+        except ValueError:
+            result = {'error': 'Data gateway rejected the request'}
+        print(json.dumps(result, ensure_ascii=False))
+        return 1
+    if args.action == 'call':
+        usage_request = urllib.request.Request(base + '/_wp/data/usage',
+                                               headers={'Authorization': 'Bearer ' + token})
+        try:
+            with opener.open(usage_request, timeout=40) as response:
+                usage = json.load(response)
+            result['usage'] = usage
+            result['remainingTodayUsd'] = max(0, round(usage['daily']['limitUsd'] - usage['daily']['usedUsd'], 6))
+        except (OSError, ValueError, KeyError, TypeError):
+            # The data call completed; a usage failure must never cause it to be repeated.
+            result['usageError'] = '查询已完成，用量暂时无法读取。用 wp-data balance 核实，不要重试查询。 / Call completed; check wp-data balance without repeating the call.'
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError):
+        print(json.dumps({'error': '查询结果未确认，请检查连接或用量后再试。不要自动重试。 / Result unconfirmed; check connection and usage before retrying.'}, ensure_ascii=False))
+        sys.exit(1)
