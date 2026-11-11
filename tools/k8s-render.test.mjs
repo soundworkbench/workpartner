@@ -200,6 +200,16 @@ test('gateway mounts configured paths and the writable shared claim at the confi
   assert.ok(!JSON.stringify(pod).includes('docker.sock'));
 });
 
+test('gateway environment Secrets are attached only when configured', () => {
+  const org = fixture();
+  let container = find(renderManifests(org).objects, 'Deployment').spec.template.spec.containers[0];
+  assert.equal(container.envFrom, undefined);
+  org.runtime.k8s.deploy.gatewayEnvFrom = ['gateway-data-tools', 'gateway.extra'];
+  container = find(renderManifests(org).objects, 'Deployment').spec.template.spec.containers[0];
+  assert.deepEqual(container.envFrom, [{ secretRef: { name: 'gateway-data-tools' } }, { secretRef: { name: 'gateway.extra' } }]);
+  assert.deepEqual(container.env, [{ name: 'WORKPARTNER_ORG_DIR', value: '/organization' }]);
+});
+
 test('shared claim is configurable and absent when the skill market is disabled', () => {
   const org = fixture();
   org.runtime.k8s.sharedSkillsClaim = 'reviewed-library';
@@ -377,6 +387,9 @@ test('invalid or unsafe settings fail before producing manifests', async t => {
     ['invalid ClusterIP', org => { org.runtime.k8s.deploy.entry = { mode: 'clusterIP', clusterIP: 'invalid' }; }, /entry.clusterIP/],
     ['relative host path', org => { org.runtime.k8s.deploy.hostPaths.secure = 'relative'; }, /hostPaths.secure/],
     ['nonstring storage parameter', org => { org.runtime.k8s.deploy.newUserStorage.parameters = { size: 20 }; }, /newUserStorage.parameters/],
+    ['gateway Secret is not a list', org => { org.runtime.k8s.deploy.gatewayEnvFrom = 'gateway-data-tools'; }, /gatewayEnvFrom/],
+    ['invalid gateway Secret name', org => { org.runtime.k8s.deploy.gatewayEnvFrom = ['Gateway_Data']; }, /gatewayEnvFrom/],
+    ['repeated gateway Secret', org => { org.runtime.k8s.deploy.gatewayEnvFrom = ['data', 'data']; }, /gatewayEnvFrom/],
     ['missing isolation policy', org => { org.runtime.k8s.requiredPolicies = ['custom-policy']; }, /requiredPolicies/],
   ];
   for (const [name, edit, pattern] of cases) await t.test(name, () => {

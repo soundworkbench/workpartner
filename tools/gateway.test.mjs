@@ -278,6 +278,10 @@ test('exported gateway serves authorization, skill uploads, automatic titles and
   assert.equal(new URL(preview.headers.location).hostname, 'preview.example.test');
   assert.ok(fs.existsSync(path.join(f.org.runtime.nextDirectory, 'user1/.zp-preview-relay-key')));
   assert.equal((await f.request('/api/private', { headers: { ...headers, origin: 'https://preview.example.test' } })).status, 403);
+  const client = await f.request('/_wp/preview/client.js', { headers });
+  assert.equal(client.status, 200);
+  assert.match(client.body, /"previewHost":"preview\.example\.test"/);
+  assert.match(client.body, /window\.open = function/);
   assert.equal((await f.request('/_wp/desktop-login', { headers })).status, 404);
   assert.ok(!fs.existsSync(f.org.runtime.cookieFile), 'legacy cookie state is not read or written');
 });
@@ -288,6 +292,9 @@ test('organization switches disable integrations without loading private code or
   for (const route of ['/_wp/feishu/status', '/_wp/aionui/feishu/status', '/_wp/market/skills', '/_wp/preview/open?port=8080&path=%2F']) {
     assert.equal((await f.request(route, { headers })).status, 404, route);
   }
+  const client = await f.request('/_wp/preview/client.js', { headers });
+  assert.equal(client.status, 200);
+  assert.equal(client.body, '// Workspace preview is disabled.');
   assert.ok(!fs.existsSync(f.org.runtime.stateDirectory));
   assert.ok(!fs.existsSync(f.org.runtime.nextDirectory));
 });
