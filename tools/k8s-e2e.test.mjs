@@ -364,7 +364,13 @@ if(input==='set -eu\\nnft list table inet workpartner_guard\\n') { console.error
       assert.equal(state.results.at(-1).status, 'FAIL');
       const diagnostics = state.results.at(-1).evidence.policyDiagnostics;
       assert.equal(diagnostics.gatewayPods[0].name, 'gateway');
-      assert.equal(diagnostics.probes.length, 10);
+      assert.equal(diagnostics.probes.length, 12);
+      const hostname = 'wp-e2e-offline-gateway.wp-e2e-offline-system.svc.cluster.local';
+      assert.deepEqual(diagnostics.probes.filter(p => p.target.kind === 'lookup').map(p =>
+        ({ pod: p.source.name, host: p.target.host })),
+      [{ pod: 'wp-e2e-offline-node-server-0', host: hostname }]);
+      assert.ok(diagnostics.probes.some(p => p.source.name === 'wp-e2e-offline-node-server-0'
+        && p.target.kind === 'tcp' && p.target.host === hostname && p.target.port === 18083));
       assert.equal(diagnostics.guards.length, 2);
       assert.ok(diagnostics.guards.every(g => g.status === 'unavailable'));
       assert.ok(!JSON.stringify(diagnostics).includes('counter diagnostic'));
