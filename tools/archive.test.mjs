@@ -20,7 +20,7 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 function chat(id, value = false) { return { id, name: id, extra: { wp_archived: value } }; }
 
 function app(items = [chat('one')]) {
-  const writes = [], reads = [], alerts = [];
+  const writes = [], reads = [], alerts = [], rows = new Map();
   const window = new EventTarget();
   window.fetch = (url, options) => {
     const result = deferred(); writes.push({ url, options, ...result }); return result.promise;
@@ -28,7 +28,7 @@ function app(items = [chat('one')]) {
   const element = () => ({ setAttribute() {}, addEventListener() {}, replaceChildren(...children) { alerts.push(children[0]); } });
   const context = vm.createContext({ window, console, Promise, Map, Set,
     document: { querySelector: () => null, querySelectorAll: () => [], createElement: element,
-      createTextNode: text => text, body: { appendChild() {} } },
+      getElementById: id => rows.get(id), createTextNode: text => text, body: { appendChild() {} } },
     location: { hash: '' }, requestAnimationFrame() {},
     pd: { getUserConversations: { invoke(options) { assert.equal(options.limit, 10000); const result = deferred(); reads.push(result); return result.promise; } } },
   });
@@ -43,7 +43,7 @@ function app(items = [chat('one')]) {
   function respond(index, item, ok = true) {
     writes[index].resolve({ ok, json: async () => ({ success: ok, data: item }) });
   }
-  return { window, writes, reads, alerts, seed, respond, visible: () => Array.from(window.visible()) };
+  return { window, writes, reads, alerts, rows, seed, respond, visible: () => Array.from(window.visible()) };
 }
 
 test('archive hides immediately among 3000 chats; PATCH plus list event performs one list read and no confirmation GET', async () => {
@@ -149,4 +149,15 @@ test('duplicate clicks during PATCH are ignored; mismatched success data rolls b
   assert.equal(a.writes.length, 1);
   a.respond(0, chat('wrong', true)); await first;
   assert.deepEqual(a.visible(), ['one']); assert.equal(a.alerts.length, 1);
+});
+
+test('existing rows hide and roll back without rerendering the whole list', async () => {
+  const a = app(); await a.seed();
+  let invalidations = 0;
+  a.window.wpArchive.invalidate = () => invalidations++;
+  const row = { style: {} }; a.rows.set('c-one', row);
+  const operation = a.window.wpArchive.toggle('one');
+  assert.equal(row.style.display, 'none'); assert.equal(invalidations, 0);
+  a.respond(0, null, false); await operation;
+  assert.equal(row.style.display, ''); assert.equal(invalidations, 0);
 });

@@ -22,9 +22,12 @@
     var override = c && overrides.get(c.id);
     return override ? override.value : storedArchived(c);
   }
-  function changed() {
+  function changed(id) {
     revision++;
-    if (window.wpArchive.invalidate) window.wpArchive.invalidate();
+    // Project onto the existing row before React or a full-list response can delay the next paint.
+    var row = document.getElementById('c-' + id);
+    if (row) row.style.display = archived(conversations.get(id)) ? 'none' : '';
+    else if (window.wpArchive.invalidate) window.wpArchive.invalidate();
     render();
   }
   // Share one list request; any changes during it need just one trailing reload.
@@ -63,7 +66,7 @@
     var c = conversations.get(id) || value;
     if (!c || typeof c !== 'object') return;
     var previous = overrides.get(id), next = !archived(c); pending.add(id);
-    overrides.set(id, { value: next, version: ++version }); changed();
+    overrides.set(id, { value: next, version: ++version }); changed(id);
     try {
       var confirmed = await json('/api/conversations/' + encodeURIComponent(id), { method: 'PATCH',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extra: { wp_archived: next }, merge_extra: true }) });
@@ -71,7 +74,7 @@
     } catch (failure) {
       if (previous) overrides.set(id, { value: previous.value, version: ++version });
       else overrides.delete(id);
-      changed();
+      changed(id);
       error(label('failed'));
     } finally { pending.delete(id); revision++; render(); }
   }
