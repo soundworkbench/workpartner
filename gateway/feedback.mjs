@@ -170,7 +170,7 @@ export function createFeedback({ organization, organizationData, authenticate, s
       if (JSON.stringify(item) === JSON.stringify(old)) return { item };
       touch(item); if (reply) reply.seq = item.seq;
       state.items[key] = item; save();
-      if (old.status !== item.status || reply) return { item: structuredClone(item), committedSeq: item.seq,
+      if (reply) return { item: structuredClone(item), committedSeq: item.seq,
         noticeOrder: ++notificationOrder, notify: true, reply };
       return { item: structuredClone(item) };
     });
