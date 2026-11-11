@@ -142,12 +142,19 @@ function liveDirectory(catalog, provider, fetcher) {
     const rows = await platforms();
     const order = new Map(catalog.platforms.map((row, index) => [row.id, index]));
     rows.sort((a, b) => (order.get(a.slug) ?? order.size) - (order.get(b.slug) ?? order.size));
-    return catalog.categories.map(category => ({ name: category, platforms: rows.filter(row => row.category === category.en).map(row => ({
+    // A platform merged into another open platform of its category has no filter of its own.
+    const merged = row => rows.some(host => host.slug === policy.mergedPlatforms?.[row.slug] && host.category === row.category);
+    return catalog.categories.map(category => ({ name: category, platforms: rows.filter(row => row.category === category.en && !merged(row)).map(row => ({
       id: row.slug, name: { en: row.label, zh: policy.platformNames[row.slug] || row.label }, summary: row.summary || '' })) }));
   }
   async function list(platform, callMaxUsd) {
-    const allowed = await platforms();
-    if (!allowed.some(row => row.slug === platform)) throw fail(403, '此数据平台未开放 / Platform is not allowed');
+    const allowed = await platforms(), host = allowed.find(row => row.slug === platform);
+    if (!host) throw fail(403, '此数据平台未开放 / Platform is not allowed');
+    const members = allowed.filter(row => policy.mergedPlatforms?.[row.slug] === platform && row.category === host.category);
+    const cards = (await Promise.all([platform, ...members.map(row => row.slug)].map(slug => platformCards(slug, allowed, callMaxUsd)))).flat();
+    return cards.sort((a, b) => Number(b.recommended) - Number(a.recommended));
+  }
+  async function platformCards(platform, allowed, callMaxUsd) {
     const result = await read(pathFor('platformPath', platform));
     if (result.platform?.slug !== platform || !Array.isArray(result.capabilities)) throw fail(502, 'Invalid platform details');
     const cards = [], assigned = new Set();
@@ -172,7 +179,7 @@ function liveDirectory(catalog, provider, fetcher) {
         assigned.add(ep.id); cards.push(presentation({ ...ep, platform }, callMaxUsd));
       }
     }
-    return cards.sort((a, b) => Number(b.recommended) - Number(a.recommended));
+    return cards;
   }
   async function search(query) {
     if (!query.trim() || query.length > 1000) throw fail(400, '搜索关键词无效 / Invalid search query');

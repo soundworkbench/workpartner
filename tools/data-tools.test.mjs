@@ -91,6 +91,40 @@ test('neutral organizations expose no data tools; a selected table controls card
   assert.equal(requests.length, count);
 });
 
+test('a merged platform loses its own filter and lists its cards under the host platform', async t => {
+  const { ep, catalog, org } = fixture(t);
+  catalog.directory.mergedPlatforms = { 'small-source': 'measurements', 'other-shelf': 'measurements' };
+  fs.writeFileSync(path.join(org.directory, 'catalog.json'), JSON.stringify(catalog));
+  const authenticate = req => req.headers.authorization === 'Bearer fixture-personal' ? { slug: 'fixture-user' } : null;
+  const endpoint = (id, platform, summary) => ({ ...ep, id, platform, kind: 'data', platform_eligible: true, summary, cost: { usd: .01, unit: 'call' } });
+  const details = {
+    measurements: [{ id: 'measurements.search', description: 'Search measurements', endpoints: [endpoint(ep.id, 'measurements', 'Find measurement data')] }],
+    'small-source': [{ id: 'small-source.profile', description: 'One profile', endpoints: [endpoint('example.small.profile', 'small-source', 'One profile')] }],
+  };
+  const handler = createDataTools({ organization: org, authenticate, env: { DATA_ON: '1', DATA_VERIFIED: '1', DATA_ORG: '5', DATA_TEAM: 'fixture' },
+    fetcher: async url => {
+      url = new URL(url);
+      if (url.pathname === '/directory/platforms') return Response.json({ platforms: [
+        { slug: 'measurements', label: 'Measurements', category: 'Research' },
+        { slug: 'small-source', label: 'Small source', category: 'Research' },
+        { slug: 'other-shelf', label: 'Other shelf', category: 'Elsewhere' },
+      ] });
+      const slug = url.pathname.split('/').at(-1);
+      return Response.json({ platform: { slug }, capabilities: details[slug] || [] });
+    } });
+  const server = http.createServer(async (req, res) => { await handler(req, res, new URL(req.url, 'http://local.test')); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}`, headers = { authorization: 'Bearer fixture-personal' };
+  const groups = await (await fetch(base + '/_wp/data/tools', { headers })).json();
+  assert.deepEqual(groups.groups[0].platforms.map(row => row.id), ['measurements']);
+  const cards = await (await fetch(base + '/_wp/data/catalog?platform=measurements', { headers })).json();
+  assert.deepEqual(cards.tools.map(row => row.endpoint), [ep.id, 'example.small.profile']);
+  const direct = await (await fetch(base + '/_wp/data/catalog?platform=small-source', { headers })).json();
+  assert.deepEqual(direct.tools.map(row => row.endpoint), ['example.small.profile']);
+  assert.throws(() => parseDataTools({ ...catalog, directory: { ...catalog.directory, mergedPlatforms: { measurements: 'measurements' } } }), /category policy/);
+});
+
 test('image calls wait, apply catalog defaults, save URL/base64 files and retain the successful cost', async t => {
   const { root, ep, catalog, org } = fixture(t);
   ep.id = 'example.images.generate'; ep.command = 'generate-image'; ep.bodyArray = false;

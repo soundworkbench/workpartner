@@ -12,7 +12,9 @@ export function parseDataTools(value) {
     || new Set(value.categories.map(row => row.en)).size !== value.categories.length
     || !Array.isArray(value.platforms) || !object(value.directory)
     || !['platformsPath', 'platformPath', 'endpointPath', 'searchPath'].every(key => value.directory[key]?.startsWith('/'))
-    || !Array.isArray(value.directory.blockedEndpoints) || !Array.isArray(value.directory.blockedProviders)) throw new Error('Invalid data category policy');
+    || !Array.isArray(value.directory.blockedEndpoints) || !Array.isArray(value.directory.blockedProviders)
+    || (value.directory.mergedPlatforms !== undefined && (!object(value.directory.mergedPlatforms)
+      || Object.entries(value.directory.mergedPlatforms).some(([slug, host]) => typeof host !== 'string' || !host || host === slug)))) throw new Error('Invalid data category policy');
   if (value.presentation !== undefined && (!object(value.presentation)
     || !['tasks', 'endpoints'].every(key => object(value.presentation[key]) && Object.values(value.presentation[key]).every(row => object(row) && typeof row.title === 'string' && row.title.trim() && typeof row.description === 'string' && row.description.trim())))) throw new Error('Invalid data presentation copy');
   const ids = new Set(), commands = new Set(), names = new Set();
