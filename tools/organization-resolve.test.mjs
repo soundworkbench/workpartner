@@ -22,7 +22,7 @@ const hosts = {
 };
 
 test('organization validates optional per-user Kubernetes image references', t => {
-  for (const userImages of [undefined, {}, { u8fdaf652: 'workspace:pilot', other: 'registry.example.com/workspace@sha256:abc' }]) {
+  for (const userImages of [undefined, {}, { person: 'workspace:pilot', other: 'registry.example.com/workspace@sha256:abc' }]) {
     const org = resolveOrganization(fixture(t, { runtime: { k8s: { userImages } } }));
     assert.deepEqual(org.runtime.k8s.userImages, userImages);
     if (userImages === undefined) assert.equal(Object.hasOwn(org.runtime.k8s, 'userImages'), false);
@@ -30,7 +30,7 @@ test('organization validates optional per-user Kubernetes image references', t =
   for (const userImages of [null, [], ['workspace:pilot'], 'workspace:pilot', 42, true,
     { '': 'workspace:pilot' }, { ' ': 'workspace:pilot' },
     ...['', ' ', 'workspace:pilot extra', 'workspace:pilot\n', 'workspace:\rpilot', 'workspace:\tpilot',
-      null, 42, true, [], {}].map(image => ({ u8fdaf652: image }))]) {
+      null, 42, true, [], {}].map(image => ({ person: image }))]) {
     assert.throws(() => resolveOrganization(fixture(t, { runtime: { k8s: { userImages } } })),
       /runtime\.k8s\.userImages/);
   }
