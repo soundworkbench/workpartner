@@ -45,6 +45,13 @@
         choice(platforms, platform.name[language], platform.id === platformId, function () { platformId = platform.id; renderFilters(); void loadCards(); });
       });
     }
+    // Cards without an organization example get a draft built from their own title and description.
+    function starter(tool) {
+      var title = tool.title[language], summary = (tool.description[language] || '').trim().replace(/[。.]+$/, '');
+      if (zh) return '用「' + title + '」' + (summary ? '帮我' + summary : '');
+      if (/^[A-Z][a-z]/.test(summary)) summary = summary[0].toLowerCase() + summary.slice(1);
+      return 'Use “' + title + '”' + (summary ? ' to ' + summary : '');
+    }
     function appendCards() {
       tools.slice(visible, visible + 12).forEach(function (tool) {
         var card = element('article', 'wp-skill-card wp-data-card'); card.dataset.tool = tool.name;
@@ -52,10 +59,8 @@
         heading.lastChild.title = tool.platform.name[language];
         var description = element('p', 'wp-skill-description', tool.description[language]); description.title = tool.description[language];
         var footer = element('div', 'wp-data-foot'); footer.append(element('span', 'wp-data-price', tool.included ? copy.included : tool.priceLabel));
-        if (tool.example) {
-          var button = element('button', 'wp-skill-action', copy.tryIt); button.type = 'button';
-          button.addEventListener('click', function () { window.wpMarket.tryExample(tool.example[language]); }); footer.append(button);
-        }
+        var button = element('button', 'wp-skill-action', copy.tryIt), prompt = tool.example ? tool.example[language] : starter(tool); button.type = 'button';
+        button.addEventListener('click', function () { window.wpMarket.tryExample(prompt); }); footer.append(button);
         card.append(heading, description, footer); cards.append(card);
       });
       visible += 12; more.hidden = visible >= tools.length;

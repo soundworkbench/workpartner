@@ -35,9 +35,10 @@ test('All keeps platform order across recommended examples, pagination and platf
   const rows = Object.fromEntries(platforms.map(({ id }) => [id, Array.from({ length: 7 }, (_, index) => ({
     name: `${id}-${index}`, title: label(`${id}-${index}`), description: label('Description'),
     recommended: id === 'second' && index === 0, price: { kind: 'call', usd: 0.01 },
+    ...(id === 'second' && index === 0 ? { example: label('Organization example') } : {}),
   }))]));
-  let render;
-  const window = { wpMarket: { register(name, callback) { assert.equal(name, 'tools'); render = callback; } } };
+  let render; const tried = [];
+  const window = { wpMarket: { register(name, callback) { assert.equal(name, 'tools'); render = callback; }, tryExample: text => tried.push(text) } };
   const context = { window, AbortController, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) },
     fetch: async url => {
       const path = new URL(url, 'http://fixture');
@@ -59,6 +60,12 @@ test('All keeps platform order across recommended examples, pagination and platf
     const names = () => Array.from(cards.children, node => node.dataset.tool);
     const expected = [...Object.keys(rows).flatMap(id => rows[id].map(row => row.name))];
     assert.deepEqual(names(), expected.slice(0, 12));
+    // Every card offers Try it on its price row; organization examples win over the card-built draft.
+    for (const card of cards.children) {
+      const [price, action] = card.children[2].children;
+      assert.equal(price.className, 'wp-data-price'); assert.equal(action.textContent, 'Try it'); action.click();
+    }
+    assert.equal(tried[0], 'Use “first-0” to description'); assert.equal(tried[7], 'Organization example');
     assert.equal(more.hidden, false);
     more.click();
     assert.deepEqual(names(), expected);
