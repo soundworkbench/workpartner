@@ -566,24 +566,24 @@ html body .message-item.text.justify-start + .message-item.text.justify-start { 
 
 /* 市场页使用主区和现有中性色，选中态不加单侧竖线。 */
 .wp-market { flex: 1; min-height: 0; overflow: auto; background: var(--wp-main); color: var(--wp-ink); }
-.wp-market-inner { width: 100%; max-width: 1040px; box-sizing: border-box; margin: 0 auto; padding: 32px 40px; }
-.wp-market h1 { margin: 0 0 24px; font-size: 24px; font-weight: 600; line-height: 1.4; }
-.wp-market-tabs { display: flex; gap: 4px; width: fit-content; padding: 4px; border: 1px solid var(--wp-line); border-radius: 12px; background: var(--wp-hover); }
-.wp-market-tabs button { border: 0; border-radius: 8px; padding: 8px 24px; background: transparent; color: var(--wp-ink-2); cursor: pointer; font-size: 14px; line-height: 20px; }
+.wp-market-inner { width: 100%; max-width: 1200px; box-sizing: border-box; margin: 0 auto; padding: 28px 32px; }
+.wp-market h1 { margin: 0 0 16px; font-size: 24px; font-weight: 600; line-height: 1.4; }
+.wp-market-tabs { display: flex; gap: 2px; width: fit-content; padding: 3px; border: 1px solid var(--wp-line); border-radius: 10px; background: var(--wp-hover); }
+.wp-market-tabs button { border: 0; border-radius: 7px; padding: 4px 18px; background: transparent; color: var(--wp-ink-2); cursor: pointer; font-size: 14px; line-height: 20px; }
 .wp-market-tabs button:hover { background: var(--wp-hover); }
 .wp-market-tabs button[aria-selected="true"] { background: var(--wp-card); color: var(--wp-ink); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .wp-market :focus-visible { outline: 2px solid var(--wp-ink-2); outline-offset: 3px; }
-.wp-market-content { margin-top: 24px; min-width: 0; overflow-wrap: anywhere; }
-.wp-market-empty { margin: 0; min-height: 240px; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--wp-line); border-radius: 16px; color: var(--wp-ink-3); font-size: 14px; }
+.wp-market-content { margin-top: 16px; min-width: 0; overflow-wrap: anywhere; }
+.wp-market-empty { margin: 0; min-height: 160px; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--wp-line); border-radius: 16px; color: var(--wp-ink-3); font-size: 14px; }
 @media (max-width: 767px) {
-  .wp-market-inner { padding: 24px 20px; }
-  .wp-market h1 { font-size: 22px; margin-bottom: 20px; }
-  .wp-market-empty { min-height: 220px; }
+  .wp-market-inner { padding: 20px 16px; }
+  .wp-market h1 { font-size: 20px; margin-bottom: 12px; }
+  .wp-market-empty { min-height: 140px; }
 }
 
 /* Personal skills share the market page's native neutral palette. */
-.wp-skills-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:16px;margin-bottom:20px}
-.wp-skills-add,.wp-skills-retry,.wp-skill-delete{font:inherit;cursor:pointer;border-radius:8px;padding:8px 14px;white-space:nowrap}
+.wp-skills-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:16px;margin-bottom:8px}
+.wp-skills-add,.wp-skills-retry,.wp-skill-delete{font:inherit;cursor:pointer;border-radius:8px;padding:4px 12px;line-height:18px;white-space:nowrap}
 .wp-skills-add{border:1px solid var(--text-primary);background:var(--text-primary);color:var(--bg-1);font-size:13px;font-weight:500}
 .wp-skills-retry,.wp-skill-delete{border:1px solid var(--border-base);background:transparent;color:var(--text-secondary);font-size:12px}
 .wp-skills-add:disabled,.wp-skills-retry:disabled,.wp-skill-delete:disabled{opacity:.5;cursor:wait}
@@ -591,15 +591,17 @@ html body .message-item.text.justify-start + .message-item.text.justify-start { 
 .wp-skills-status:empty{display:none}
 .wp-skills-error{color:var(--text-primary)}
 .wp-skills-retry{margin-bottom:16px}
-.wp-skills-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-.wp-skill-card{border:1px solid var(--border-base);border-radius:12px;padding:20px;background:var(--bg-1);min-width:0}
+/* Cards fill 3 columns on a wide content area, 2 on a narrow one and 1 on a phone. */
+.wp-skills-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:12px}
+.wp-skills-list>.wp-market-empty{grid-column:1/-1;min-height:96px}
+.wp-skill-card{border:1px solid var(--border-base);border-radius:10px;padding:14px 16px;background:var(--bg-1);min-width:0}
 .wp-skill-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-.wp-skill-name{margin:0;font-size:15px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;color:var(--text-primary)}
+.wp-skill-name{margin:0;font-size:15px;font-weight:600;line-height:22px;overflow-wrap:anywhere;color:var(--text-primary)}
 .wp-skill-badge{font-size:11px;line-height:1.7;color:var(--text-secondary);border-radius:5px;padding:1px 6px;background:var(--bg-2);white-space:nowrap}
-.wp-skill-description{margin:10px 0 0;font-size:13px;line-height:1.7;color:var(--text-secondary);overflow-wrap:anywhere;white-space:pre-line}
-.wp-skill-source{margin:6px 0 0;font-size:13px;line-height:1.6;color:var(--text-secondary)}.wp-skill-source a{color:inherit;text-decoration:underline;text-underline-offset:2px}
-.wp-skill-delete{margin-top:16px}
-@media(max-width:767px){.wp-skills-toolbar{align-items:flex-start;gap:12px}.wp-skills-list{grid-template-columns:minmax(0,1fr)}.wp-skill-card{padding:18px}}
+.wp-skill-description{margin:4px 0 0;font-size:14px;line-height:20px;color:var(--text-secondary);overflow-wrap:anywhere;white-space:pre-line}
+.wp-skill-source{margin:4px 0 0;font-size:12px;line-height:18px;color:var(--text-secondary)}.wp-skill-source a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.wp-skill-delete{margin-top:10px}
+@media(max-width:767px){.wp-skills-toolbar{align-items:flex-start;gap:12px}}
 /* Match the native tool's 14px icon slot; wrapped details align to the first line. */
 .wp-web-tool { color: var(--color-text-2); font-size: 13px; min-width: 0; }
 .wp-web-tool-heading,
@@ -629,25 +631,25 @@ html body .message-item.text.justify-start + .message-item.text.justify-start { 
 
 main:has(> .wp-auth-banner) > [class*="_guidContainer_"]{flex:1;min-height:0;height:auto}
 
-.wp-skills-section{margin:24px 0 32px}.wp-skills-heading{font-size:18px;font-weight:600;margin:0 0 14px}.wp-skill-meta,.wp-skill-example{font-size:13px;color:var(--text-secondary,#777);line-height:1.6}.wp-skill-action,.wp-skill-review{margin:8px 12px 0 0}.wp-skill-dialog{border:1px solid #aaa;border-radius:16px;max-width:440px;width:calc(100% - 48px);background:var(--bg-base,#fff);color:var(--text-primary,#222);padding:24px}.wp-skill-dialog::backdrop{background:#0005}.wp-skill-form label{display:block;margin:16px 0}.wp-skill-form input{display:block;width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border:1px solid #aaa;border-radius:8px;background:transparent;color:inherit}.wp-skill-form button{padding:8px 14px;margin-right:10px}
-.wp-skill-action,.wp-skill-review{display:inline-block;font:inherit;font-size:12px;line-height:1.5;cursor:pointer;border:1px solid var(--border-base);border-radius:8px;padding:7px 12px;background:transparent;color:var(--text-secondary);text-decoration:none}.wp-skill-name{font-family:inherit}.wp-skill-action:disabled{opacity:.5;cursor:wait}.wp-skill-dialog{background:var(--bg-1);color:var(--text-primary);border-color:var(--border-base)}.wp-skill-form input[type=checkbox]{display:inline-block;width:auto;margin:0 8px 0 0}
+.wp-skills-section{margin:0 0 20px}.wp-skills-heading{font-size:15px;font-weight:600;line-height:22px;margin:0 0 8px}.wp-skill-meta,.wp-skill-example{margin:4px 0 0;font-size:12px;color:var(--text-secondary,#777);line-height:18px}.wp-skill-action,.wp-skill-review{margin:10px 8px 0 0}.wp-skill-dialog{border:1px solid #aaa;border-radius:16px;max-width:440px;width:calc(100% - 48px);background:var(--bg-base,#fff);color:var(--text-primary,#222);padding:24px}.wp-skill-dialog::backdrop{background:#0005}.wp-skill-form label{display:block;margin:16px 0}.wp-skill-form input{display:block;width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border:1px solid #aaa;border-radius:8px;background:transparent;color:inherit}.wp-skill-form button{padding:8px 14px;margin-right:10px}
+.wp-skill-action,.wp-skill-review{display:inline-block;font:inherit;font-size:12px;line-height:18px;cursor:pointer;border:1px solid var(--border-base);border-radius:8px;padding:4px 10px;background:transparent;color:var(--text-secondary);text-decoration:none}.wp-skill-name{font-family:inherit}.wp-skill-action:disabled{opacity:.5;cursor:wait}.wp-skill-dialog{background:var(--bg-1);color:var(--text-primary);border-color:var(--border-base)}.wp-skill-form input[type=checkbox]{display:inline-block;width:auto;margin:0 8px 0 0}
 
 /* Data tools use the same cards and neutral palette as skills. */
 .wp-market-tabs button{white-space:nowrap;flex-shrink:0}
-.wp-data-usage{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 28px;max-width:640px;margin:4px 0 24px;color:var(--wp-ink-2);font-size:14px}
+.wp-data-usage{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 24px;max-width:560px;margin:0 0 12px;color:var(--wp-ink-2);font-size:12px;line-height:18px}
 .wp-data-usage[hidden]{display:none}
-.wp-data-quota-line{margin-bottom:8px}.wp-data-quota-line b{color:var(--wp-ink);font-weight:600}
-.wp-data-bar{height:6px;border-radius:999px;background:var(--wp-line);overflow:hidden}.wp-data-bar i{display:block;height:100%;border-radius:inherit;background:var(--wp-ink)}
-.wp-data-categories{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;margin-top:8px}
-.wp-data-categories button{flex:none;border:0;background:none;color:var(--wp-ink-2);font:inherit;font-size:16px;padding:8px 18px;border-radius:10px;cursor:pointer;white-space:nowrap}
+.wp-data-quota-line{margin-bottom:4px}.wp-data-quota-line b{color:var(--wp-ink);font-weight:600}
+.wp-data-bar{height:4px;border-radius:999px;background:var(--wp-line);overflow:hidden}.wp-data-bar i{display:block;height:100%;border-radius:inherit;background:var(--wp-ink)}
+.wp-data-categories{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+.wp-data-categories button{flex:none;border:0;background:none;color:var(--wp-ink-2);font:inherit;font-size:14px;line-height:20px;padding:4px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
 .wp-data-categories button[aria-pressed=true]{background:var(--wp-hover);color:var(--wp-ink);font-weight:600}
-.wp-data-platforms{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 22px}
-.wp-data-platforms button{border:1px solid var(--wp-line);background:none;color:var(--wp-ink-2);font:inherit;font-size:13px;padding:4px 13px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.wp-data-platforms{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
+.wp-data-platforms button{border:1px solid var(--wp-line);background:none;color:var(--wp-ink-2);font:inherit;font-size:12px;line-height:18px;padding:4px 12px;border-radius:999px;cursor:pointer;white-space:nowrap}
 .wp-data-platforms button[aria-pressed=true]{border-color:var(--wp-ink);color:var(--wp-ink)}
 .wp-data-card{display:flex;flex-direction:column}.wp-data-top{display:flex;align-items:flex-start;gap:12px}.wp-data-top h3{flex:1;margin:0}
-.wp-data-chip{flex:none;max-width:45%;box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:var(--wp-hover);color:var(--wp-ink-2);font-size:13px;padding:3px 10px;border-radius:8px}
-.wp-data-card .wp-skill-description{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.wp-data-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px}.wp-data-price{font-size:13px;color:var(--wp-ink-2)}.wp-data-foot .wp-skill-action{margin:0 0 0 auto;flex:none}
-.wp-data-more{display:block;margin:28px auto 0}.wp-data-more[hidden]{display:none}
-@media(max-width:640px){.wp-data-platforms{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}.wp-data-usage{gap:14px 18px}.wp-market-tabs button{padding:8px 20px}}
+.wp-data-chip{flex:none;max-width:45%;box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:var(--wp-hover);color:var(--wp-ink-2);font-size:12px;line-height:18px;padding:2px 8px;border-radius:6px}
+.wp-data-card .wp-skill-description{flex:1;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;white-space:normal;min-height:40px}.wp-data-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px}.wp-data-price{min-width:0;font-size:12px;line-height:18px;color:var(--wp-ink-2)}.wp-data-foot .wp-skill-action{margin:0 0 0 auto;flex:none}
+.wp-data-more{display:block;margin:16px auto 0}.wp-data-more[hidden]{display:none}
+@media(max-width:640px){.wp-data-platforms{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}.wp-data-usage{gap:8px 16px}}
 .wp-tools-headers:empty,.wp-data-categories:empty,.wp-data-platforms:empty{display:none}
 .wp-data-categories button:focus-visible,.wp-data-platforms button:focus-visible{outline:2px solid var(--wp-ink-2);outline-offset:-2px}
