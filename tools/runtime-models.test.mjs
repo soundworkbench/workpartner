@@ -820,3 +820,109 @@ test('exported Docker transport preserves callback arguments, Buffer responses a
   timedOut = true;
   await assert.rejects(docker('GET', '/fixture', undefined, 10), { message: '超时' });
 });
+
+/** A local bridge API socket answering /sessions and /assistant/state like cc-connect. */
+async function fakeBridge(t, sessions) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-bridge-'));
+  const socket = path.join(dir, 'api.sock');
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://bridge');
+    if (url.pathname === '/sessions') {
+      res.end(JSON.stringify(Object.keys(sessions).map(key => ({ project: 'p', session_key: key, platform: 'feishu' }))));
+      return;
+    }
+    const state = sessions[url.searchParams.get('session_key')];
+    if (url.pathname === '/assistant/state' && typeof state === 'boolean') res.end(JSON.stringify({ ok: true, busy: state, history: [] }));
+    else { res.statusCode = state ?? 404; res.end('unavailable'); }
+  });
+  await new Promise(resolve => server.listen(socket, resolve));
+  t.after(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  return socket;
+}
+
+/** Run the in-container bridge command locally against the given socket. */
+function bridgeExec(socket, calls) {
+  return async (slug, cmd, options) => {
+    calls.push(['exec', slug, cmd[0], cmd[3], options]);
+    const child = spawn(process.execPath, [cmd[1], cmd[2], socket], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    const exitCode = await new Promise(resolve => child.on('close', resolve));
+    return { exitCode, stdout, stderr: '' };
+  };
+}
+
+const bridgeTree = [{ pid: '10', ppid: '1', args: '/opt/workpartner/bin/cc-connect --config /data/.cc-connect/config.toml' },
+  { pid: '11', ppid: '10', args: 'claude --output-format stream-json' }];
+
+test('bridge busy check asks the bridge turn state when an engine child exists', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-bridge-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'aionui-person.pass'), 'fixture');
+  const idle = await fakeBridge(t, { 'feishu:a': false, 'feishu:b': false });
+  const working = await fakeBridge(t, { 'feishu:a': false, 'feishu:b': true });
+  const admitting = await fakeBridge(t, { 'feishu:a': 409 });
+  for (const [name, socket, tree, replace] of [
+    ['idle Claude child', idle, bridgeTree, true], ['active turn', working, bridgeTree, false],
+    ['unreadable state', admitting, bridgeTree, false], ['missing socket', path.join(dir, 'absent.sock'), bridgeTree, false],
+    ['no engine child', working, bridgeTree.slice(0, 1), true],
+  ]) {
+    const calls = [];
+    const runtime = {
+      inspect: async () => ({ exists: true, running: true, name: 'person', image: 'old', imageId: 'old-id', address: { host: '127.0.0.1', port: 9 }, env: [] }),
+      imageId: async () => 'new-id', ensureIsolation: async () => {}, processes: async () => tree, exec: bridgeExec(socket, calls),
+      stop: async () => calls.push(['stop']), remove: async () => calls.push(['remove']), create: async () => calls.push(['create']),
+      start: async () => {}, address: async () => null,
+    };
+    const aionui = createAionui({ runtime, image: 'new', uid: 1001, secretDir: dir, log() {} });
+    const up = await aionui.upstream({ slug: 'person' });
+    await aionui.pending('person');
+    assert.deepEqual(calls.filter(([call]) => call !== 'exec'), replace ? [['stop'], ['remove'], ['create']] : [], name);
+    assert.equal(up === null, replace, name);
+    const execs = calls.filter(([call]) => call === 'exec');
+    if (tree.length === 1) assert.equal(execs.length, 0, name);
+    else assert.deepEqual(execs.map(([, slug, node, sock, options]) => [slug, node, sock, options.user]),
+      [['person', 'node', '/data/.cc-connect/data/run/api.sock', '1001']], name);
+  }
+});
+
+test('image reconciliation replaces idle stale running workspaces, skips busy and excluded ones, and respects maxJobs', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-reconcile-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const slugs = ['idle', 'second', 'busy', 'stopped', 'current', 'excluded', 'nopass'];
+  for (const slug of slugs.filter(slug => slug !== 'nopass')) fs.writeFileSync(path.join(dir, `aionui-${slug}.pass`), 'fixture');
+  const calls = [];
+  const updated = new Set(['current']);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const runtime = {
+    inspect: async slug => ({ exists: true, running: slug !== 'stopped', name: slug, image: updated.has(slug) ? 'new' : 'old',
+      imageId: updated.has(slug) ? 'new-id' : 'old-id', address: { host: '127.0.0.1', port: 9 }, env: [] }),
+    imageId: async () => 'new-id', ensureIsolation: async () => {},
+    processes: async slug => (slug === 'busy' ? bridgeTree : []),
+    exec: async slug => { calls.push(['exec', slug]); return { exitCode: 0, stdout: '{"busy":true}' }; },
+    stop: async slug => calls.push(['stop', slug]), remove: async slug => calls.push(['remove', slug]),
+    create: async user => { calls.push(['create', user.slug]); if (user.slug === 'idle') await gate; updated.add(user.slug); },
+    start: async () => {}, address: async () => null,
+  };
+  const bySlug = () => Object.fromEntries(slugs.map(slug => [slug, calls.filter(([, s]) => s === slug).map(([call]) => call)])
+    .filter(([, list]) => list.length));
+  const users = () => [...slugs.map(slug => ({ slug, backend: 'aionui' })), { slug: 'legacy' }];
+  const aionui = createAionui({ runtime, kind: 'k8s', image: 'new', maxJobs: 1, reconcileExclude: ['excluded'], secretDir: dir, log() {} });
+  // Round one: the blocked idle replacement fills maxJobs, so "second" waits; "busy" is checked and skipped.
+  await aionui.reconcileImages(users);
+  assert.deepEqual(bySlug(), { idle: ['stop', 'remove', 'create'], busy: ['exec'] });
+  release();
+  await aionui.pending('idle');
+  calls.length = 0;
+  await aionui.reconcileImages(users);
+  await aionui.pending('second');
+  assert.deepEqual(bySlug(), { second: ['stop', 'remove', 'create'], busy: ['exec'] });
+  assert.equal(aionui.startReconcileImages(users, 0), undefined);
+  assert.throws(() => aionui.startReconcileImages(users, -1), /reconcileImagesIntervalMs/);
+  aionui.close();
+  const docker = createAionui({ runtime, image: 'new', secretDir: dir, log() {} });
+  calls.length = 0;
+  await docker.reconcileImages(users);
+  assert.deepEqual(calls, []);
+});

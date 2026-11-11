@@ -50,6 +50,10 @@ export function organizationData(environment = process.env) {
     || Object.entries(userImages).some(([slug, image]) => !slug.trim() || typeof image !== 'string' || !image || /\s/u.test(image)))) {
     throw new Error('runtime.k8s.userImages must be an object mapping nonempty user slugs to nonempty image references without whitespace');
   }
+  const reconcileExclude = data.runtime.k8s?.reconcileExclude;
+  if (reconcileExclude !== undefined && (!Array.isArray(reconcileExclude) || reconcileExclude.some(slug => typeof slug !== 'string' || !slug.trim()))) {
+    throw new Error('runtime.k8s.reconcileExclude must be an array of nonempty user slugs');
+  }
   quickLineModel(data.model.quickLineModel);
   const market = data.market;
   for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {

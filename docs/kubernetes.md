@@ -50,6 +50,8 @@
 | `terminationGraceSeconds` | `10` | Pod 优雅终止秒数。 |
 | `inspectCacheMs` | `2000` | inspect 缓存毫秒，有限且非负；0 禁用。 |
 | `keepRunningIntervalMs` | `300000` | 启动时立即巡检，此后按间隔巡检；0 关闭。只启动归自己所有、已存在、replicas=0、未运行、未 paused 的 AionUi 工作区，不创建缺失工作区。 |
+| `reconcileImagesIntervalMs` | 未设置（关闭） | 按间隔在后台替换镜像或环境过期、且空闲的运行中工作区，不等网页请求；0 关闭。忙的跳过、下一轮再看，不强制重建；与网页请求共用 `maxJobs` 上限。 |
+| `reconcileExclude` | `[]` | 后台替换镜像时不碰的用户 slug 数组；这些人仍在网页请求时按原规则替换。 |
 | `loadGatewayExtension` | 未设置时不加载 | 默认行为不变；需要组织扩展提供的路由时设为 `true`。扩展不能依赖 Docker 传输；旧版运行时仍不可用。 |
 | `cacheMs` | `2000` | 经运行时透传给文件模块的发布 Secret 读取缓存毫秒，独立于 inspect 缓存。 |
 | `leaseTtlMs` | `1800000` | 文件模块暂存清理 lease 的有效期，毫秒，正整数且不超过 2147483647。 |
