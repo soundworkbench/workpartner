@@ -2,6 +2,7 @@
 (function () {
   'use strict';
   var request = window.fetch.bind(window), conversations = new Map(), pending = new Set();
+  var overrides = new Map(), version = 0, loading = null, trailing = false;
   var modal = null, opener = null, revision = 0, rendered = '', scheduled = false;
   var copy = {
     'zh-CN': { archive: '归档', restore: '取消归档', archived: '已归档', close: '关闭',
@@ -16,7 +17,35 @@
     return copy[String(language || 'zh-CN').startsWith('zh') ? 'zh-CN' : 'en-US'][key];
   }
   var icon = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6v7h11V6M2 2.5h12v3H2zM6 8.5h4"/></svg>';
-  function archived(c) { return c && c.extra && c.extra.wp_archived === true; }
+  function storedArchived(c) { return !!(c && c.extra && c.extra.wp_archived === true); }
+  function archived(c) {
+    var override = c && overrides.get(c.id);
+    return override ? override.value : storedArchived(c);
+  }
+  function afterPaint() { requestAnimationFrame(function () { setTimeout(render, 0); }); }
+  function changed(id) {
+    revision++;
+    // Project onto the existing row before React or a full-list response can delay the next paint.
+    var row = document.getElementById('c-' + id);
+    if (row) {
+      row.style.display = archived(conversations.get(id)) ? 'none' : '';
+      // Button/dialog housekeeping can scan a large list; run it after this row has painted.
+      afterPaint();
+    } else {
+      if (window.wpArchive.invalidate) window.wpArchive.invalidate();
+      render();
+    }
+  }
+  // Share one list request; any changes during it need just one trailing reload.
+  function load(read) {
+    if (loading) { trailing = true; return loading; }
+    var started = version;
+    loading = Promise.resolve().then(function () { return read(started); }).finally(function () {
+      loading = null;
+      if (trailing) { trailing = false; load(read); }
+    });
+    return loading;
+  }
   function visible(c) { return !(c.extra && (c.extra.team_id || c.extra.teamId || c.extra.is_health_check)); }
   function schedule() {
     if (scheduled) return;
@@ -42,18 +71,18 @@
     if (pending.has(id)) return;
     var c = conversations.get(id) || value;
     if (!c || typeof c !== 'object') return;
-    var next = !archived(c); pending.add(id); revision++; render();
+    var previous = overrides.get(id), next = !archived(c); pending.add(id);
+    overrides.set(id, { value: next, version: ++version }); changed(id);
     try {
-      await json('/api/conversations/' + encodeURIComponent(id), { method: 'PATCH',
+      var confirmed = await json('/api/conversations/' + encodeURIComponent(id), { method: 'PATCH',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extra: { wp_archived: next }, merge_extra: true }) });
-      var confirmed = await json('/api/conversations/' + encodeURIComponent(id));
-      if (confirmed.id !== id || archived(confirmed) !== next) throw new Error('Archive state not confirmed');
-      conversations.set(id, confirmed);
-      if (window.wpArchive.refresh) window.wpArchive.refresh();
+      if (confirmed.id !== id || storedArchived(confirmed) !== next) throw new Error('Archive state not confirmed');
     } catch (failure) {
+      if (previous) overrides.set(id, { value: previous.value, version: ++version });
+      else overrides.delete(id);
+      changed(id);
       error(label('failed'));
-      if (window.wpArchive.refresh) window.wpArchive.refresh();
-    } finally { pending.delete(id); revision++; render(); }
+    } finally { pending.delete(id); revision++; afterPaint(); }
   }
   function close() {
     if (!modal) return;
@@ -115,8 +144,12 @@
     if (hadFocus) (Array.from(modal.querySelectorAll('[data-restore]')).find(function (b) { return b.dataset.restore === focused && !b.disabled; }) || header.querySelector('button')).focus();
   }
   window.wpArchive = {
-    label: label, icon: icon, toggle: toggle, render: render,
-    observe: function (items) {
+    label: label, icon: icon, toggle: toggle, render: render, archived: archived, load: load,
+    observe: function (items, started) {
+      items.forEach(function (c) {
+        var override = overrides.get(c.id);
+        if (override && override.version <= started && storedArchived(c) === override.value) overrides.delete(c.id);
+      });
       conversations = new Map(items.map(function (c) { return [c.id, c]; })); revision++; schedule();
     }
   };

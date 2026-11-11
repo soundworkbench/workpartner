@@ -1390,10 +1390,10 @@
     requestAnimationFrame(function () { pending = false; apply(); });
   }
   new MutationObserver(function (records) {
-    // 形象自己的动画（气泡、星星）不触发；属性只看首页换助手、左右栏收起
+    // 形象和相对时间由覆盖层自己更新，不应再次触发整页扫描。
     if (records.some(function (r) {
       if (r.type === 'attributes') return r.attributeName === 'data-assistant-selected' || r.attributeName === 'data-collapsed' || r.target.classList.contains('layout-sider');
-      return !(r.target.closest && r.target.closest('.zp-pet'));
+      return !(r.target.closest && r.target.closest('.zp-pet,.wp-time'));
     })) schedule();
   }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-assistant-selected', 'data-collapsed', 'class'] });
   document.addEventListener('DOMContentLoaded', apply);

@@ -146,10 +146,10 @@ UI_PATCHES = [
     ('f=d.useMemo(()=>{if(!e)return null;const y=e.metadata,w=y?.file_name||y?.title||e.title;return{contentType:e.content_type,file_path:y?.file_path,workspace:y?.workspace,file_name:w,title:y?.title||e.title,language:y?.language}},[e])',
      'f=d.useMemo(()=>{if(!e||e.metadata?.missingFile||["browser","url"].includes(e.content_type))return null;const y=e.metadata,w=y?.file_name||y?.title||e.title;return{contentType:e.content_type,file_path:y?.file_path,workspace:y?.workspace,file_name:w,title:y?.title||e.title,language:y?.language}},[e?.content_type,e?.title,e?.metadata?.file_path,e?.metadata?.workspace,e?.metadata?.file_name,e?.metadata?.title,e?.metadata?.language,e?.metadata?.missingFile])'),
     # 归档只改变列表投影；搜索和消息读取继续使用后端原来的全部对话。
-    ('zn=()=>{pd.getUserConversations.invoke({limit:1e4})',
-     'zn=()=>{window.wpArchive.refresh=zn;pd.getUserConversations.invoke({limit:1e4})'),
+    ('zn=()=>{pd.getUserConversations.invoke({limit:1e4}).then(e=>{const t=e?.items;if(t&&Array.isArray(t)){Yn=t.filter(o=>{const a=o.extra;return a?.is_health_check!==!0&&!a?.team_id&&!a?.teamId}),zo=new Set(t.map(o=>o.id)),Kt();return}Yn=[],zo=new Set,Kt()}).catch(e=>{console.error("[WorkspaceGroupedHistory] Failed to load conversations:",e),Yn=[],zo=new Set,Kt()})}',
+     'zn=()=>{window.wpArchive.refresh=zn;window.wpArchive.invalidate=()=>{Yn=Yn.slice();Kt()};return window.wpArchive.load(wpVersion=>pd.getUserConversations.invoke({limit:1e4}).then(e=>{const t=e?.items;window.wpArchive.observe(Array.isArray(t)?t:[],wpVersion);if(t&&Array.isArray(t)){Yn=t.filter(o=>{const a=o.extra;return a?.is_health_check!==!0&&!a?.team_id&&!a?.teamId}),zo=new Set(t.map(o=>o.id)),Kt();return}Yn=[],zo=new Set,Kt()}).catch(e=>{console.error("[WorkspaceGroupedHistory] Failed to load conversations:",e),Yn=[],zo=new Set,Kt()}))}'),
     ('UPo=(e,t)=>{const n=e.filter(s=>!FPo(s))',
-     'UPo=(e,t)=>{window.wpArchive.observe(e);const n=e.filter(s=>!FPo(s)&&s.extra?.wp_archived!==true)'),
+     'UPo=(e,t)=>{const n=e.filter(s=>!FPo(s)&&!window.wpArchive.archived(s))'),
     ('onClickMenuItem:b=>{if(b==="pin")',
      'onClickMenuItem:b=>{if(b==="wpArchive"){window.wpArchive.toggle(t);return}if(b==="pin")'),
     ('e.createElement(J.Item,{key:"pin"}',
