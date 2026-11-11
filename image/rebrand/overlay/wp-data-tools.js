@@ -12,6 +12,10 @@
     function money(value) { return value > 0 && value < 0.01 ? '<0.01' : Number(value).toLocaleString('en-US', { useGrouping: false, minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
     function priceText(price) {
       if (!price) return copy.price;
+      if (price.unit === 'image') {
+        var lowerImage = money(Math.min(price.usd, price.callMaxUsd)), upperImage = money(Math.min(price.maxUsd, price.callMaxUsd));
+        return (language === 'zh' ? '约 ' : 'About USD ') + lowerImage + (upperImage !== lowerImage ? '–' + upperImage : '') + (language === 'zh' ? ' 美元/张' : '/image');
+      }
       var zh = language === 'zh', amount = price.usd === 0 ? '0' : money(price.usd), unit = ({ keyword: '词', word: '词', result: '条', record: '条', row: '条', item: '条', page: '页', call: '次', post: '帖', user: '人', domain: '域名', ad: '广告', target: '目标', index_item_unit: '索引项', employee: '员工', character: '字符' })[price.unit] || price.unit;
       var label;
       if (price.kind === 'unit') label = zh ? '每' + unit + ' ' + amount + ' 美元' : 'USD ' + amount + ' per ' + price.unit;

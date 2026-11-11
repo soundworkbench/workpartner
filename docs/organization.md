@@ -114,3 +114,13 @@ The command saves files under `/data/work/outputs/images/<UTC-date>-<endpoint>-<
 
 The Tools tab reads the live directory, displays personal remaining daily/monthly allowance, horizontal category buttons, platform filters and priced cards. Platforms follow the organization's `platforms` array; newly discovered platforms follow the configured ones. Common examples appear first within each platform and open a new conversation through “Try it”. The page never shows organization balances or provider names. Build a new personal image and gateway image when enabling these capabilities; organization catalogs and provider settings must also be mounted into the gateway.
 Optional managed MCP hub configuration and tool display names are documented in [Managed MCP hub](mcp-hub.md).
+
+A category can opt into an exact endpoint set using `directory.categoryEndpoints`, for example `{"Generation":["example.images.generate"]}`. Other categories retain directory-wide discovery. A restricted category exposes only platforms containing its configured common endpoints; other endpoints are filtered from cards, search, info and calls, including routed children. Keep the endpoint policies and the restriction together when refreshing the directory. `platformNames` values can be strings (Chinese only) or `{ "en": "Image brand", "zh": "图片品牌" }` for both languages. Image examples may set `priceRange: { "usd": 0.01, "maxUsd": 0.04, "unit": "image" }` to display an approximate per-image range instead of the provider's worst-case batch reservation; actual charges still come from the provider.
+
+For providers with the task-view protocol, configure `dataTools.provider.asyncTask`:
+
+```json
+{"header":"x-provider-async","path":"/tasks/{callId}","settlementPath":"/calls/{callId}"}
+```
+
+The gateway submits once, then polls the configured same-origin path using the submission's call ID, personal attribution and one overall `timeoutMs` deadline. Task responses contain `call_id`, `state` (`pending`, `succeeded`, `failed` or `error`), `retry_after` seconds and `response.body` (the completed provider JSON as a string). The adapter uses no provider-supplied URLs. It never exposes polling endpoints directly to agents. Poll errors and timeouts return the original call ID and prohibit resubmission. A successful result is preserved even when settlement cannot be read: `costUsd` is null and `costPending` is true. Settlement responses contain `async_task.status` and the ledger-backed `charged_micro`; pending reservations and the free poll's cost are never reported as generation charges. Workspace materialization also accepts arrays of plain image URL strings.

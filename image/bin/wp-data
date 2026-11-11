@@ -38,14 +38,14 @@ def save_images(result, target):
     directory.mkdir(parents=True, exist_ok=True)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     for row in rows:
-        encoded = row.get(policy.get('base64Field'))
+        encoded = row.get(policy.get('base64Field')) if isinstance(row, dict) else None
         limit = policy['maxBytes']
         if encoded:
             if not isinstance(encoded, str) or len(encoded) > 4 * ((limit + 2) // 3):
                 raise ValueError('Image exceeds size limit')
             content = base64.b64decode(encoded, validate=True)
         else:
-            url = row[policy['urlField']]
+            url = row if isinstance(row, str) else row[policy['urlField']]
             parsed = urlsplit(url)
             if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError('Invalid image URL')

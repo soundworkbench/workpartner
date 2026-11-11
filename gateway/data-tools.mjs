@@ -1,6 +1,7 @@
 /** Category-based data gateway. Provider details and request policies belong to organization data. */
 import fs from 'node:fs';
-import { loadDataTools } from './organization/data-tools.mjs';
+import { loadDataTools, dataPlatformNames } from './organization/data-tools.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -85,11 +86,15 @@ function liveDirectory(catalog, provider, fetcher) {
   async function platforms() {
     const result = await read(policy.platformsPath);
     if (!Array.isArray(result.platforms) || result.platforms.some(row => !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(row.slug) || typeof row.category !== 'string' || typeof row.label !== 'string')) throw fail(502, 'Invalid platform catalog');
-    return result.platforms.filter(row => catalog.categories.some(category => category.en === row.category));
+    return result.platforms.filter(row => catalog.categories.some(category => category.en === row.category)
+      && (!Object.hasOwn(policy.categoryEndpoints || {}, row.category)
+        || catalog.tools.some(tool => tool.endpoints.some(ep => ep.platform.id === row.slug && policy.categoryEndpoints[row.category].includes(ep.id)))));
   }
   function permitted(ep, allowed) {
-    return ep && /^[a-zA-Z0-9_.-]+$/.test(ep.id) && allowed.some(row => row.slug === ep.platform)
+    const platform = ep && allowed.find(row => row.slug === ep.platform);
+    return platform && /^[a-zA-Z0-9_.-]+$/.test(ep.id)
       && ['data', 'routed'].includes(ep.kind) && ['GET', 'POST'].includes(ep.method) && ep.platform_eligible === true
+      && (!Object.hasOwn(policy.categoryEndpoints || {}, platform.category) || policy.categoryEndpoints[platform.category].includes(ep.id))
       && !policy.blockedEndpoints.includes(ep.id) && !policy.blockedProviders.includes(ep.provider || ep.id.split('.')[0])
       && !(policy.blockedCapabilities || []).some(capability => ep.capability === capability || ep.capability?.startsWith(capability + '.') || ep.id.includes('.' + capability + '.') || ep.id.endsWith('.' + capability));
   }
@@ -126,7 +131,8 @@ function liveDirectory(catalog, provider, fetcher) {
     const cost = ep.cost, usd = cost?.usd;
     const range = /\$([\d.]+)\s*[–−-]\s*\$([\d.]+)/.exec(cost?.note || '');
     const ceiling = Math.min(callMaxUsd, ...((example?.endpoints || []).filter(row => row.id === ep.id).map(row => row.routeMaxUsd ?? Infinity)));
-    const price = typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? {
+    const price = exampleEndpoint?.priceRange ? { ...exampleEndpoint.priceRange, kind: 'range', callMaxUsd: ceiling, variable: false, approximate: true }
+      : typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? {
       kind: cost.type === 'per_result' ? 'unit' : cost.type === 'per_success' ? 'hit' : 'fixed',
       usd: range ? Number(range[1]) : usd,
       maxUsd: range ? Number(range[2]) : usd,
@@ -134,7 +140,7 @@ function liveDirectory(catalog, provider, fetcher) {
       variable: cost.varies === true || cost.display?.variable === true || !!cost.modifiers,
     } : null;
     return { name: task?.id || ep.id, endpoint: ep.id, title: { zh: localized?.title || exampleEndpoint?.title?.zh || example?.title?.zh || title, en: exampleEndpoint?.title?.en || example?.title?.en || task?.description || title },
-      description: { zh: localized?.description || example?.description?.zh || description, en: description }, example: examplePrompt,
+      description: { zh: localized?.description || example?.description?.zh || description, en: example?.description?.en || description }, example: examplePrompt,
       price,
       recommended: !!example };
   }
@@ -143,7 +149,7 @@ function liveDirectory(catalog, provider, fetcher) {
     const order = new Map(catalog.platforms.map((row, index) => [row.id, index]));
     rows.sort((a, b) => (order.get(a.slug) ?? order.size) - (order.get(b.slug) ?? order.size));
     return catalog.categories.map(category => ({ name: category, platforms: rows.filter(row => row.category === category.en).map(row => ({
-      id: row.slug, name: { en: row.label, zh: policy.platformNames[row.slug] || row.label }, summary: row.summary || '' })) }));
+      id: row.slug, name: dataPlatformNames(policy.platformNames, row.slug, row.label), summary: row.summary || '' })) }));
   }
   async function list(platform, callMaxUsd) {
     const allowed = await platforms();
@@ -211,6 +217,9 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       || !provider.callPath?.startsWith('/') || !provider.callPath.includes('{id}')
       || (provider.usagePath !== undefined && (!provider.usagePath.startsWith('/') || !provider.usagePath.includes('{orgId}')))) throw new Error('Invalid data provider configuration');
   }
+  if (provider?.asyncTask && (!object(provider.asyncTask)
+    || !/^[a-z0-9-]+$/i.test(provider.asyncTask.header || '')
+    || ['path', 'settlementPath'].some(key => typeof provider.asyncTask[key] !== 'string' || !/^\/(?!\/)[^\\?#]*\{callId\}[^\\?#]*$/.test(provider.asyncTask[key])))) throw new Error('Invalid async task adapter');
   let overrides = {};
   if (provider?.overridesFile) {
     try { overrides = JSON.parse(fs.readFileSync(provider.overridesFile, 'utf8')); }
@@ -335,10 +344,11 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
         [headers.routeMax]: String(Math.min(limits.call / 1e6, ep.routeMaxUsd ?? Infinity)) };
       const path = provider.callPath.replace('{id}', encodeURIComponent(ep.id));
       let response, result;
+      const signal = AbortSignal.timeout(ep.timeoutMs ?? 60000);
       try {
         response = await fetcher(new URL(path + (request.query ? '?' + request.query : ''), provider.origin), {
           method: ep.method, headers: callHeaders, ...(ep.method === 'POST' ? { body: JSON.stringify(request.body) } : {}),
-          redirect: 'error', signal: AbortSignal.timeout(ep.timeoutMs ?? 60000),
+          redirect: 'error', signal,
         });
         result = JSON.parse((await bytes(response.body || [], ep.fileResult ? Math.min(64 * 1024 * 1024,
           Math.ceil(ep.fileResult.maxBytes * 4 / 3) * ep.fileResult.maxFiles + 1024 * 1024) : 16 * 1024 * 1024)).toString());
@@ -355,12 +365,45 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
           : '数据接口未返回结果，请检查参数或额度 / Check the parameters and data budget';
         throw fail(response.status === 429 || code?.startsWith('tag_') ? 429 : 502, message);
       }
+      const callId = response.headers.get(headers.callId);
+      let settledCost, costPending = false;
+      const adapter = provider.asyncTask;
+      if (adapter && response.headers.has(adapter.header)) {
+        if (!callId || !/^[a-zA-Z0-9_-]{1,128}$/.test(callId)) throw fail(502, '异步任务缺少调用编号，请核实用量，不要自动重试 / Missing async call ID; do not resubmit');
+        const taskPath = adapter.path.replace('{callId}', encodeURIComponent(callId));
+        try {
+          for (;;) {
+            const poll = await fetcher(new URL(taskPath, provider.origin), { method: 'GET', headers: callHeaders, redirect: 'error', signal });
+            const task = JSON.parse((await bytes(poll.body || [], 64 * 1024 * 1024)).toString());
+            if (!poll.ok || task.call_id !== callId) throw new Error('Invalid task response');
+            if (task.state === 'succeeded') {
+              result = JSON.parse(task.response.body);
+              break;
+            }
+            if (task.state !== 'pending') throw new Error('Task failed or cannot be polled');
+            const seconds = Number(task.retry_after);
+            await delay(Number.isFinite(seconds) ? Math.max(1000, Math.min(60000, seconds * 1000)) : 5000, undefined, { signal });
+          }
+        } catch (error) {
+          throw Object.assign(fail(502, '任务未取得完成结果，请核实用量，不要重新提交 / Task outcome unavailable; check usage and do not resubmit'), { callId });
+        }
+        // A submission header is a reservation; a free poll's cost is not the generation charge.
+        try {
+          const settlement = await fetcher(new URL(adapter.settlementPath.replace('{callId}', encodeURIComponent(callId)), provider.origin),
+            { method: 'GET', headers: callHeaders, redirect: 'error', signal });
+          const record = JSON.parse((await bytes(settlement.body || [], 1024 * 1024)).toString());
+          if (settlement.ok && record.async_task && record.async_task.status !== 'pending'
+            && Number.isSafeInteger(record.charged_micro) && record.charged_micro >= 0) settledCost = record.charged_micro / 1e6;
+          else costPending = true;
+        } catch { costPending = true; }
+      }
       // A queued acknowledgement is not a completed, chargeable result.
-      if (response.status === 202) throw fail(502, '任务尚未完成，请核实用量，不要自动重试 / Job pending; check usage and do not retry automatically');
+      else if (response.status === 202) throw fail(502, '任务尚未完成，请核实用量，不要自动重试 / Job pending; check usage and do not retry automatically');
       const cost = response.headers.get(headers.cost);
-      json(res, 200, { data: result, costUsd: cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null,
-        callId: response.headers.get(headers.callId), ...(ep.fileResult ? { fileResult: ep.fileResult } : {}) });
-    } catch (error) { json(res, error.status || 503, { error: error.status ? error.message : '数据服务暂不可用 / Data service unavailable' }); }
+      json(res, 200, { data: result, costUsd: adapter && response.headers.has(adapter.header) ? settledCost ?? null
+        : cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null,
+        callId, ...(costPending ? { costPending: true } : {}), ...(ep.fileResult ? { fileResult: ep.fileResult } : {}) });
+    } catch (error) { json(res, error.status || 503, { error: error.status ? error.message : '数据服务暂不可用 / Data service unavailable', ...(error.callId ? { callId: error.callId } : {}) }); }
     return true;
   };
 }

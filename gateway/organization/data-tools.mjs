@@ -4,6 +4,10 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
+export function dataPlatformNames(names, id, fallback) {
+  const name = names?.[id];
+  return object(name) ? name : { en: fallback, zh: name || fallback };
+}
 
 /** Parse a capability file, rejecting ambiguous commands and incomplete request policies. */
 export function parseDataTools(value) {
@@ -13,6 +17,11 @@ export function parseDataTools(value) {
     || !Array.isArray(value.platforms) || !object(value.directory)
     || !['platformsPath', 'platformPath', 'endpointPath', 'searchPath'].every(key => value.directory[key]?.startsWith('/'))
     || !Array.isArray(value.directory.blockedEndpoints) || !Array.isArray(value.directory.blockedProviders)) throw new Error('Invalid data category policy');
+  if (value.directory.categoryEndpoints !== undefined && (!object(value.directory.categoryEndpoints)
+    || Object.entries(value.directory.categoryEndpoints).some(([category, ids]) => !value.categories.some(row => row.en === category)
+      || !Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(id))))) throw new Error('Invalid category endpoint policy');
+  if (!object(value.directory.platformNames) || Object.values(value.directory.platformNames).some(name =>
+    typeof name === 'string' ? !name.trim() : !object(name) || ['zh', 'en'].some(key => typeof name[key] !== 'string' || !name[key].trim()))) throw new Error('Invalid platform display names');
   if (value.presentation !== undefined && (!object(value.presentation)
     || !['tasks', 'endpoints'].every(key => object(value.presentation[key]) && Object.values(value.presentation[key]).every(row => object(row) && typeof row.title === 'string' && row.title.trim() && typeof row.description === 'string' && row.description.trim())))) throw new Error('Invalid data presentation copy');
   const ids = new Set(), commands = new Set(), names = new Set();
@@ -37,6 +46,8 @@ export function parseDataTools(value) {
       }
       if (ep.defaults !== undefined && (!object(ep.defaults) || Object.keys(ep.defaults).some(key => !Object.hasOwn(ep.parameters, key)))) throw new Error('Invalid data defaults');
       if (ep.timeoutMs !== undefined && (!Number.isSafeInteger(ep.timeoutMs) || ep.timeoutMs < 1000 || ep.timeoutMs > 600000)) throw new Error('Invalid data timeout');
+      if (ep.priceRange !== undefined && (!object(ep.priceRange) || !Number.isFinite(ep.priceRange.usd) || ep.priceRange.usd < 0
+        || !Number.isFinite(ep.priceRange.maxUsd) || ep.priceRange.maxUsd < ep.priceRange.usd || ep.priceRange.unit !== 'image')) throw new Error('Invalid image price range');
       if (ep.fileResult !== undefined) {
         const result = ep.fileResult;
         if (!object(result) || typeof result.path !== 'string' || !/^(?:[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)?$/.test(result.path)
@@ -77,6 +88,7 @@ export function dataToolsSkill(catalog) {
     'Catalog defaults apply automatically; override only allowed parameters. Image generation can take minutes: wait for the command and do not repeat it.',
     '图片保存在工作区 outputs/images；收到 files 路径后向用户展示保存的图片。保存失败时保留花费记录，不要重新生图。',
     'Images are saved under outputs/images in the workspace. Show the saved images to the user using the returned files paths. A save failure preserves cost; never regenerate automatically.',
+    'costPending 表示已生成但费用尚未结算；先展示图片，不把预留金额当实际花费，用 wp-data balance 核实。costPending means generation succeeded but settlement is pending: show the images and check balance; never report the reservation as a charge.',
     '常用示例可直接调用，不必先搜索。其他需求先按地图搜索，再读接口详情。示例不是白名单。',
     '通用网页搜索和抓取已内置，请使用内置工具。Generic web search and extraction use the built-in tools.',
     'Use common examples directly; otherwise search the platform map and read endpoint details. Examples are not an allowlist.',
@@ -114,16 +126,17 @@ export async function refreshDataTools(catalog, provider, fetcher = fetch) {
   catalog.categories = provider.categories;
   catalog.directory = provider;
   catalog.platforms = platforms.filter(row => provider.categories.some(category => category.en === row.category))
+    .filter(row => !Object.hasOwn(provider.categoryEndpoints || {}, row.category)
+      || catalog.tools.some(tool => tool.endpoints.some(ep => ep.platform.id === row.slug && provider.categoryEndpoints[row.category].includes(ep.id))))
     .map(row => ({ id: row.slug, category: row.category,
-      name: { en: row.label, zh: provider.platformNames[row.slug] || row.label }, summary: row.summary || row.label }));
+      name: dataPlatformNames(provider.platformNames, row.slug, row.label), summary: row.summary || row.label }));
   for (const tool of catalog.tools) for (const ep of tool.endpoints) {
     const source = (await read(provider.endpointPath.replace('{id}', encodeURIComponent(ep.id)))).endpoint;
     const platform = platforms.find(row => row.slug === source.platform);
     if (source.id !== ep.id || !platform || !['GET', 'POST'].includes(source.method)) throw new Error('Incomplete endpoint metadata');
     ep.method = source.method;
     ep.category = { en: platform.category, zh: provider.categoryNames[platform.category] || platform.category };
-    ep.platform = { id: source.platform, en: source.platform_label || platform.label,
-      zh: provider.platformNames[source.platform] || platform.label };
+    ep.platform = { id: source.platform, ...dataPlatformNames(provider.platformNames, source.platform, source.platform_label || platform.label) };
     ep.source = { url: new URL(provider.endpointPath.replace('{id}', encodeURIComponent(ep.id)), provider.origin).href,
       platform: source.platform, category: platform.category, price: source.cost };
     const query = source.input?.queryParams || {};

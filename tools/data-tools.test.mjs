@@ -132,7 +132,7 @@ test('image calls wait, apply catalog defaults, save URL/base64 files and retain
       if (pending) return Response.json({ job: 'pending' }, { status: 202 });
       charged += 10000;
       const data = oversized ? [{ url: base + '/large.png' }] : invalidImage ? [{ b64_json: Buffer.from('not an image').toString('base64') }]
-        : [{ b64_json: png.toString('base64') }, { url: base + '/image.png' }];
+        : [{ b64_json: png.toString('base64') }, base + '/image.png'];
       return Response.json({ data }, { headers: { 'x-data-cost': '10000', 'x-data-id': 'image-' + calls.length } });
     } });
   const server = http.createServer(async (req, res) => {
@@ -219,10 +219,89 @@ test('catalog rejects defaults outside the parameter policy and unbounded waits 
   const { ep, catalog } = fixture(t);
   for (const policy of [{ defaults: { hidden: true } }, { timeoutMs: 600001 }, { timeoutMs: 0 },
     { fileResult: { path: 'data', urlField: 'url', maxBytes: 0, maxFiles: 1 } },
-    { fileResult: { path: '../outside', urlField: 'url', maxBytes: 1024, maxFiles: 1 } }]) {
+    { fileResult: { path: '../outside', urlField: 'url', maxBytes: 1024, maxFiles: 1 } },
+    { priceRange: { usd: .04, maxUsd: .01, unit: 'image' } }]) {
     const copy = structuredClone(catalog);
     Object.assign(copy.tools[0].endpoints[0], policy);
     assert.throws(() => parseDataTools(copy));
   }
   assert.equal(parseDataTools(catalog).tools[0].endpoints[0].id, ep.id);
+  const invalid = structuredClone(catalog); invalid.directory.categoryEndpoints = { Unknown: ['example.images.generate'] };
+  assert.throws(() => parseDataTools(invalid), /category endpoint policy/);
+  const badName = structuredClone(catalog); badName.directory.platformNames.images = { zh: '图片' };
+  assert.throws(() => parseDataTools(badName), /platform display names/);
+});
+
+test('restricted categories show one platform and image card; async jobs submit once and report settlement', async t => {
+  const { root, ep, catalog, org } = fixture(t);
+  ep.id = 'example.images.generate'; ep.command = 'generate-image'; ep.bodyArray = false;
+  ep.category = { en: 'Generation', zh: '内容生成' }; ep.platform = { id: 'images', en: 'Image brand', zh: 'Image brand' };
+  ep.parameters = { prompt: { in: 'body', type: 'string', required: true } }; ep.template = { prompt: 'A tree' };
+  ep.rules = {}; ep.timeoutMs = 3000;
+  ep.fileResult = { path: 'output.image_urls', urlField: 'url', maxBytes: 1024, maxFiles: 1 };
+  ep.priceRange = { usd: .01, maxUsd: .04, unit: 'image' };
+  catalog.categories = [ep.category]; catalog.platforms = [{ id: 'images', category: 'Generation', name: ep.platform }];
+  catalog.directory.categoryEndpoints = { Generation: [ep.id] };
+  catalog.directory.platformNames.images = { en: 'Image brand', zh: 'Image brand' };
+  fs.writeFileSync(path.join(root, 'catalog.json'), JSON.stringify(catalog));
+  org.dataTools.provider.asyncTask = { header: 'x-data-async', path: '/tasks/{callId}', settlementPath: '/records/{callId}' };
+  const source = { ...ep, platform: 'images', kind: 'data', platform_eligible: true, input: { body: ep.parameters } };
+  const hidden = { ...source, id: 'example.images.other' };
+  const submissions = [], polls = [];
+  let mode = 'success', round = 0;
+  const handler = createDataTools({ organization: org, authenticate: () => ({ slug: 'fixture-user' }),
+    env: { DATA_ON: '1', DATA_VERIFIED: '1', DATA_ORG: '5', DATA_TEAM: 'fixture' },
+    fetcher: async (url, options) => {
+      const p = new URL(url).pathname;
+      if (p === '/directory/platforms') return Response.json({ platforms: [
+        { slug: 'images', label: 'Raw platform', category: 'Generation' }, { slug: 'videos', label: 'Videos', category: 'Generation' } ] });
+      if (p === '/directory/platforms/images') return Response.json({ platform: { slug: 'images' }, capabilities: [
+        { id: 'images.create', endpoints: [source, hidden] }, { id: 'images.other', endpoints: [hidden] } ], extended: [hidden] });
+      if (p.startsWith('/directory/endpoints/')) return Response.json({ endpoint: p.endsWith(source.id) ? source : hidden });
+      if (p === '/directory/search') return Response.json({ results: [source, hidden] });
+      if (p.startsWith('/budgets/')) return Response.json({});
+      if (p.startsWith('/invoke/')) {
+        submissions.push(options); round = 0;
+        return Response.json({ id: 'provider-job', status: 'processing' }, { status: mode === 'accepted' ? 202 : 200,
+          headers: { 'x-data-async': '{}', 'x-data-id': 'original-call', 'x-data-cost': '410000' } });
+      }
+      if (p === '/tasks/original-call') {
+        polls.push(options); round++;
+        if (mode === 'network') throw new Error('Disconnected');
+        if (mode === 'pending' || (mode === 'success' && round === 1)) return Response.json({ call_id: 'original-call', state: 'pending', retry_after: 1 });
+        return Response.json({ call_id: 'original-call', state: mode === 'failed' ? 'failed' : 'succeeded',
+          response: { body: JSON.stringify({ output: { image_urls: ['https://images.example.test/tree.png'] } }) } }, { headers: { 'x-data-cost': '0' } });
+      }
+      if (p === '/records/original-call') return Response.json({ call: { call_ref: 'original-call' },
+        charged_micro: mode === 'unsettled' ? 0 : 10000, async_task: { status: mode === 'unsettled' ? 'pending' : 'succeeded' } });
+      throw new Error('Unexpected request ' + p);
+    } });
+  const server = http.createServer((req, res) => handler(req, res, new URL(req.url, 'http://local.test')));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const request = async (route, body) => {
+    const response = await fetch(base + '/_wp/data/' + route, body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+  const groups = (await request('tools')).body.groups;
+  assert.deepEqual(groups[0].platforms.map(row => row.name), [{ en: 'Image brand', zh: 'Image brand' }]);
+  const cards = (await request('catalog?platform=images')).body.tools;
+  assert.equal(cards.length, 1); assert.equal(cards[0].endpoint, ep.id);
+  assert.deepEqual(cards[0].price, { ...ep.priceRange, kind: 'range', callMaxUsd: .02, variable: false, approximate: true });
+  assert.equal((await request('search?q=image')).body.results.length, 1);
+  assert.equal((await request('info/' + hidden.id)).status, 403);
+  assert.equal((await request('catalog?platform=videos')).status, 403);
+  for (const state of ['success', 'accepted', 'failed', 'network', 'pending', 'unsettled']) {
+    mode = state; const count = submissions.length;
+    const answer = await request('call/generate-image', { prompt: 'A tree' });
+    assert.equal(submissions.length, count + 1, 'Never resubmit a pending or failed generation');
+    assert.equal(answer.body.callId, 'original-call');
+    if (['success', 'accepted', 'unsettled'].includes(state)) {
+      assert.equal(answer.status, 200); assert.equal(answer.body.data.output.image_urls.length, 1);
+      assert.equal(answer.body.costUsd, state === 'unsettled' ? null : .01, 'Neither the reservation nor free-poll cost is the generation charge');
+      assert.equal(!!answer.body.costPending, state === 'unsettled');
+    } else { assert.equal(answer.status, 502); assert.match(answer.body.error, /do not resubmit/); }
+  }
+  assert.ok(polls.every(row => row.method === 'GET' && row.headers['x-data-meta'] === 'user=fixture-user'));
 });
