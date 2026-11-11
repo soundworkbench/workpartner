@@ -22,6 +22,9 @@ export function parseDataTools(value) {
   if (value.presentation !== undefined && (!object(value.presentation)
     || !['tasks', 'endpoints'].every(key => object(value.presentation[key]) && Object.values(value.presentation[key]).every(row => object(row) && typeof row.title === 'string' && row.title.trim() && typeof row.description === 'string' && row.description.trim())))) throw new Error('Invalid data presentation copy');
   if (value.attribution !== undefined && !sourceLink(value.attribution)) throw new Error('Invalid data attribution');
+  const localized = row => object(row) && ['zh', 'en'].every(key => typeof row[key] === 'string' && row[key].trim().length > 0);
+  if (value.skill !== undefined && (!object(value.skill) || !['description', 'guidance'].every(key => value.skill[key] === undefined || localized(value.skill[key]))
+    || /[\r\n]/.test(value.skill.description?.zh + value.skill.description?.en))) throw new Error('Invalid data skill copy');
   const ids = new Set(), commands = new Set(), names = new Set();
   for (const tool of value.tools) {
     if (!/^[a-z][a-z0-9-]+$/.test(tool.name) || names.has(tool.name) || !tool.title?.zh || !tool.title?.en
@@ -72,11 +75,15 @@ export function loadDataTools(organization) {
 
 /** Generate the platform map and direct examples; examples never define endpoint access. */
 export function dataToolsSkill(catalog) {
-  const source = catalog.attribution;
-  const lines = ['---', 'name: data-tools',
-    'description: ' + JSON.stringify(`${source ? `通过 ${source.name} ` : ''}查询已开放大类的外部数据：${(catalog.categories || []).map(row => row.zh).join('、')}。Use external data${source ? ` via ${source.name}` : ''} from: ${(catalog.categories || []).map(row => row.en).join(', ')}.`),
+  const source = catalog.attribution, when = catalog.skill?.description, guidance = catalog.skill?.guidance;
+  const description = `${source ? `通过 ${source.name} ` : ''}查询已开放大类的外部数据：${(catalog.categories || []).map(row => row.zh).join('、')}。${when ? when.zh.trim() + ' ' : ''}`
+    + `Use external data${source ? ` via ${source.name}` : ''} from: ${(catalog.categories || []).map(row => row.en).join(', ')}.${when ? ' ' + when.en.trim() : ''}`;
+  // Engines skip a skill whose description exceeds this length, so fail the build instead.
+  if (description.length > 1024) throw new Error(`Data skill description is ${description.length} characters; the limit is 1024`);
+  const lines = ['---', 'name: data-tools', 'description: ' + JSON.stringify(description),
     ...(source ? ['metadata:', `  source-name: ${JSON.stringify(source.name)}`, `  source-url: ${JSON.stringify(source.url)}`] : []),
     '---', '', '# 数据工具 / Data tools', '',
+    ...(guidance ? [guidance.zh.trim(), '', guidance.en.trim(), ''] : []),
     '调用前先报单价；调用后报告实际花费和今天剩余额度，先用 `wp-data balance` 查看本人日/月/单次上限。结果引用数据来源。未知结果不要自动重试。',
     ...(source ? [`回答引用这些数据时注明“来源：${source.name}”和对应的原始来源。When citing this data, state “Source: ${source.name}” and the original source.`] : []),
     'Quote the unit price before calling. After calling, report the actual cost and remaining daily budget; use `wp-data balance` for personal usage and daily/monthly/per-call limits. Cite sources. Never retry an unknown outcome automatically.',

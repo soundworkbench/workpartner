@@ -273,3 +273,18 @@ test('an optional attribution names the data source in the generated skill', t =
     assert.throws(() => parseDataTools({ ...catalog, attribution }), /Invalid data attribution/);
   }
 });
+
+test('organization skill copy says when to use the data skill and how', t => {
+  const { catalog } = fixture(t);
+  const configured = parseDataTools({ ...catalog, skill: {
+    description: { zh: '查找测量机构名单时用本技能。', en: 'Use this skill to list measurement labs.' },
+    guidance: { zh: '先用本技能拉候选，再用网页核实。', en: 'Pull candidates here first, then verify on the web.' } } });
+  const skill = dataToolsSkill(configured), [frontmatter, body] = skill.split('\n---\n');
+  assert.match(frontmatter, /^description: "查询已开放大类的外部数据：研究。查找测量机构名单时用本技能。 Use external data from: Research\. Use this skill to list measurement labs\."$/m);
+  assert.match(body, /^\n# 数据工具 \/ Data tools\n\n先用本技能拉候选，再用网页核实。\n\nPull candidates here first, then verify on the web\.\n\n调用前先报单价/);
+  assert.match(dataToolsSkill(catalog), /^description: "查询已开放大类的外部数据：研究。Use external data from: Research\."$/m);
+  for (const skillCopy of [{ description: { zh: '只有中文' } }, { guidance: { zh: ' ', en: 'x' } }, { description: { zh: '两\n行', en: 'x' } }, 'text']) {
+    assert.throws(() => parseDataTools({ ...catalog, skill: skillCopy }), /Invalid data skill copy/);
+  }
+  assert.throws(() => dataToolsSkill({ ...catalog, skill: { description: { zh: '长'.repeat(1000), en: 'x' } } }), /limit is 1024/);
+});
