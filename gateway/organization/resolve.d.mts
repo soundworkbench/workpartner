@@ -55,7 +55,7 @@ export interface Organization {
   appearance: { authorizationStyle?: string; brandDirectory: string; timezoneFallback: string; themeColor: string; avatarColor: string; gateway: Record<string, string>; copy?: Record<string, unknown> };
   market: { approvers: string[]; reservedPrefixes: string[]; protectedNames: string[]; sharedDirectory: string; containerDirectory: string; preinstalled: string[] };
   image: { officialSkillsArchive?: string; homeDirectory: string; instructions: string; legacyInstructions: string; skillTranslations: string; skills: string[] };
-  mcpHub?: null | { url: string; name?: string; keyEnvironment: string; displayNames?: string };
+  mcpHub?: null | { url: string; name?: string; keyEnvironment: string; displayNames?: string; hidden?: string[] };
   bridge: { template: string };
   tools?: { legacyRollout?: string };
   features: { feishuAuthorization: boolean; feishuOnboarding: boolean; marketSkills: boolean; autoTitle: boolean; preview: boolean };

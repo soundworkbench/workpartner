@@ -4,7 +4,9 @@ export function hubConfig(value) {
   const url = new URL(value.url);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
     || !/^[A-Z_][A-Z0-9_]*$/.test(value.keyEnvironment)
-    || !/^[a-z][a-z0-9_-]*$/.test(value.name || 'workpartner-hub')) throw new Error('Invalid MCP hub configuration');
+    || !/^[a-z][a-z0-9_-]*$/.test(value.name || 'workpartner-hub')
+    || (value.hidden !== undefined && (!Array.isArray(value.hidden)
+      || value.hidden.some(name => typeof name !== 'string' || !/^[a-zA-Z0-9_.-]+__[a-zA-Z0-9_.-]+$/.test(name))))) throw new Error('Invalid MCP hub configuration');
   return { ...value, url: url.href, name: value.name || 'workpartner-hub' };
 }
 

@@ -8,7 +8,8 @@ An organization can connect a personal workspace to a Streamable HTTP MCP hub. S
     "url": "https://tools.example.com/mcp",
     "name": "workpartner-hub",
     "keyEnvironment": "MODEL_API_KEY",
-    "displayNames": "mcp-display.json"
+    "displayNames": "mcp-display.json",
+    "hidden": ["search__web_search", "search__web_fetch"]
   }
 }
 ```
@@ -27,6 +28,10 @@ Use the hub's complete root MCP endpoint, without an agent-specific suffix. The 
 ```
 
 The authenticated, read-only `GET /_wp/market/tools` route discovers tools using the caller's key. It returns only names, localized titles, and one-line descriptions. Missing translations use the hub's title/name and description. Responses are never cached across people. No key, schema, connection URL, or authentication header is returned to the page. A denied key or a disabled hub produces an empty list; temporary discovery failures produce a retry state.
+
+`hidden` is an optional list of exact `server__tool` names omitted from this market response. Omit it or use `[]` to show every discovered tool. Use names from your own hub's current `tools/list` response; the example prefixes above are illustrative. Names are case-sensitive, without wildcard matching; unknown names have no effect. This is display configuration only: both engines still discover and can call hidden tools through the same hub, and startup still enables the hub when all its tools are hidden. It does not revoke access or change native search behavior.
+
+Acceptance: configure one discovered tool as hidden and check that it is absent from `/_wp/market/tools` and the Tools tab while another tool remains visible. In new Claude Code and Codex sessions, list and call that same hidden tool. With all tools hidden the market has its empty state but both engines remain connected. Remove the list and confirm the tools appear again. A string, null, wildcard, or unqualified tool name must fail organization validation.
 
 ## Startup and personal configuration
 
