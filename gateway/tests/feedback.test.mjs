@@ -204,10 +204,11 @@ test('notification failure does not undo a committed bot update', async t => {
   assert.equal(stored.status, 'need_info'); assert.equal(stored.comments.length, 1); assert.equal(stored.notice, 'failed');
 });
 
-test('slow notification does not block user submissions, comments or uploads and returns the latest notice seq', async t => {
+test('slow notification does not block user submissions, comments or uploads and returns a seq before concurrent changes', async t => {
   const started = Promise.withResolvers(), delivery = Promise.withResolvers();
   const f = fixture(t, { send: async () => { started.resolve(); await delivery.promise; } });
   const a = await f.create(), route = `${base}/items/${a.id}`;
+  const items = captureResponseItems(t);
   const update = f.bot('items/' + a.id, { status: 'need_info', reply: { key: 'slow', text: '请补充' } });
   await started.promise;
   let finished = false;
@@ -227,16 +228,83 @@ test('slow notification does not block user submissions, comments or uploads and
   delivery.resolve();
   const [created, comment, upload, type] = await writes;
   const result = await update;
+  const returned = items.at(-1);
   assert.equal(completed, true, 'user writes must finish while the notification is still pending');
   assert.equal(waitingForNotice, true, 'bot response must wait for the notice write');
   assert.equal(created.no, 2); assert.equal(comment.status, 200); assert.equal(upload.status, 201); assert.equal(type.status, 200);
   assert.equal(result.status, 200);
-  assert.equal(result.data.item.notice, 'sent'); assert.equal(result.data.item.status, 'open');
-  assert.equal(result.data.item.type, 'feature'); assert.equal(result.data.item.files.length, 1);
-  assert.equal(result.data.item.comments.length, 2);
-  assert.deepEqual(result.data.item, f.read().items[a.id]);
-  assert.equal(result.data.item.seq, 7);
-  assert.deepEqual((await f.bot('changes?since=7')).data, { items: [], next: 7 });
+  assert.equal(result.data.item.notice, 'sent'); assert.equal(result.data.item.status, 'need_info');
+  assert.equal(result.data.item.type, 'bug'); assert.equal(result.data.item.files.length, 0);
+  assert.equal(result.data.item.comments.length, 1);
+  assert.equal(result.data.item.seq, result.data.item.comments[0].seq);
+  assert.ok(result.data.item.seq < comment.data.item.comments.at(-1).seq);
+  assert.ok(result.data.item.seq < upload.data.item.seq);
+  assert.ok(result.data.item.seq < type.data.item.seq);
+  const changes = (await f.bot('changes?since=' + result.data.item.seq)).data;
+  const current = changes.items.find(item => item.id === a.id);
+  assert.deepEqual(current, f.read().items[a.id]);
+  assert.equal(current.notice, 'sent'); assert.equal(current.status, 'open');
+  assert.equal(current.type, 'feature'); assert.equal(current.files.length, 1);
+  assert.equal(current.comments.at(-1).text, '用户补充'); assert.equal(current.seq, 7);
+  returned.author.name = 'changed'; returned.comments[0].text = 'changed';
+  assert.deepEqual((await f.bot('items/' + a.id)).data.item, current);
+  assert.deepEqual(f.read().items[a.id], current);
+});
+
+// Capture objects before JSON serialization so response-copy checks also exercise the live store.
+function captureResponseItems(t) {
+  const items = [], stringify = JSON.stringify;
+  t.mock.method(JSON, 'stringify', (value, ...args) => {
+    if (value?.item) items.push(value.item);
+    return stringify(value, ...args);
+  });
+  return items;
+}
+
+test('notification without concurrent changes returns an independent copy with the final notice seq', async t => {
+  const f = fixture(t), a = await f.create(), items = captureResponseItems(t);
+  const result = await f.bot('items/' + a.id, { status: 'done', reply: { key: 'one', text: '已处理' } });
+  assert.equal(result.status, 200);
+  const returned = items.at(-1), stored = f.read().items[a.id];
+  assert.deepEqual(returned, stored); assert.equal(returned.notice, 'sent');
+  assert.equal(returned.seq, returned.comments[0].seq + 1);
+  assert.deepEqual((await f.bot('changes?since=' + returned.seq)).data, { items: [], next: returned.seq });
+  returned.author.name = 'changed'; returned.comments[0].text = 'changed';
+  assert.deepEqual((await f.bot('items/' + a.id)).data.item, stored);
+  assert.deepEqual(f.read().items[a.id], stored);
+});
+
+test('out-of-order bot notifications preserve the newer notice and return independent business snapshots', async t => {
+  const started = [Promise.withResolvers(), Promise.withResolvers()];
+  const delivery = [Promise.withResolvers(), Promise.withResolvers()];
+  let calls = 0;
+  const f = fixture(t, { send: async () => {
+    const index = calls++;
+    started[index].resolve(); await delivery[index].promise;
+    if (index === 1) throw new Error('second delivery failed');
+  } });
+  const a = await f.create(), items = captureResponseItems(t);
+  const first = f.bot('items/' + a.id, { status: 'need_info', reply: { key: 'first', text: '请补充' } });
+  await started[0].promise;
+  const firstBusiness = f.read().items[a.id];
+  const second = f.bot('items/' + a.id, { status: 'done', reply: { key: 'second', text: '已处理' } });
+  await started[1].promise;
+  delivery[1].resolve();
+  const secondResult = await second, secondReturned = items.at(-1), stored = f.read();
+  assert.equal(secondResult.status, 200); assert.equal(secondReturned.notice, 'failed');
+  assert.deepEqual(secondReturned, stored.items[a.id]);
+  delivery[0].resolve();
+  const firstResult = await first, firstReturned = items.at(-1);
+  assert.equal(firstResult.status, 200); assert.deepEqual(firstReturned, firstBusiness);
+  assert.deepEqual(f.read(), stored, 'stale delivery must neither overwrite notice nor touch seq');
+  assert.ok(firstReturned.seq < secondReturned.comments.at(-1).seq);
+  assert.notStrictEqual(firstReturned, secondReturned);
+  firstReturned.author.name = 'first changed'; firstReturned.comments[0].text = 'first changed';
+  assert.deepEqual(secondReturned, stored.items[a.id]);
+  secondReturned.author.name = 'second changed'; secondReturned.comments[0].by.name = 'second changed';
+  assert.equal(firstReturned.comments[0].by.name, firstBusiness.comments[0].by.name);
+  assert.deepEqual((await f.bot('items/' + a.id)).data.item, stored.items[a.id]);
+  assert.deepEqual(f.read(), stored);
 });
 
 test('missing item during notice persistence does not fail a committed bot response', async t => {
@@ -250,6 +318,29 @@ test('missing item during notice persistence does not fail a committed bot respo
   const result = await f.bot('items/' + a.id, { status: 'done' });
   assert.equal(result.status, 200); assert.equal(result.data.item.status, 'done');
   assert.deepEqual(f.read().items, {});
+});
+
+test('notice save failure after concurrent changes returns an independent snapshot with the committed seq', async t => {
+  t.mock.method(console, 'error', () => {});
+  const started = Promise.withResolvers(), delivery = Promise.withResolvers();
+  const f = fixture(t, { send: async () => { started.resolve(); await delivery.promise; } });
+  const a = await f.create(), items = captureResponseItems(t);
+  const update = f.bot('items/' + a.id, { status: 'need_info', reply: { key: 'one', text: '请补充' } });
+  await started.promise;
+  const business = f.read().items[a.id];
+  const comment = await f.request(`${base}/items/${a.id}/comments`, { method: 'POST', body: { text: '用户补充' } });
+  assert.equal(comment.status, 200);
+  const stored = f.read();
+  const rename = t.mock.method(fs, 'renameSync', () => { throw new Error('notice disk failure'); });
+  delivery.resolve();
+  const result = await update, returned = items.at(-1);
+  rename.mock.restore();
+  assert.equal(result.status, 200); assert.deepEqual(returned, business);
+  assert.ok(returned.seq < comment.data.item.seq);
+  assert.deepEqual((await f.bot('changes?since=' + returned.seq)).data.items, [stored.items[a.id]]);
+  returned.author.name = 'changed'; returned.comments[0].text = 'changed';
+  assert.deepEqual((await f.bot('items/' + a.id)).data.item, stored.items[a.id]);
+  assert.deepEqual(f.read(), stored);
 });
 
 test('corrupt or unsupported store disables only feedback and preserves the original bytes', async t => {

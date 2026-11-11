@@ -78,6 +78,8 @@ export function createFeedback({ organization, organizationData, authenticate, s
   try { fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); state = load(); }
   catch (error) { unavailable = true; logError('init', error); }
   let queue = Promise.resolve();
+  let notificationOrder = 0;
+  const noticeOrders = new Map();
   const serial = work => { const result = queue.then(work); queue = result.catch(() => {}); return result; };
   function save() {
     const temporary = `${stateFile}.${crypto.randomUUID()}`;
@@ -162,8 +164,9 @@ export function createFeedback({ organization, organizationData, authenticate, s
       if (JSON.stringify(item) === JSON.stringify(old)) return { item };
       touch(item); if (reply) reply.seq = item.seq;
       state.items[key] = item; save();
-      if (old.status !== item.status || reply) return { item: structuredClone(item), notify: true, reply };
-      return { item };
+      if (old.status !== item.status || reply) return { item: structuredClone(item), committedSeq: item.seq,
+        noticeOrder: ++notificationOrder, notify: true, reply };
+      return { item: structuredClone(item) };
     });
     if (!update.notify) return update.item;
     const { item, reply } = update;
@@ -173,13 +176,17 @@ export function createFeedback({ organization, organizationData, authenticate, s
     // Delivery must not hold the write queue. Re-read after concurrent writes or rollback.
     return serial(() => {
       try {
+        if (update.noticeOrder < (noticeOrders.get(key) || 0)) return structuredClone(update.item);
         const item = get(key);
+        const unchanged = item.seq === update.committedSeq;
         item.notice = notice; touch(item); save();
-        return item;
+        noticeOrders.set(key, update.noticeOrder);
+        // Do not let our return cursor hide writes made while delivery was pending.
+        return structuredClone(unchanged ? item : { ...update.item, notice });
       } catch (error) {
         if (error.status !== 404) logError('bot/items/:id/notice', error);
         // The business write succeeded; missing items and notice failures remain non-fatal.
-        return state.items[key] || update.item;
+        return structuredClone(update.item);
       }
     });
   }
