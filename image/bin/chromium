@@ -1,0 +1,7 @@
+#!/bin/sh
+# Chromium from the Playwright install. Containers cannot create the user namespaces the Chrome sandbox needs.
+for chrome in "${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}"/chromium-*/chrome-linux*/chrome; do
+  [ -x "$chrome" ] && exec "$chrome" --no-sandbox "$@"
+done
+echo "chromium: no Playwright Chromium under ${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}" >&2
+exit 127
