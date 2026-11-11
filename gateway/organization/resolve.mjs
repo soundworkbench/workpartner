@@ -58,7 +58,9 @@ export function organizationData(environment = process.env) {
   const upgradeKeys = data.bridge.upgradeKeys;
   if (upgradeKeys !== undefined && (!Array.isArray(upgradeKeys) || upgradeKeys.some(entry => !entry || typeof entry.key !== 'string'
     || !/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/.test(entry.key)
-    || (entry.key.startsWith('projects.') && !/^projects\.platforms\.options\.[A-Za-z0-9_-]+$/.test(entry.key))
+    || (entry.key.startsWith('projects.') && (!/^projects\.(platforms|agent)\.options\.[A-Za-z0-9_-]+$/.test(entry.key)
+      // The migrator owns these agent keys; the template cannot override them.
+      || /^projects\.agent\.options\.(mode|model|reasoning_effort|append_system_prompt)$/.test(entry.key)))
     || (entry.from !== undefined && (!Array.isArray(entry.from) || entry.from.some(value => !['string', 'number', 'boolean'].includes(typeof value))))))) {
     throw new Error('Invalid bridge.upgradeKeys');
   }

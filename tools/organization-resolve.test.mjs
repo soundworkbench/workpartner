@@ -128,8 +128,9 @@ test('startup exports quick-line configuration and preserves a container overrid
   }
 });
 
-test('bridge upgrade keys name template keys outside the managed agent tables', t => {
-  const upgradeKeys = [{ key: 'queue_batch.debounce_ms' }, { key: 'projects.platforms.options.reaction_emoji', from: ['OnIt', 1, true] }];
+test('bridge upgrade keys name template keys other than the managed agent keys', t => {
+  const upgradeKeys = [{ key: 'queue_batch.debounce_ms' }, { key: 'projects.platforms.options.reaction_emoji', from: ['OnIt', 1, true] },
+    { key: 'projects.agent.options.stream_partial_text' }];
   assert.deepEqual(resolveOrganization(fixture(t, { bridge: { template: 'bridge.toml', upgradeKeys } })).bridge.upgradeKeys, upgradeKeys);
   for (const value of [null, {}, 'queue_batch.debounce_ms', [null], [{}], [{ key: 'debounce_ms' }], [{ key: 'queue_batch.debounce ms' }],
     [{ key: 'projects.agent.options.model' }], [{ key: 'projects.name' }], [{ key: 'stream_preview.enabled', from: 'OnIt' }],

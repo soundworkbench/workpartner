@@ -117,6 +117,28 @@ class BridgeDefaultsTest(unittest.TestCase):
                 if source is superseded:
                     self.assertIn(b'debounce_ms = 0 # kept comment', content)
 
+    def test_agent_option_upgrades_reach_every_project(self):
+        template = self.template().replace(b'reasoning_effort = "__EFFORT__"',
+                                           b'reasoning_effort = "__EFFORT__"\nstream_partial_text = true')
+        second = self.old_config().split(b'[[projects]]', 1)[1].replace(b'__PROJECT__', b'second')
+        personal = b'reasoning_effort = "low"\nstream_partial_text = false'
+        source = self.old_config() + b'\n[[projects]]' + second.replace(b'reasoning_effort = "low"', personal)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'template.toml').write_bytes(template)
+            (root / 'organization.json').write_text(json.dumps(
+                {'bridge': {'upgradeKeys': [{'key': 'projects.agent.options.stream_partial_text'}]}}))
+            target = root / 'config.toml'
+            target.write_bytes(source)
+            with patch.dict(os.environ, dict(ENV, WORKPARTNER_ORG_DIR=directory)), \
+                    patch.object(bridge, 'TEMPLATE', root / 'template.toml'):
+                self.assertTrue(bridge.refresh(target))
+                content = target.read_bytes()
+                self.assertFalse(bridge.refresh(target))
+        self.check_agent(content)
+        projects = tomllib.loads(content.decode())['projects']
+        self.assertEqual([p['agent']['options']['stream_partial_text'] for p in projects], [True, False])
+
     def test_only_the_bridge_ends_turns_for_background_work(self):
         sync = module('wp-sync-instructions')
         end_turn = '然后结束本轮'
