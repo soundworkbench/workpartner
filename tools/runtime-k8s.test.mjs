@@ -774,3 +774,15 @@ test('organization userResources overrides each user limit independently without
   assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources,
     { requests: { memory: '768Mi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } });
 });
+
+test('user Pod renders and clears the optional quick-line model from runtime configuration', async t => {
+  const { runtime, client } = fixture(t);
+  for (const quickLineModel of ['fast-model', undefined, '']) {
+    const modelConfig = JSON.stringify({ defaults: {}, ...(quickLineModel === undefined ? {} : { quickLineModel }) });
+    await runtime.create({ slug: 'person' }, { modelConfig });
+    const env = client.objects.get(stsPath).spec.template.spec.containers[0].env;
+    assert.deepEqual(env.filter(value => value.name === 'QUICK_LINE_MODEL'),
+      quickLineModel ? [{ name: 'QUICK_LINE_MODEL', value: quickLineModel }] : []);
+    assert.equal(env.find(value => value.name === 'WORKPARTNER_MODEL_CONFIG').value, modelConfig);
+  }
+});

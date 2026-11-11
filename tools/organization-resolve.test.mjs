@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveOrganization } from '../gateway/organization/resolve.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { resolveOrganization, nextEnvironment, nextModelConfig } from '../gateway/organization/resolve.mjs';
 
 function fixture(t, fields = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-organization-'));
@@ -70,5 +72,43 @@ test('JSON and environment hosts use the existing hostname validation', t => {
   }
   for (const value of ['old.example.com', {}, [42], ['']]) {
     assert.throws(() => resolveOrganization(fixture(t, { legacyHosts: value })), /hostname/);
+  }
+});
+
+test('quick-line model is optional, validated and overridden by the personal environment', t => {
+  const org = resolveOrganization(fixture(t, { model: { baseUrl: 'https://models.example.com/v1', quickLineModel: 'fast-model' } }));
+  const configured = nextEnvironment(org);
+  assert.equal(configured.QUICK_LINE_MODEL, 'fast-model');
+  assert.equal(JSON.parse(configured.WORKPARTNER_MODEL_CONFIG).quickLineModel, 'fast-model');
+  assert.equal(nextEnvironment(org, { QUICK_LINE_MODEL: 'override-model' }).QUICK_LINE_MODEL, 'override-model');
+  assert.equal(Object.hasOwn(nextEnvironment(org, { QUICK_LINE_MODEL: '' }), 'QUICK_LINE_MODEL'), false);
+  const unconfigured = resolveOrganization(fixture(t));
+  assert.equal(Object.hasOwn(nextEnvironment(unconfigured), 'QUICK_LINE_MODEL'), false);
+  assert.equal(Object.hasOwn(nextEnvironment(unconfigured, { QUICK_LINE_MODEL: 'override-model' }), 'QUICK_LINE_MODEL'), true);
+  assert.equal(Object.hasOwn(nextModelConfig(unconfigured), 'quickLineModel'), false);
+  // Removing the runtime field must not re-enable an older embedded organization value.
+  const runtime = { WORKPARTNER_MODEL_CONFIG: JSON.stringify(nextModelConfig(unconfigured)) };
+  assert.equal(Object.hasOwn(nextEnvironment(org, runtime), 'QUICK_LINE_MODEL'), false);
+  for (const value of [null, 42, true, [], {}, 'fast\nmodel', 'fast\rmodel']) {
+    assert.throws(() => resolveOrganization(fixture(t, { model: { quickLineModel: value } })), /model\.quickLineModel/);
+    assert.throws(() => nextEnvironment(org, { QUICK_LINE_MODEL: value }), /model\.quickLineModel/);
+    assert.throws(() => nextModelConfig(org, { WORKPARTNER_MODEL_CONFIG: JSON.stringify({ ...nextModelConfig(org), quickLineModel: value }) }), /model\.quickLineModel/);
+  }
+  const empty = resolveOrganization(fixture(t, { model: { baseUrl: 'https://models.example.com/v1', quickLineModel: '' } }));
+  assert.equal(Object.hasOwn(nextEnvironment(empty), 'QUICK_LINE_MODEL'), false);
+});
+
+test('startup exports quick-line configuration and preserves a container override for child processes', t => {
+  const environment = fixture(t, { model: { baseUrl: 'https://models.example.com/v1', quickLineModel: "fast'model" } });
+  const start = fs.readFileSync(new URL('../image/bin/start.sh', import.meta.url), 'utf8');
+  const setup = start.slice(start.indexOf('ORG_ENV='), start.indexOf('ANTHROPIC_API_KEY='))
+    .replace('/opt/workpartner/organization/resolve.mjs', fileURLToPath(new URL('../gateway/organization/resolve.mjs', import.meta.url)));
+  for (const override of [undefined, 'override-model', '']) {
+    const child = spawnSync('bash', ['-c', setup + `\nnode -p 'process.env.QUICK_LINE_MODEL ?? "unset"'`], {
+      encoding: 'utf8', env: { PATH: process.env.PATH, ...environment,
+        ...(override === undefined ? {} : { QUICK_LINE_MODEL: override }) },
+    });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout.trim(), override ?? "fast'model");
   }
 });

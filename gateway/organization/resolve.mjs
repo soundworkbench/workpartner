@@ -24,6 +24,12 @@ function hostname(value, name, optional = false) {
   return value;
 }
 
+/** Optional quick-line model at organization and runtime configuration boundaries. */
+function quickLineModel(value) {
+  if (value !== undefined && (typeof value !== 'string' || /[\r\n]/.test(value))) throw new Error('Invalid model.quickLineModel');
+  return value || undefined;
+}
+
 /** Read non-secret release data without requiring deployment endpoints during a build. */
 export function organizationData(environment = process.env) {
   const directory = environment.WORKPARTNER_ORG_DIR ? resolve(environment.WORKPARTNER_ORG_DIR) : fileURLToPath(new URL('../../org/default/', import.meta.url));
@@ -38,6 +44,7 @@ export function organizationData(environment = process.env) {
   if (dnsNdots !== undefined && (!Number.isInteger(dnsNdots) || dnsNdots < 1 || dnsNdots > 15)) {
     throw new Error('runtime.k8s.dnsNdots must be an integer from 1 to 15');
   }
+  quickLineModel(data.model.quickLineModel);
   const market = data.market;
   for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {
     if (!Array.isArray(market[key]) || market[key].some(value => typeof value !== 'string' || !value)) throw new Error(`Invalid market.${key}`);
@@ -52,7 +59,7 @@ export function organizationData(environment = process.env) {
 /** Model defaults and optional catalog entries, shared by gateway and image startup. */
 export function nextModelConfig(data, environment = {}) {
   const selected = environment.WORKPARTNER_MODEL_CONFIG
-    ? JSON.parse(environment.WORKPARTNER_MODEL_CONFIG) : { defaults: data.model.defaults, catalog: data.model.catalog };
+    ? JSON.parse(environment.WORKPARTNER_MODEL_CONFIG) : { defaults: data.model.defaults, catalog: data.model.catalog, quickLineModel: data.model.quickLineModel };
   const defaults = { ...selected.defaults };
   for (const [field, variable] of Object.entries({ claude: 'ANTHROPIC_MODEL', opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
     sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL', haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' })) {
@@ -73,7 +80,8 @@ export function nextModelConfig(data, environment = {}) {
       return { id, key, name: entry.name || key.split('/').at(-1), also: entry.also || [] };
     });
   }
-  return { defaults, catalog };
+  const quickModel = quickLineModel(selected.quickLineModel);
+  return { defaults, catalog, ...(quickModel ? { quickLineModel: quickModel } : {}) };
 }
 
 /** Environment consumed by the next image; credentials remain in the mounted key file. */
@@ -81,11 +89,13 @@ export function nextEnvironment(data, environment = {}) {
   const model = data.model;
   const config = nextModelConfig(data, environment);
   const defaults = config.defaults;
+  const quickModel = quickLineModel(environment.QUICK_LINE_MODEL !== undefined ? environment.QUICK_LINE_MODEL : config.quickLineModel);
   const base = environment.MODEL_BASE_URL || environment[model.baseEnvironment] || model.nextBaseUrl || model.baseUrl;
   const url = new URL(base);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid MODEL_BASE_URL');
   return {
     WORKPARTNER_MODEL_CONFIG: JSON.stringify(config),
+    ...(quickModel ? { QUICK_LINE_MODEL: quickModel } : {}),
     PARTNER_GATEWAY_ORIGIN: data.runtime.gatewayOrigin,
     PARTNER_CODEX_MODEL: defaults.codex,
     PARTNER_DEFAULT_EFFORT: defaults.effort,

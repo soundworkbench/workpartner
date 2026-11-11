@@ -177,6 +177,7 @@ export function createK8sRuntime(o = {}) {
     };
   }
   function create(user, { modelConfig } = {}) {
+    const quickModel = modelConfig && JSON.parse(modelConfig).quickLineModel;
     return exclusive(user.slug, async c => {
       const slug = user.slug, n = names(slug);
       let key;
@@ -204,6 +205,7 @@ export function createK8sRuntime(o = {}) {
           { name: 'WORKPARTNER_MARKET_PREINSTALLED', value: JSON.stringify(o.sharedSkills.preinstalled) },
         ] : []),
         ...(modelConfig ? [{ name: 'WORKPARTNER_MODEL_CONFIG', value: modelConfig }] : []),
+        ...(quickModel ? [{ name: 'QUICK_LINE_MODEL', value: quickModel }] : []),
         { name: 'WORKPARTNER_PUBLISHED_DIR', value: publishedDirectory },
       ];
       const object = { apiVersion: 'apps/v1', kind: 'StatefulSet', metadata: { name: n.container, labels: labels(slug),
