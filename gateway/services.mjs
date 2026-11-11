@@ -12,7 +12,7 @@ import { RELAY_PORT } from '../preview/policy.mjs';
 import { createPreview, writeRelayKey } from '../preview/gateway.mjs';
 
 /** Initialize organization-selected services with the gateway's identity and personal container resolver. */
-export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration = createMigration(organization) }) {
+export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, dataTools, migration = createMigration(organization) }) {
   const { features, runtime, server } = organization;
   const authenticate = req => tokenUser(req, SESSION_KEY, users());
   const enabled = () => features.feishuAuthorization && process.env.FEISHU_USER_AUTH_ENABLED !== '0';
@@ -52,7 +52,7 @@ export async function createGatewayServices({ organization, runtime: personalRun
   const marketPrepared = new Map();
   async function prepare(user, options) {
     if (!migration.owns(user)) return;
-    if (features.marketSkills && !features.feishuAuthorization && user.backend === 'aionui'
+    if ((features.marketSkills || organization.dataTools) && !features.feishuAuthorization && user.backend === 'aionui'
       && (options?.force || (marketPrepared.get(user.slug) || 0) < Date.now())) {
       await writeContainerToken(SESSION_KEY, user, personalRuntime, runtime.uid);
       marketPrepared.set(user.slug, Date.now() + 86400000);
@@ -96,16 +96,17 @@ export async function createGatewayServices({ organization, runtime: personalRun
   }
   return { prepareNextFeishu: prepare, preview, feishu, feishuSettings,
     listen(extension) {
-      if (!feishu && !extension?.internal && migration.kind !== 'k8s') return;
+      if (!feishu && !extension?.internal && !organization.dataTools && migration.kind !== 'k8s') return;
       // This listener is internal-only; token services authenticate signed identities,
       // while adoption preparation requires a loopback peer and current ownership.
       internal = http.createServer(async (req, res) => {
         if (await prepareInternal(req, res)) return;
         if (req.url === '/token' && feishu) return feishu.token(req, res);
+        if (await dataTools?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
         if (await extension?.internal?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
         res.writeHead(404); res.end();
       });
-      internal.listen(runtime.internalPort, '0.0.0.0');
+      return internal.listen(runtime.internalPort, '0.0.0.0');
     },
     async close() { clearInterval(timer); if (internal) await new Promise(resolve => internal.close(resolve)); },
   };

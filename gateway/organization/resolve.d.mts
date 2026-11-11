@@ -59,6 +59,13 @@ export interface Organization {
   tools?: { legacyRollout?: string };
   features: { feishuAuthorization: boolean; feishuOnboarding: boolean; marketSkills: boolean; autoTitle: boolean; preview: boolean };
   extensions: { configFiles: string[]; gatewayModule: string };
+  dataTools?: { catalog: string; blockedPrefixes?: string[]; legacyPassthrough?: string[]; usageAliases?: string[]; provider: {
+    origin: string; tokenFile: string; orgIdEnvironment: string; orgSlugEnvironment: string;
+    enabledEnvironment: string; verifiedEnvironment: string; overridesFile?: string;
+    limitEnvironment: Record<'daily' | 'monthly' | 'call', string>;
+    budgetPath: string; callPath: string; usagePath?: string;
+    headers: Record<'token' | 'organization' | 'tag' | 'routeMax' | 'cost' | 'callId', string>;
+  } };
 }
 /** Read locally shipped data and existing environment overrides; never reads credentials or writes profiles. */
 export function resolveOrganization(environment?: NodeJS.ProcessEnv): Organization;

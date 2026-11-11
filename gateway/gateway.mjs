@@ -20,6 +20,8 @@ import { createSharedSkillStore, createSharedSkillsHandler } from './market-shar
 import { marketNotifications } from './market-notifications.mjs';
 import { createMarketSkills, skillExecutor } from "./market-skills.mjs";
 
+import { createDataTools } from './data-tools.mjs';
+
 const organization = resolveOrganization();
 const PORT = organization.runtime.gatewayPort;
 const PUBLIC_HOST = organization.server.publicHost;
@@ -76,7 +78,8 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
   tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()), origin: organization.server.publicOrigin,
   execute: executeSkill,
 });
-const services = await createGatewayServices({ organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
+const services = await createGatewayServices({ dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
@@ -248,6 +251,7 @@ const server = http.createServer(async (req, res) => {
       || url.pathname.startsWith('/_wp/preview/');
     if (!local && migration.forward(req, res, user)) return;
     if (sharedSkills && await sharedSkills(req, res, url)) return;
+    if (await dataTools(req, res, url)) return;
     if ((!user || migration.owns(user)) && await legacy?.handle(req, res, url)) return;
     if (await preview?.handle(req, res, url)) return;
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;

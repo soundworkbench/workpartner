@@ -72,7 +72,7 @@ RUN mkdir -p /tmp/skel/.claude/skills \
  && if [ -f /opt/workpartner/organization/official-skills.tar.gz ]; then python3 -I /opt/workpartner/bin/wp-feishu-skills.py /opt/workpartner/organization/official-skills.tar.gz /opt/workpartner/skills; fi \
  && cp -R /opt/workpartner/extra-skills/. /opt/workpartner/skills/ \
  && node /opt/workpartner/bin/wp-skill-catalog.mjs /opt/workpartner/skills /opt/workpartner/skills-zh.json /opt/workpartner/home/CLAUDE.md \
- && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market \
+ && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data \
  && chmod -R a+rX /opt/workpartner /opt/aionui \
  && ln -sf python3 /usr/bin/python
 
