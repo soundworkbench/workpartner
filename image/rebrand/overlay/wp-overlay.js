@@ -700,15 +700,52 @@
     };
     if (window.requestIdleCallback) window.requestIdleCallback(load, { timeout: 1000 }); else setTimeout(load, 0);
   }
-  function guidSend() {
+  // The home composer keeps its text only in memory; keep an unsent draft in this browser so
+  // reloading or opening the page in another window does not lose it. The key is shared by every
+  // account in this browser, so it is dropped on logout and expires after a day.
+  var DRAFT_KEY = 'wp_guid_draft', DRAFT_TTL = 24 * 60 * 60 * 1000;
+  function draftClear() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+  }
+  function draftSave(value) {
+    if (!value || !value.trim()) return draftClear();
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ text: value, at: Date.now() })); } catch (e) {}
+  }
+  function draftLoad() {
+    var draft = null;
+    try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY)); } catch (e) {}
+    if (draft && typeof draft.text === 'string' && typeof draft.at === 'number' && Date.now() - draft.at >= 0 && Date.now() - draft.at < DRAFT_TTL) return draft.text;
+    draftClear();
+    return null;
+  }
+  function draftRestore() {
+    var input = document.querySelector('[data-testid="guid-input"]');
+    if (!input || input.dataset.wpDraft) return;
+    input.dataset.wpDraft = '1';
+    var draft = draftLoad();
+    if (!draft || input.value) return;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, draft);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    // The synthetic input event cancels the pending autofocus; ask for it again.
+    if (window.wpComposerFocus) window.wpComposerFocus.request();
+  }
+  document.addEventListener('input', function (e) {
+    if (e.target.matches && e.target.matches('[data-testid="guid-input"]')) draftSave(e.target.value);
+  });
+  // Enter on text starting with a slash picks a command instead of sending, so the draft stays.
+  function guidSend(byEnter) {
     var el = document.querySelector('[data-testid="guid-input"]'), btn = document.querySelector('[data-testid="guid-send-btn"]');
     var t = el ? String(el.value !== undefined ? el.value : el.textContent).trim() : '';
-    if (t && t.charAt(0) !== '/' && btn && !btn.disabled && !btn.classList.contains('arco-btn-loading')) ghostShow(t);
+    var sending = t && btn && !btn.disabled && !btn.classList.contains('arco-btn-loading');
+    var command = t && t.charAt(0) === '/';
+    if (sending && !(byEnter && command)) draftClear();
+    if (sending && !command) ghostShow(t);
   }
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && e.target.matches && e.target.matches('[data-testid="guid-input"]')) guidSend();
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && e.target.matches && e.target.matches('[data-testid="guid-input"]')) guidSend(true);
   }, true);
-  document.addEventListener('click', function (e) { if (e.target.closest && e.target.closest('[data-testid="guid-send-btn"]')) guidSend(); }, true);
+  document.addEventListener('click', function (e) { if (e.target.closest && e.target.closest('[data-testid="guid-send-btn"]')) guidSend(false); }, true);
+  function signOut() { draftClear(); location.assign('/_wp/logout'); }
   window.addEventListener('hashchange', function () { if (!/^#\/(guid|conversation\/)/.test(location.hash)) ghostClear(); });
 
   // 设置、助手、团队页不对同事开放，进入时回到对话首页；定时任务从侧栏“自动化”进入
@@ -771,6 +808,7 @@
     var w = sider ? Math.max(0, Math.round(sider.getBoundingClientRect().right)) + 'px' : '0px';
     if (document.documentElement.style.getPropertyValue('--wp-sider-w') !== w) document.documentElement.style.setProperty('--wp-sider-w', w);
     preloadHome();
+    draftRestore();
     if (admin) { ghostHandoff(); return; }
     marketPage();
     messageTableScroll();
@@ -1337,7 +1375,7 @@
       var sep = document.createElement('div'); sep.className = 'wp-pick-sep'; m.appendChild(sep);
       var logout = document.createElement('button'); logout.type = 'button'; logout.className = 'wp-pick-item';
       logout.setAttribute('role', 'menuitem'); text(logout, t('logout'));
-      logout.addEventListener('click', function (e) { e.stopPropagation(); location.assign('/_wp/logout'); });
+      logout.addEventListener('click', function (e) { e.stopPropagation(); signOut(); });
       m.appendChild(logout);
     }
     appendLogout();
