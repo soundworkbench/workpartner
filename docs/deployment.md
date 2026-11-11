@@ -79,6 +79,17 @@ Forward the preview hostname to `127.0.0.1:3090` with WebSocket upgrades. Open i
 
 The lock selects cc-connect `v1.5.2-beta.1-sw.167-sw.14`, SHA-256 `53da5e55843ce18ae6a195808dab248e3737be3b5eaa5c8a345292b06880ce54`. The downloader fetches the `cc-connect-v1.5.2-beta.1-sw.167-sw.14-linux-amd64` asset from the public `soundworkbench/cc-connect` release. The build reads `cc-connect` from the download directory and verifies the pinned digest again. A missing binary or mismatched digest stops the build. The image workflow downloads the bridge together with all other inputs.
 
+The `Bridge bump` workflow keeps this pin on the newest non-draft `soundworkbench/cc-connect` release. It runs every 30 minutes, on manual dispatch, and on a `cc-connect-release` repository dispatch. When the pin already matches, it does nothing. A release without a `linux-amd64` asset is skipped and the reason appears in the job summary. Otherwise it downloads the asset and writes its version, URL, release, SHA-256 and size into the lock. It also replaces the version and digest quoted in this reference and runs `tools/check.sh`. It then pushes `bridge-bump/main` and opens or updates the PR `Upgrade the Feishu bridge to cc-connect <tag>`. It uses only the workflow token, so the repository must allow GitHub Actions to create pull requests. A PR opened with that token does not start `Linux tests`. A maintainer closes and reopens the PR to run them, then reviews and merges it.
+
+The bridge release job can trigger the bump immediately instead of waiting for the schedule. The caller needs a token with Contents write access to this repository:
+
+```bash
+curl -fsS -X POST https://api.github.com/repos/soundworkbench/workpartner/dispatches \
+  -H "Authorization: Bearer $WORKPARTNER_DISPATCH_TOKEN" \
+  -H 'Accept: application/vnd.github+json' \
+  -d '{"event_type":"cc-connect-release"}'
+```
+
 Official skills use the same upstream commits as the private bundle and verified source archive hashes. `image/build.sh --prepare-only <new-directory>` assembles the full context without invoking Docker, including deterministic skill repacking. Playwright is pinned to version 1.61.1 but its npm dependency graph and Chromium download are not yet SHA-256 locked. Third-party license packaging for the remaining programs and an actual Linux image build remain release checks. The gateway includes personal platform authorization and bot onboarding, selected by the organization feature fields.
 
 ## Gateway feature selection
