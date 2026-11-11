@@ -31,6 +31,11 @@ RUN chmod 755 /usr/local/bin/lark-cli /usr/local/bin/meegle \
 ENV WORKPARTNER_IDENTITY_CONFIG=/data/.wp-feishu-cli.json LARKSUITE_CLI_STRICT_MODE=user
 COPY image/fonts.conf /etc/fonts/conf.d/60-workpartner-cjk.conf
 RUN chmod 644 /etc/fonts/conf.d/60-workpartner-cjk.conf && fc-cache -f
+# 文档与排查工具：LibreOffice 只装无界面组件（Word/Excel/PPT 转 PDF），poppler-utils（pdftoppm 等），procps（ps），pip。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends procps poppler-utils python3-pip \
+      libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
+ && rm -rf /var/lib/apt/lists/*
 
 # Claude Code 与 Playwright Chromium，版本固定；Claude Code 不自动升级。
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
@@ -74,20 +79,29 @@ RUN mkdir -p /tmp/skel/.claude/skills \
  && cp -R /opt/workpartner/extra-skills/. /opt/workpartner/skills/ \
  && python3 -I /opt/workpartner/bin/wp-compact-skills.py /opt/workpartner/skills /opt/workpartner/skill-descriptions.json \
  && node /opt/workpartner/bin/wp-skill-catalog.mjs /opt/workpartner/skills /opt/workpartner/skills-zh.json /opt/workpartner/home/CLAUDE.md \
- && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data \
+ && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data /opt/workpartner/bin/chromium \
  && chmod -R a+rX /opt/workpartner /opt/aionui \
  && ln -sf python3 /usr/bin/python
 
 # 原镜像的 旧版后端 钩子（NODE_OPTIONS）与 Claude Code 无关，清掉。
-ENV PATH=/opt/workpartner/bin:/opt/claude/bin:/opt/playwright/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+ENV PATH=/opt/workpartner/bin:/opt/claude/bin:/opt/playwright/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     NODE_PATH=/opt/playwright/lib/node_modules \
     NODE_OPTIONS= \
     DISABLE_AUTOUPDATER=1 \
     WORKPARTNER_ORG_DIR=/opt/workpartner/organization/selected \
-    HOME=/data
+    HOME=/data \
+    PIP_BREAK_SYSTEM_PACKAGES=1
+# Login shells reset PATH in /etc/profile, and Codex runs commands through one; keep the image PATH there.
+RUN printf 'PATH=%s\nexport PATH\n' "$PATH" > /etc/profile.d/workpartner-path.sh
 USER 1001:1001
 # Verify the runtime user can load system trust roots before accepting the image.
 RUN test -s /etc/ssl/certs/ca-certificates.crt \
  && python3 -I -c 'import ssl; assert ssl.create_default_context().cert_store_stats()["x509_ca"] > 0'
+# Verify the document and browser tools as the runtime user, from a login shell, through a real Word -> PDF -> PNG run.
+RUN cd /tmp && HOME=/tmp bash -lc 'set -e; \
+      officecli --version; chromium --version; pdftoppm -v 2>&1 | head -1; soffice --headless --version; ps --version; pip --version; \
+      officecli create check.docx >/dev/null; officecli add check.docx /body --type paragraph --prop text=check >/dev/null; officecli close check.docx >/dev/null; \
+      soffice --headless --convert-to pdf check.docx >/dev/null; pdftoppm -png -r 30 -singlefile check.pdf check; test -s check.png' \
+ && rm -rf /tmp/check.* /tmp/.config /tmp/.cache /tmp/.local
 WORKDIR /data
 ENTRYPOINT ["/opt/workpartner/bin/start.sh"]
