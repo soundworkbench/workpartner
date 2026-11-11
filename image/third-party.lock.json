@@ -17,12 +17,12 @@
     },
     {
       "destination": "cc-connect",
-      "version": "2.1.0",
-      "url": "https://github.com/soundworkbench/cc-connect/releases/download/v2.1.0/cc-connect-v2.1.0-linux-amd64",
+      "version": "2.2.0",
+      "url": "https://github.com/soundworkbench/cc-connect/releases/download/v2.2.0/cc-connect-v2.2.0-linux-amd64",
       "format": "file",
-      "release": "https://github.com/soundworkbench/cc-connect/releases/tag/v2.1.0",
-      "sha256": "283c17b59e450a92858715a537f3fa4782a42bcfb8e888f89ba3230828bb9b54",
-      "bytes": 56197304
+      "release": "https://github.com/soundworkbench/cc-connect/releases/tag/v2.2.0",
+      "sha256": "27fa89423bf78a0eb384fdff7e404e6bfc74be8d95a1d7b713e73310ebf10084",
+      "bytes": 56459448
     },
     {
       "destination": "officecli",
