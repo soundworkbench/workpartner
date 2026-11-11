@@ -22,6 +22,7 @@ export interface Organization {
       sharedSkillsClaim?: string;
       memoryRequest?: string; cpuRequest?: string; userPriorityClass?: string;
       userResources?: Record<string, { memory?: string | number; cpu?: string | number }>;
+      userImages?: Record<string, string>;
       gatewayResources?: { cpu?: string; memory?: string };
       imageConfigMap?: string; governingService?: string; requiredPolicies?: string[];
       publishedDirectory?: string; publishedFiles?: string[];

@@ -306,6 +306,37 @@ test('AionUi replaces changed image names and IDs but retains containers when ta
   }
 });
 
+test('AionUi retains matching per-user Kubernetes images and rebuilds after an override is removed', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-user-images-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'aionui-person.pass'), 'fixture');
+  fs.writeFileSync(path.join(dir, 'aionui-other.pass'), 'fixture');
+  const pilotImages = { person: 'workspace:pilot' };
+  for (const [slug, image, imageId, userImages, replace] of [
+    ['person', 'workspace:pilot', 'sha256:pilot', pilotImages, false],
+    ['other', 'workspace:default', 'sha256:default', pilotImages, false],
+    ['person', 'workspace:pilot', 'sha256:old-pilot', pilotImages, true],
+    ['person', 'workspace:pilot', 'sha256:pilot', {}, true],
+  ]) {
+    const calls = [];
+    const runtime = {
+      inspect: async () => ({ exists: true, running: false, image, imageId, address: null, env: [] }),
+      imageId: async ref => {
+        assert.equal(ref, userImages[slug] ?? 'workspace:default');
+        return ref === 'workspace:pilot' ? 'sha256:pilot' : 'sha256:default';
+      },
+      ensureIsolation: async () => {},
+      remove: async userSlug => calls.push(['remove', userSlug]),
+      create: async user => calls.push(['create', user.slug]),
+      start: async () => {}, address: async () => null,
+    };
+    const aionui = createAionui({ runtime, kind: 'k8s', image: 'workspace:default', userImages, secretDir: dir, log() {} });
+    assert.equal(await aionui.upstream({ slug }), null);
+    await aionui.pending(slug);
+    assert.deepEqual(calls, replace ? [['remove', slug], ['create', slug]] : []);
+  }
+});
+
 test('runtime file operations preserve atomic replacement, nested modes and cleanup with the current owner', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-storage-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

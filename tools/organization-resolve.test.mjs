@@ -21,6 +21,21 @@ const hosts = {
   projectHost: 'project.example.com',
 };
 
+test('organization validates optional per-user Kubernetes image references', t => {
+  for (const userImages of [undefined, {}, { u8fdaf652: 'workspace:pilot', other: 'registry.example.com/workspace@sha256:abc' }]) {
+    const org = resolveOrganization(fixture(t, { runtime: { k8s: { userImages } } }));
+    assert.deepEqual(org.runtime.k8s.userImages, userImages);
+    if (userImages === undefined) assert.equal(Object.hasOwn(org.runtime.k8s, 'userImages'), false);
+  }
+  for (const userImages of [null, [], ['workspace:pilot'], 'workspace:pilot', 42, true,
+    { '': 'workspace:pilot' }, { ' ': 'workspace:pilot' },
+    ...['', ' ', 'workspace:pilot extra', 'workspace:pilot\n', 'workspace:\rpilot', 'workspace:\tpilot',
+      null, 42, true, [], {}].map(image => ({ u8fdaf652: image }))]) {
+    assert.throws(() => resolveOrganization(fixture(t, { runtime: { k8s: { userImages } } })),
+      /runtime\.k8s\.userImages/);
+  }
+});
+
 test('organization validates optional runtime.k8s.dnsNdots as an integer from 1 to 15', t => {
   for (const dnsNdots of [undefined, 1, 4, 15]) {
     const org = resolveOrganization(fixture(t, { runtime: { k8s: { dnsNdots } } }));

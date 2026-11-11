@@ -32,10 +32,14 @@ const USERS_FILE = organization.runtime.usersFile;
 const users = readUsers;
 
 const migration = createMigration(organization);
+if (migration.kind === 'docker' && Object.keys(organization.runtime.k8s?.userImages ?? {}).length) {
+  console.warn('runtime.k8s.userImages is only supported on Kubernetes; ignoring it for Docker');
+}
 const runtime = migration.guardRuntime(createRuntime(organization), users);
 const legacyRuntime = migration.kind === 'k8s' ? undefined : migration.guardRuntime(createLegacyRuntime(organization), users);
 const aionui = createAionui({
   runtime, owns: migration.owns, kind: migration.kind, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
+  userImages: migration.kind === 'k8s' ? organization.runtime.k8s?.userImages : undefined,
   secretDir: `${organization.runtime.secureDirectory}/aionui`,
   sharedSkills: organization.features.marketSkills ? {
     container: organization.market.containerDirectory, preinstalled: organization.market.preinstalled,

@@ -183,7 +183,8 @@ export function createK8sRuntime(o = {}) {
       let key;
       try { key = fs.readFileSync(path.join(o.secureDir, `${o.keyPrefix ?? 'model-'}${slug}.key`)); }
       catch (error) { if (error.code === 'ENOENT') throw new Error(`没有 ${slug} 的模型钥匙`); throw new Error('Cannot read model key file'); }
-      const id = await registered(o.image);
+      const image = o.userImages?.[slug] ?? o.image;
+      const id = await registered(image);
       await ensureIsolation(slug);
       const secret = { apiVersion: 'v1', kind: 'Secret', metadata: { name: n.modelKey, labels: labels(slug) }, type: 'Opaque',
         data: { 'model.key': key.toString('base64') } };
@@ -193,7 +194,7 @@ export function createK8sRuntime(o = {}) {
         metadata: { name: n.data, labels: labels(slug) }, spec: { accessModes: ['ReadWriteOnce'], storageClassName: o.storageClass,
           resources: { requests: { storage: o.dataVolumeSize ?? '20Gi' } } } });
       const oldwork = await c.get(`${core}/persistentvolumeclaims/${n.oldwork}`);
-      const spec = podSpec(o.image, n, pvc, systemNamespace(c), oldwork);
+      const spec = podSpec(image, n, pvc, systemNamespace(c), oldwork);
       const overrides = o.userResources?.[slug] ?? {};
       const limits = spec.containers[0].resources.limits;
       for (const resource of ['memory', 'cpu']) limits[resource] = String(overrides[resource] ?? limits[resource]);

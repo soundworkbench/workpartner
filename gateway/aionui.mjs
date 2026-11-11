@@ -61,6 +61,7 @@ const sleepFor = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param o.runtime Personal runtime for lifecycle, storage and endpoint resolution.
  * @param o.modelConfig Current non-secret model defaults and catalog.
  * @param o.image Target personal image reference.
+ * @param o.userImages Optional personal image references by user slug (Kubernetes only).
  * @param o.secretDir Gateway-only password directory.
  * @param o.maxJobs 不同人同时进行的开通/启动/重置任务上限（默认 2），超出时 upstream 返回 null，页面稍后自动刷新重试
  * @param o.resetBackoffMs 同一人两次口令重置之间的最短间隔（默认 60 秒）
@@ -143,11 +144,12 @@ export function createAionui(o) {
     if (!owns(user) || jobs.has(slug)) return null;
     const hasPass = fs.existsSync(passFile(slug));
     const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig()) : null;
-    let stale = info.exists && info.image !== o.image;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
+    const targetImage = o.userImages?.[slug] ?? o.image;
+    let stale = info.exists && info.image !== targetImage;   // 镜像升级：删旧容器按新镜像重建，数据目录不变
     if (info.exists && !stale) {
       // 标签可原名重建；目标镜像不可用时仍按镜像名判断，不据此删除容器。
       let target;
-      try { target = await runtime.imageId(o.image); }
+      try { target = await runtime.imageId(targetImage); }
       catch (e) { log(`查新版工作伙伴目标镜像失败（${e.message}），仍按镜像名判断`); }
       stale = !!target && info.imageId !== target;
     }
