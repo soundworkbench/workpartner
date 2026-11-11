@@ -19,7 +19,7 @@ flowchart LR
 准备 Linux 主机、Docker、Node.js 24、Python 3、可访问外网的 HTTPS 连接、带 TLS 的域名，以及自己的登录应用和模型端点。[部署参考](docs/deployment.md)说明挂载和权限要求。
 
 1. 将 `org/default` 复制到单独的目录，按[组织配置说明](docs/organization.md)填写部署参数。
-2. 运行 Linux 检查：`bash tools/check.sh`。
+2. 在装有 Python PyYAML 的环境运行 Linux 检查：`bash tools/check.sh`。可先用 `python3 -m venv /tmp/workpartner-check-env` 创建隔离环境，用其中的 `bin/python -m pip` 安装 `PyYAML==6.0.3`，再将其 `bin` 目录放到 `PATH` 开头。
 3. 下载并校验锁定版本的构建输入，再构建每人镜像：
 
    ```sh

@@ -4,7 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { createMigration } from './migration.mjs';
 import { createFeishu } from './feishu.mjs';
-import { issueToken, tokenUser } from './market-auth.mjs';
+import { issueToken, tokenUser, writeContainerToken } from './market-auth.mjs';
 import { createNextFeishuPreparation } from '../feishu/next.mjs';
 import { createSettingsHandler } from '../feishu/settings.mjs';
 import { createContainerProject } from '../feishu/container-project.mjs';
@@ -49,8 +49,14 @@ export async function createGatewayServices({ organization, runtime: personalRun
       return { user, expires: JSON.parse(Buffer.from(data, 'base64url').toString()).e };
     },
   }) : undefined;
+  const marketPrepared = new Map();
   async function prepare(user, options) {
     if (!migration.owns(user)) return;
+    if (features.marketSkills && !features.feishuAuthorization && user.backend === 'aionui'
+      && (options?.force || (marketPrepared.get(user.slug) || 0) < Date.now())) {
+      await writeContainerToken(SESSION_KEY, user, personalRuntime, runtime.uid);
+      marketPrepared.set(user.slug, Date.now() + 86400000);
+    }
     if (user.backend === 'aionui' && prepareNextFeishu) await prepareNextFeishu(user, options);
     if (preview && (user.backend === 'aionui' || legacy)) await writeRelayKey(SESSION_KEY, user, user.backend === 'aionui' ? personalRuntime : legacyRuntime);
   }

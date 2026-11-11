@@ -169,7 +169,7 @@ test('gateway login, session isolation, personal routing, caching and logout', a
   });
   const docker = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
-    if (req.url.startsWith('/containers/')) return res.end(JSON.stringify({ Config: { Image: 'fixture-image', Env: ['WORKPARTNER_MODEL_CONFIG=' + JSON.stringify(nextModelConfig(organizationData({})))] }, Image: 'sha256:fixture', State: { Running: true }, NetworkSettings: { Networks: { 'workpartner-next-user1-net': { IPAddress: '127.0.0.1' } } } }));
+    if (req.url.startsWith('/containers/')) return res.end(JSON.stringify({ Config: { Image: 'fixture-image', Env: ['WORKPARTNER_MODEL_CONFIG=' + JSON.stringify(nextModelConfig(organizationData({}))), 'WORKPARTNER_SHARED_SKILLS=' + org.market.containerDirectory, 'WORKPARTNER_MARKET_PREINSTALLED=' + JSON.stringify(org.market.preinstalled)] }, Image: 'sha256:fixture', State: { Running: true }, NetworkSettings: { Networks: { 'workpartner-next-user1-net': { IPAddress: '127.0.0.1' } } } }));
     if (req.url.startsWith('/images/')) return res.end('{"Id":"sha256:fixture"}');
     if (req.url.endsWith('/connect')) return res.end('{}');
     if (req.url.startsWith('/networks/')) return res.end('{"Containers":{}}');
@@ -180,9 +180,10 @@ test('gateway login, session isolation, personal routing, caching and logout', a
     t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   }
   const org = organizationData({});
+  org.runtime.stateDirectory = path.join(dir, 'state'); org.market.sharedDirectory = path.join(dir, 'shared-skills');
   org.publicHost = 'workspace.example.test'; org.model.baseUrl = 'http://models.example.test/v1';
   Object.assign(org.runtime, { gatewayPort: 0, uid: process.getuid(), nextImage: 'fixture-image', nextPort: upstream.address().port,
-    sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'), cookieFile: path.join(dir, 'cookies.json'), secureDirectory: path.join(dir, 'secure') });
+    nextDirectory: path.join(dir, 'workspaces'), sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'), cookieFile: path.join(dir, 'cookies.json'), secureDirectory: path.join(dir, 'secure') });
   org.identity.appId = 'fixture-app'; org.identity.appSecretFile = path.join(dir, 'identity.secret');
   fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
   fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-secret');

@@ -176,7 +176,7 @@ test('gateway uses a single Recreate replica, Guaranteed resources, control-plan
   assert.deepEqual(container.env, [{ name: 'WORKPARTNER_ORG_DIR', value: '/organization' }]);
 });
 
-test('gateway mounts exactly the four configured paths and respects runtime mount destinations', () => {
+test('gateway mounts configured paths and the writable shared claim at the configured destination', () => {
   const org = fixture();
   Object.assign(org.runtime, { secureDirectory: '/fixture/secure', stateDirectory: '/fixture/state', usersFile: '/fixture/users.json' });
   org.runtime.sessionKeyFile = '/fixture/secure/session.key';
@@ -188,14 +188,30 @@ test('gateway mounts exactly the four configured paths and respects runtime moun
     { name: 'secure', hostPath: { path: '/srv/workpartner/secure', type: 'Directory' } },
     { name: 'state', hostPath: { path: '/srv/workpartner/state', type: 'Directory' } },
     { name: 'users', hostPath: { path: '/srv/workpartner/users.json', type: 'File' } },
+    { name: 'shared-skills', persistentVolumeClaim: { claimName: 'workpartner-shared-skills' } },
   ]);
   assert.deepEqual(pod.containers[0].volumeMounts, [
     { name: 'organization', mountPath: '/organization', readOnly: true },
     { name: 'secure', mountPath: '/fixture/secure' },
     { name: 'state', mountPath: '/fixture/state' },
     { name: 'users', mountPath: '/fixture/users.json' },
+    { name: 'shared-skills', mountPath: org.market.sharedDirectory },
   ]);
   assert.ok(!JSON.stringify(pod).includes('docker.sock'));
+});
+
+test('shared claim is configurable and absent when the skill market is disabled', () => {
+  const org = fixture();
+  org.runtime.k8s.sharedSkillsClaim = 'reviewed-library';
+  org.market.sharedDirectory = '/reviewed';
+  let pod = find(renderManifests(org).objects, 'Deployment').spec.template.spec;
+  assert.deepEqual(pod.volumes.at(-1), { name: 'shared-skills', persistentVolumeClaim: { claimName: 'reviewed-library' } });
+  assert.equal(pod.containers[0].volumeMounts.at(-1).mountPath, '/reviewed');
+  org.runtime.k8s.sharedSkillsClaim = '../invalid';
+  assert.throws(() => renderManifests(org), /sharedSkillsClaim/);
+  org.features.marketSkills = false;
+  pod = find(renderManifests(org).objects, 'Deployment').spec.template.spec;
+  assert.equal(pod.volumes.some(volume => volume.name === 'shared-skills'), false);
 });
 
 test('Service names and ports come from gateway origins, the governing setting and the model URL', () => {

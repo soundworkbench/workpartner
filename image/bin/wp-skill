@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Manage personal skills shared by Claude Code and Codex; run as the container owner."""
 import argparse
+import base64
 import fcntl
 import json
 import os
@@ -41,14 +42,16 @@ def metadata(source):
 
 class SkillStore:
     def __init__(self, home=Path('/data'), builtin=Path('/opt/workpartner/skills'),
-                 translations=Path('/opt/workpartner/skills-zh.json'), uploads=Path('/data/.wp-skill-uploads')):
+                 translations=Path('/opt/workpartner/skills-zh.json'), uploads=Path('/data/.wp-skill-uploads'), shared=None):
+        self.shared = Path(shared or os.environ.get('WORKPARTNER_SHARED_SKILLS', '/opt/shared-skills'))
         self.skills = home / '.claude/skills'
         self.codex = home / '.codex/skills'
         self.builtin, self.uploads = builtin, uploads.resolve()
         self.zh = json.loads(translations.read_text())
         manifest = builtin / '.wp-feishu-skills.json'
         self.feishu = set(json.loads(manifest.read_text())) if manifest.exists() else set()
-        self.protected = set(self.zh) | {p.name for p in builtin.iterdir() if p.is_dir()}
+        self.promoted = set(json.loads(os.environ.get('WORKPARTNER_MARKET_PREINSTALLED', '[]')))
+        self.protected = self.promoted | set(self.zh) | {p.name for p in builtin.iterdir() if p.is_dir()}
 
     def run(self, action, value=None, overwrite=False):
         self.skills.mkdir(parents=True, exist_ok=True)
@@ -57,6 +60,10 @@ class SkillStore:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if action == 'list':
                 return self.list()
+            if action == 'export':
+                return self.export(value)
+            if action == 'shared-install':
+                return self.shared_install(value)
             if action == 'install':
                 return self.install(value, overwrite)
             return self.delete(value)
@@ -66,26 +73,31 @@ class SkillStore:
         for directory in sorted(self.skills.iterdir()):
             if directory.name in self.feishu and directory.name != "feishu":
                 continue
-            if not NAME.fullmatch(directory.name) or directory.is_symlink() or not directory.is_dir():
+            if not NAME.fullmatch(directory.name) or (directory.is_symlink() and not self.shared_link(directory)):
                 continue
             file = directory / 'SKILL.md'
-            if not file.is_file() or file.is_symlink():
+            if self.shared_link(directory) and not file.is_file():
+                rows.append({'id': directory.name, 'name': directory.name, 'description': '',
+                             'preinstalled': directory.name in self.protected, 'shared': True, 'withdrawn': True,
+                             'displayName': directory.name, 'displayDescription': ''})
+                continue
+            if not directory.is_dir() or not file.is_file() or file.is_symlink():
                 continue
             meta = metadata(file.read_text(encoding='utf-8'))
             preinstalled = directory.name in self.protected
             zh = self.zh.get(meta['name'], {}) if preinstalled else {}
-            rows.append({"id": directory.name, **meta, "preinstalled": preinstalled,
+            rows.append({"id": directory.name, **meta, "preinstalled": preinstalled, "shared": directory.is_symlink(),
                          "displayName": zh.get('name', meta['name']),
                          "displayDescription": zh.get('description', meta['description'])})
         return {"skills": sorted(rows, key=lambda row: (not row['preinstalled'], row['id']))}
 
-    def mutable(self, name):
+    def mutable(self, name, promoted=False):
         if not isinstance(name, str) or not NAME.fullmatch(name):
             reject('invalid_name', '技能名称只能包含小写字母、数字和连字符。')
-        if name in self.protected:
+        if name in self.protected and not (promoted and name in self.promoted):
             reject('preinstalled', '预装技能不能覆盖或删除。')
         directory, link = self.skills / name, self.codex / name
-        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        if (directory.is_symlink() and not self.shared_link(directory)) or (directory.exists() and not directory.is_dir()):
             reject('unsafe_target', '现有技能目录无法安全修改，请联系管理员。')
         if link.exists() and not link.is_symlink():
             reject('unsafe_target', '现有 ChatGPT 技能目录需要管理员核对，未作修改。')
@@ -112,6 +124,8 @@ class SkillStore:
             meta = metadata(file.read_text(encoding='utf-8'))
             name = meta['name']
             directory, link = self.mutable(name)
+            if directory.is_symlink():
+                reject('shared_skill', '请先卸载公司技能，再添加自己的同名技能。')
             if directory.exists() and not overwrite:
                 reject('exists', '已有同名技能，是否覆盖？', name=name)
             backup = Path(temporary) / 'old'
@@ -130,6 +144,62 @@ class SkillStore:
                     backup.rename(directory)
                 raise
         return {"name": name}
+
+    def shared_link(self, directory):
+        # Compare the immediate destination, including dangling links after withdrawal.
+        return directory.is_symlink() and Path(os.readlink(directory)) == self.shared / 'live' / directory.name
+
+    def shared_install(self, name):
+        directory, link = self.mutable(name, promoted=True)
+        target = self.shared / 'live' / name
+        if not (target / 'SKILL.md').is_file():
+            reject('not_found', '这个技能已经下架，请刷新市场。')
+        if directory.exists() and not directory.is_symlink():
+            reject('exists', '本人已有同名技能，请先改名。', name=name)
+        changed = not directory.is_symlink()
+        if changed:
+            directory.symlink_to(target)
+        with tempfile.TemporaryDirectory(prefix='.wp-link-', dir=self.skills.parent) as temporary:
+            staged = Path(temporary) / 'link'
+            staged.symlink_to(directory)
+            try:
+                os.replace(staged, link)
+            except OSError:
+                if changed:
+                    directory.unlink()
+                raise
+        return {'name': name, 'changed': changed}
+
+    def export(self, name):
+        directory, _ = self.mutable(name)
+        if directory.is_symlink() or not directory.is_dir():
+            reject('not_found', '请选择自己制作的技能。')
+        files, size = [], 0
+        for root, directories, names in os.walk(directory, followlinks=False):
+            if any((Path(root) / child).is_symlink() for child in directories):
+                reject('unsafe_archive', '技能不能包含软链接。')
+            for child in names:
+                source = Path(root) / child
+                relative = source.relative_to(directory).as_posix()
+                if any(part in ('.', '..') or ':' in part or '\\' in part for part in Path(relative).parts):
+                    reject('unsafe_archive', '技能文件路径无效。')
+                # O_NOFOLLOW rejects file links even when changed during the scan.
+                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, 'rb') as reader:
+                    info = os.fstat(reader.fileno())
+                    if not stat.S_ISREG(info.st_mode):
+                        reject('unsafe_archive', '技能只能包含普通文件。')
+                    content = reader.read(MAX_UPLOAD + 1)
+                size += len(content)
+                if size > MAX_UPLOAD or len(files) >= 200:
+                    reject('too_large', '分享的技能最多 200 个文件、总计 10 MB。')
+                files.append({'path': relative, 'content': base64.b64encode(content).decode(),
+                              'executable': bool(info.st_mode & 0o111)})
+        text = next((base64.b64decode(f['content']).decode('utf-8') for f in files if f['path'] == 'SKILL.md'), '')
+        meta = metadata(text)
+        if meta['name'] != name:
+            reject('invalid_name', '技能目录名与说明中的名称不一致。')
+        return {**meta, 'files': files}
 
     def extract(self, source, stage):
         with zipfile.ZipFile(source) as archive:
@@ -165,6 +235,11 @@ class SkillStore:
 
     def delete(self, name):
         directory, link = self.mutable(name)
+        if directory.is_symlink() and self.shared_link(directory):
+            directory.unlink()
+            if link.is_symlink():
+                link.unlink()
+            return {'name': name, 'shared': True}
         if not directory.is_dir():
             reject('not_found', '没有找到这个技能，请刷新列表。')
         # Move both entries out of the engine search paths before removing owned files.
@@ -182,7 +257,7 @@ class SkillStore:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['list', 'install', 'delete'])
+    parser.add_argument('action', choices=['list', 'install', 'delete', 'export', 'shared-install'])
     parser.add_argument('value', nargs='?')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()

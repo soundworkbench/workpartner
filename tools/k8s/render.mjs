@@ -81,6 +81,10 @@ function context(organization) {
     && Object.entries(value).every(([key, item]) => labelKey(key) && (item === '' || labelPart(item)));
   const port = value => Number.isInteger(value) && value > 0 && value <= 65535;
   const absolutePath = value => typeof value === 'string' && isAbsolute(value) && value !== '/' && !/[\0\r\n]/.test(value);
+  if (organization.features?.marketSkills) {
+    check('market.sharedDirectory', absolutePath(organization.market?.sharedDirectory));
+    check('runtime.k8s.sharedSkillsClaim', dnsLabel(k8s.sharedSkillsClaim ?? 'workpartner-shared-skills'));
+  }
   const persistentFiles = {
     'runtime.sessionKeyFile': runtime.sessionKeyFile,
     'runtime.cookieFile': runtime.cookieFile,
@@ -237,6 +241,9 @@ function context(organization) {
     })),
     entryMode: entry.mode, entryClusterIP: entry.clusterIP,
     organizationHostPath: paths.organization, secureHostPath: paths.secure,
+    sharedSkills: organization.features?.marketSkills ? {
+      claim: k8s.sharedSkillsClaim ?? 'workpartner-shared-skills', directory: organization.market.sharedDirectory,
+    } : undefined,
     stateHostPath: paths.state, usersHostPath: paths.usersFile,
     secureDirectory: runtime.secureDirectory, stateDirectory: runtime.stateDirectory, usersFile: runtime.usersFile,
     nextPort: runtime.nextPort, modelName: model.name, modelPort: model.port,
@@ -279,6 +286,13 @@ export function renderManifests(organization, { only } = {}) {
     });
     return rendered.split(/^---\s*$/m).map(document => JSON.parse(document));
   }).filter(object => selected.includes(object.kind.toLowerCase()));
+  if (values.sharedSkills) {
+    const pod = objects.find(object => object.kind === 'Deployment' && object.metadata.name === values.gatewayName)?.spec.template.spec;
+    if (pod) {
+      pod.volumes.push({ name: 'shared-skills', persistentVolumeClaim: { claimName: values.sharedSkills.claim } });
+      pod.containers[0].volumeMounts.push({ name: 'shared-skills', mountPath: values.sharedSkills.directory });
+    }
+  }
   return { objects, warnings: values.warnings };
 }
 

@@ -150,6 +150,10 @@ export function createK8sRuntime(o = {}) {
         { name: 'published', mountPath: publishedDirectory, readOnly: true });
       volumes.push({ name: 'model-key', secret: { secretName: n.modelKey, defaultMode: 0o444 } },
         { name: 'published', secret: { secretName: n.published, defaultMode: 0o444 } });
+      if (o.sharedSkills) {
+        mounts.push({ name: 'shared-skills', mountPath: o.sharedSkills.container, readOnly: true });
+        volumes.push({ name: 'shared-skills', persistentVolumeClaim: { claimName: o.sharedSkills.claim, readOnly: true } });
+      }
       if (oldwork) {
         mounts.push({ name: 'oldwork', mountPath: '/data/old-work', readOnly: true });
         volumes.push({ name: 'oldwork', persistentVolumeClaim: { claimName: n.oldwork, readOnly: true } });
@@ -195,6 +199,10 @@ export function createK8sRuntime(o = {}) {
       spec.containers[0].env = [
         { name: o.modelBaseEnvironment ?? 'MODEL_BASE_URL', value: String(o.modelBaseUrl) },
         { name: 'PARTNER_USER_NAME', value: user.name || '' },
+        ...(o.sharedSkills ? [
+          { name: 'WORKPARTNER_SHARED_SKILLS', value: o.sharedSkills.container },
+          { name: 'WORKPARTNER_MARKET_PREINSTALLED', value: JSON.stringify(o.sharedSkills.preinstalled) },
+        ] : []),
         ...(modelConfig ? [{ name: 'WORKPARTNER_MODEL_CONFIG', value: modelConfig }] : []),
         { name: 'WORKPARTNER_PUBLISHED_DIR', value: publishedDirectory },
       ];

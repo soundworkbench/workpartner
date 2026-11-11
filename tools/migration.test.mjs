@@ -183,8 +183,9 @@ test('preparation skips foreign users at startup and after a live ownership chan
   const services = await createGatewayServices({ organization, runtime, migration: f.migration, SESSION_KEY: 'fixture-key', users: () => [user], userFor: () => ({}), aionui: {} });
   t.after(() => services.close());
   assert.deepEqual(calls, []);
-  f.write({ user1: 'k8s' }); await services.prepareNextFeishu(user); assert.equal(calls.length, 1);
-  f.write(); await services.prepareNextFeishu(user); assert.equal(calls.length, 1);
+  f.write({ user1: 'k8s' }); await services.prepareNextFeishu(user);
+  assert.deepEqual(calls.map(([, files]) => files[0].path), ['.zp-market-token', '.zp-preview-relay-key']);
+  f.write(); await services.prepareNextFeishu(user); assert.equal(calls.length, 2);
 });
 
 test('Feishu maintenance and token refresh only operate on owned users, including revocations', async t => {

@@ -38,6 +38,14 @@ export function organizationData(environment = process.env) {
   if (dnsNdots !== undefined && (!Number.isInteger(dnsNdots) || dnsNdots < 1 || dnsNdots > 15)) {
     throw new Error('runtime.k8s.dnsNdots must be an integer from 1 to 15');
   }
+  const market = data.market;
+  for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {
+    if (!Array.isArray(market[key]) || market[key].some(value => typeof value !== 'string' || !value)) throw new Error(`Invalid market.${key}`);
+  }
+  for (const key of ['sharedDirectory', 'containerDirectory']) {
+    if (typeof market[key] !== 'string' || !/^\/[a-zA-Z0-9_/-]+$/.test(market[key]) || market[key].split('/').includes('..') || market[key] === '/') throw new Error(`Invalid market.${key}`);
+  }
+  if (market.preinstalled.some(name => !/^[a-z0-9][a-z0-9-]{0,63}$/.test(name))) throw new Error('Invalid market.preinstalled');
   return { ...data, directory };
 }
 
