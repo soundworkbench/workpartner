@@ -1198,7 +1198,6 @@
     m.setAttribute('aria-label', t('settings'));
     var status = document.createElement('div'); status.className = 'wp-settings-status'; status.setAttribute('role', 'status');
     function appendLogout() {
-      if (window.wpFeishuAuth) window.wpFeishuAuth.appendMenu(m);
       var sep = document.createElement('div'); sep.className = 'wp-pick-sep'; m.appendChild(sep);
       var logout = document.createElement('button'); logout.type = 'button'; logout.className = 'wp-pick-item';
       logout.setAttribute('role', 'menuitem'); text(logout, t('logout'));
