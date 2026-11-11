@@ -46,4 +46,23 @@ export function installPreviewClient({ previewHost, scope }) {
     target.searchParams.set("path", url.pathname + url.search + url.hash);
     detail.url = target.href;
   });
+  // The web UI opens links with anchors or window.open; both would reach the viewer's own loopback.
+  const previewUrl = (value) => {
+    const detail = { url: String(value) };
+    document.dispatchEvent(new CustomEvent("zp-preview-url", { detail }));
+    return detail.url;
+  };
+  const openLink = (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+    if (!link) return;
+    const target = previewUrl(link.href);
+    if (target === link.href) return;
+    link.href = target; link.target = "_blank"; link.rel = "noopener noreferrer";
+  };
+  document.addEventListener("click", openLink, true);
+  document.addEventListener("auxclick", openLink, true);
+  const open = window.open;
+  window.open = function (url, ...rest) {
+    return open.call(this, url === undefined || url === null || url === "" ? url : previewUrl(url), ...rest);
+  };
 }

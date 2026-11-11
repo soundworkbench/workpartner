@@ -469,6 +469,8 @@ web_js = Path(overlay, 'wp-web-tools.js').read_text()
 feishu_js = open(os.path.join(overlay, 'wp-feishu.js'), encoding='utf8').read() if skin['bridgeEnabled'] else '/* Messaging bridge is disabled for this organization. */\n'
 # 覆盖层文件名不带 hash：引用处加内容版本号，浏览器里缓存的旧覆盖层换版本后不会再被用到。
 ver = hashlib.sha256((css + pet_js + smooth + js + feishu_js + web_js + module_version).encode()).hexdigest()[:10]
+# The gateway serves the preview link adapter (an empty script when preview is disabled).
+s = s.replace('</head>', '    <script src="/_wp/preview/client.js"></script>\n  </head>')
 s = s.replace('</head>', f'    <script src="./wp-web-tools.js?v={ver}"></script>\n  </head>')
 s = s.replace('</head>', f'    <link rel="stylesheet" href="./wp-overlay.css?v={ver}" />\n    <script src="./wp-pet.js?v={ver}"></script>\n    <script src="./wp-smooth.js?v={ver}"></script>\n    <script src="./wp-overlay.js?v={ver}"></script>\n    <script src="./wp-feishu.js?v={ver}"></script>\n  </head>')
 open(p, 'w', encoding='utf8').write(s)

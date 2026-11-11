@@ -268,6 +268,10 @@ const server = http.createServer(async (req, res) => {
     if (await dataTools(req, res, url)) return;
     if ((!user || migration.owns(user)) && await legacy?.handle(req, res, url)) return;
     if (await preview?.handle(req, res, url)) return;
+    if (!preview && url.pathname === "/_wp/preview/client.js") {
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
+      return res.end("// Workspace preview is disabled.");
+    }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
     if (await feishu?.handle(req, res, url)) return;

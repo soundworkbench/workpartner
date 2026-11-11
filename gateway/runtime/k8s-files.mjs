@@ -1,6 +1,6 @@
 import { workspaceName } from './k8s-exec.mjs';
+import { defaultPublishedFiles } from './published-files.mjs';
 
-const defaultPublishedFiles = ['.zp-market-token', '.wp-feishu-cli.json', '.zp-preview-relay-key'];
 const defaultLeaseTtlMs = 30 * 60 * 1000;
 // Docker reads have no cap. Limit K1 output to 16 MiB, including base64 and JSON overhead.
 const maxReadOutputBytes = 16 * 1024 * 1024;

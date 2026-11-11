@@ -175,6 +175,9 @@ function context(organization) {
       Boolean(quantity) && Number(quantity[1]) > 0);
   }
   check('runtime.k8s.deploy.gatewayImage', typeof deploy.gatewayImage === 'string' && !/\s/.test(deploy.gatewayImage));
+  const gatewayEnvFrom = deploy.gatewayEnvFrom ?? [];
+  check('runtime.k8s.deploy.gatewayEnvFrom (expected an array of distinct Secret names)',
+    Array.isArray(gatewayEnvFrom) && gatewayEnvFrom.every(dnsName) && new Set(gatewayEnvFrom).size === gatewayEnvFrom.length);
   check('runtime.k8s.deploy.newUserStorage.provisioner',
     typeof storage.provisioner === 'string' && /^[a-z0-9][a-z0-9./-]*$/.test(storage.provisioner));
   check('runtime.k8s.deploy.newUserStorage.parameters', stringMap(storage.parameters ?? {}));
@@ -235,7 +238,7 @@ function context(organization) {
     gatewayName: gateway.name, gatewayEntryName: `${gateway.name}-entry`,
     gatewayPriorityClass: `${systemNamespace}-gateway`, gatewayNodeSelector,
     gatewayImage: deploy.gatewayImage, gatewayPort: runtime.gatewayPort, internalPort: runtime.internalPort,
-    gatewayContainerPorts, gatewayResources,
+    gatewayContainerPorts, gatewayResources, gatewayEnvFrom,
     gatewayServicePorts: gatewayContainerPorts.map(item => ({
       name: item.name, protocol: item.protocol, port: item.containerPort, targetPort: item.containerPort,
     })),
@@ -286,12 +289,13 @@ export function renderManifests(organization, { only } = {}) {
     });
     return rendered.split(/^---\s*$/m).map(document => JSON.parse(document));
   }).filter(object => selected.includes(object.kind.toLowerCase()));
-  if (values.sharedSkills) {
-    const pod = objects.find(object => object.kind === 'Deployment' && object.metadata.name === values.gatewayName)?.spec.template.spec;
-    if (pod) {
-      pod.volumes.push({ name: 'shared-skills', persistentVolumeClaim: { claimName: values.sharedSkills.claim } });
-      pod.containers[0].volumeMounts.push({ name: 'shared-skills', mountPath: values.sharedSkills.directory });
-    }
+  const gatewayPod = objects.find(object => object.kind === 'Deployment' && object.metadata.name === values.gatewayName)?.spec.template.spec;
+  if (gatewayPod && values.gatewayEnvFrom.length) {
+    gatewayPod.containers[0].envFrom = values.gatewayEnvFrom.map(name => ({ secretRef: { name } }));
+  }
+  if (gatewayPod && values.sharedSkills) {
+    gatewayPod.volumes.push({ name: 'shared-skills', persistentVolumeClaim: { claimName: values.sharedSkills.claim } });
+    gatewayPod.containers[0].volumeMounts.push({ name: 'shared-skills', mountPath: values.sharedSkills.directory });
   }
   return { objects, warnings: values.warnings };
 }
@@ -326,6 +330,8 @@ sessionKeyFile, cookieFile, identity.appSecretFile and migration.ownersFile (whe
 is configured) must be below runtime.secureDirectory or runtime.stateDirectory.
 hostPort entry mismatches warn on stderr: the tunnel targets runtime.localAddress.
 runtime.k8s.gatewayResources optionally sets cpu/memory (default 500m/512Mi; requests = limits).
+runtime.k8s.deploy.gatewayEnvFrom optionally lists Secrets in systemNamespace whose keys become gateway
+environment variables (for example the dataTools.provider variables); create them before applying.
 The gateway image must include K1/K2/K3 and be imported onto its selected node first.
 Only rendered objects are written; no credentials are read and no cluster is contacted.
 Apply the ConfigMap only for initial registration; later use --only to exclude ConfigMap

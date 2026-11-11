@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { defaultPublishedFiles } from './published-files.mjs';
 
 const partOf = { 'app.kubernetes.io/part-of': 'workpartner' };
 const dnsLabel = value => typeof value === 'string' && value.length <= 63 && /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/.test(value);
@@ -34,7 +35,7 @@ export function createK8sRuntime(o = {}) {
   const uid = o.uid ?? 1001, port = o.port ?? 25808;
   if (!Number.isInteger(uid) || uid <= 0) throw new Error('runtime.uid must be a non-root integer');
   const publishedDirectory = o.publishedDirectory ?? '/run/workpartner/published';
-  const publishedFiles = o.publishedFiles ?? ['.zp-market-token', '.wp-feishu-cli.json', '.zp-preview-relay-key'];
+  const publishedFiles = o.publishedFiles ?? defaultPublishedFiles;
   const timeoutMs = o.podStartTimeoutMs ?? 120000;
   const gracePeriodSeconds = o.terminationGraceSeconds ?? 10;
   const cacheMs = o.inspectCacheMs ?? 2000;
