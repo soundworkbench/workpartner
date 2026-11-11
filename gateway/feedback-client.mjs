@@ -164,7 +164,7 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
 .wp-feedback-dialog .wp-feedback-secondary, .wp-feedback-dialog .wp-feedback-entry { background:var(--wp-hover, #eee); color:var(--wp-ink, #222); }
 .wp-feedback-dialog .wp-feedback-secondary:hover, .wp-feedback-dialog .wp-feedback-entry:hover { background:var(--wp-active, #ddd); }
 .wp-feedback-dialog :focus-visible { outline:2px solid var(--wp-focus-line, #888); outline-offset:2px; }
-.wp-feedback-dialog .wp-feedback-close { position:absolute; right:12px; top:10px; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-2, #666); }
+.wp-feedback-dialog .wp-feedback-close { position:absolute; right:12px; top:10px; z-index:1; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-2, #666); }
 .wp-feedback-dialog .wp-feedback-close:hover { background:var(--wp-hover, #eee); }
 .wp-feedback-dialog a { color:var(--wp-ink, #222); }
 .wp-feedback-loading { color:var(--wp-ink-3, #777); }
@@ -268,7 +268,7 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
       row.append(ui.listTitle, ui.scope, ui.refresh); ui.list = node('div', undefined, 'wp-feedback-list'); ui.message = message();
       listSection.append(row, ui.list, ui.message); ui.detail = node('section'); ui.detail.id = 'wp-feedback-detail'; ui.detail.hidden = true;
       ui.content = node('div', undefined, 'wp-feedback-content');
-      ui.content.append(title, introduction, draft, listSection, ui.detail); dialog.append(ui.content, close); document.body.append(dialog);
+      ui.content.append(title, introduction, draft, listSection, ui.detail); dialog.append(close, ui.content); document.body.append(dialog);
       dialog.addEventListener('click', safe(event => {
         if (event.target !== dialog) return;
         const r = dialog.getBoundingClientRect();
@@ -343,9 +343,9 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
       } finally {
         draftBusy = false; controls();
         const version = detailVersion;
-        await list();
+        const listed = await list();
         // Render the refreshed list first: changing its height moves the detail below it.
-        if (savedKey && version === detailVersion) await openDetail(savedKey, true);
+        if (listed && savedKey && version === detailVersion) await openDetail(savedKey, true);
       }
     }
     async function openDetail(key, scroll = false) {
@@ -442,7 +442,7 @@ html[data-theme="dark"] .wp-feedback-dialog { color-scheme:dark; }
         }));
         section.append(form);
         if (scroll) reveal(section);
-        heading.focus({ preventScroll: true });
+        if (scroll || !dialog.contains(document.activeElement)) heading.focus({ preventScroll: true });
       } catch (error) { if (version === detailVersion && !revoked) { clear(); ui.message.textContent = error.message; reveal(ui.message); } }
     }
     const init = safe(async () => {

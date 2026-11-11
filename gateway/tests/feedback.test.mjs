@@ -722,6 +722,61 @@ test('handler scope, literal API text, comment errors and refresh preserve draft
   await dialog.fire('click', { clientX: 0, clientY: 0 }); assert.equal(dialog.open, false);
 });
 
+test('same-item refresh preserves focus on the list refresh button', async () => {
+  const item = browserItem();
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async url =>
+    url.includes('/items/') ? { item, canUpload: true } : { items: [item], isHandler: false } });
+  await b.ready(); const dialog = b.document.querySelector('dialog'), detail = dialog.querySelector('#wp-feedback-detail');
+  const refresh = buttonWith(dialog, '刷新'), heading = detail.querySelector('h3');
+  refresh.focus();
+  await refresh.fire('click'); await b.tick();
+  assert.deepEqual(b.reads.slice(-2).map(r => r.url), [base, base + '/items/item1']);
+  assert.notEqual(detail.querySelector('h3'), heading, 'detail must finish rendering');
+  assert.equal(b.document.activeElement, refresh);
+});
+
+test('successful comment refresh focuses the detail heading after focus falls to the body', async () => {
+  const item = browserItem();
+  const b = browser({ href: origin + '/?wp-feedback=item1', request: async (url, options) => {
+    if (options.method === 'POST') {
+      assert.equal(url, base + '/items/item1/comments');
+      item.comments.push({ text: JSON.parse(options.body).text, by: { name: 'User' }, at: item.createdAt });
+      return { item };
+    }
+    return url.includes('/items/') ? { item, canUpload: true } : { items: [item], isHandler: false };
+  } });
+  await b.ready(); const detail = b.document.querySelector('#wp-feedback-detail'), form = detail.querySelector('form');
+  const area = form.querySelector('textarea'); area.value = 'New comment'; await area.fire('input'); area.focus();
+  const submitting = form.fire('submit');
+  assert.equal(area.disabled, true);
+  // Model the browser moving focus to the body when the focused control is disabled.
+  b.document.body.focus();
+  await submitting; await b.tick();
+  assert.deepEqual(b.reads.slice(-3).map(r => r.url), [base + '/items/item1/comments', base, base + '/items/item1']);
+  assert.equal(detail.querySelector('textarea').value, ''); assert.match(detail.textContent, /New comment/);
+  const heading = detail.querySelector('h3');
+  assert.equal(b.document.activeElement, heading); assert.equal(heading.focusOptions.preventScroll, true);
+});
+
+test('successful submission preserves a failed list refresh message without opening detail', async () => {
+  const item = browserItem(); let saved = false;
+  const b = browser({ language: 'en-US', request: async (url, options) => {
+    if (options.method === 'POST') { saved = true; return { item }; }
+    if (url === base) return saved ? { status: 500, error: 'List refresh failed' } : { items: [], isHandler: false };
+    return { item, canUpload: true };
+  } });
+  await b.ready(); const dialog = await b.open(), form = dialog.querySelector('form');
+  const title = form.querySelector('#wp-feedback-title'), body = form.querySelector('#wp-feedback-body');
+  title.value = 'New feedback'; body.value = 'Description'; form.querySelector('select').value = 'feature';
+  await form.fire('submit'); await b.tick();
+  assert.match(form.textContent, /Feedback submitted\./);
+  assert.ok(dialog.querySelectorAll('.wp-feedback-message').some(n => n.textContent === 'List refresh failed'));
+  assert.deepEqual(b.reads.map(r => [r.options.method, r.url]), [['GET', base], ['POST', base], ['GET', base]]);
+  assert.equal(dialog.querySelector('#wp-feedback-detail').hidden, true);
+  assert.equal(title.value, ''); assert.equal(body.value, ''); assert.equal(form.querySelector('select').value, 'bug');
+  assert.equal(form.querySelector('fieldset').disabled, false);
+});
+
 test('a detail refresh started before a write cannot replace the busy editor or lose its draft', async () => {
   for (const action of ['comment', 'upload']) {
     let releaseGet, releasePost, detailReads = 0;
@@ -1105,6 +1160,7 @@ test('close stays outside the content scroller and disabled image pickers use a 
   const b = browser(); await b.ready(); const dialog = await b.open();
   const close = dialog.querySelector('.wp-feedback-close'), content = dialog.querySelector('.wp-feedback-content');
   assert.ok(content); assert.equal(close.parentNode, dialog); assert.equal(content.contains(close), false);
+  assert.equal(dialog.children[0], close);
   assert.ok(content.contains(dialog.querySelector('form')));
   const css = b.document.head.querySelector('style').textContent;
   assert.match(css, /\.wp-feedback-dialog \{[^}]*overflow:hidden;[^}]*padding:0;/);
