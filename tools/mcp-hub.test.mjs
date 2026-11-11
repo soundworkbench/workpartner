@@ -1,0 +1,139 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { once } from 'node:events';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { hubConfig, listHubTools } from '../gateway/organization/mcp-hub.mjs';
+import { createMarketTools } from '../gateway/market-tools.mjs';
+
+async function server(t, handler) {
+  const service = http.createServer(handler);
+  service.listen(0, '127.0.0.1'); await once(service, 'listening');
+  t.after(() => { service.closeAllConnections(); service.close(); });
+  return `http://127.0.0.1:${service.address().port}/mcp`;
+}
+function temporary(t) { const dir = mkdtempSync(join(tmpdir(), 'mcp-check-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; }
+const key = 'test-person-secret';
+
+test('root hub discovery preserves 12 tool names, session, auth, pagination and SSE', async t => {
+  const seen = [];
+  const url = await server(t, async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const message = JSON.parse(Buffer.concat(chunks)); seen.push(message.method);
+    assert.equal(req.url, '/mcp'); assert.equal(req.headers.authorization, `Bearer ${key}`);
+    if (message.method !== 'initialize') assert.equal(req.headers['mcp-session-id'], 'probe-session');
+    if (message.method === 'notifications/initialized') { res.writeHead(202); res.end(); return; }
+    const result = message.method === 'initialize' ? { protocolVersion: '2025-03-26', capabilities: { tools: {} } }
+      : { tools: Array.from({ length: 6 }, (_, i) => ({ name: `server__tool_${i + (message.params.cursor ? 6 : 0)}`, description: 'One line' })),
+          ...(message.params.cursor ? {} : { nextCursor: 'second' }) };
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Mcp-Session-Id': 'probe-session' });
+    // Keep the SSE response open: discovery must finish on its matching JSON-RPC frame.
+    res.write(`event: message\r\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\r\n\r\n`);
+  });
+  const rows = await listHubTools(hubConfig({ url, keyEnvironment: 'PERSON_KEY' }), key);
+  assert.equal(rows.length, 12); assert.equal(rows[11].name, 'server__tool_11');
+  assert.deepEqual(seen, ['initialize', 'notifications/initialized', 'tools/list', 'tools/list']);
+});
+
+test('disabled hub does no network work; forbidden and stalled hubs are bounded', async t => {
+  const absent = await listHubTools(null, key, { fetch() { assert.fail('no network'); } }); assert.deepEqual(absent, []);
+  let forbidden = true;
+  const url = await server(t, (req, res) => { if (forbidden) { res.writeHead(403); res.end(key); } });
+  await assert.rejects(listHubTools({ url }, key), /^Error: MCP hub denied$/);
+  forbidden = false;
+  await assert.rejects(listHubTools({ url }, key, { timeoutMs: 50 }), { name: 'TimeoutError' });
+  assert.throws(() => hubConfig({ url: 'https://user:secret@example.com/mcp', keyEnvironment: 'PERSON_KEY' }));
+  assert.throws(() => hubConfig({ url: 'https://example.com/mcp?key=secret', keyEnvironment: 'PERSON_KEY' }));
+});
+
+test('managed configuration is repeatable, preserves personal bytes, removes stale entries and never stores key', t => {
+  const home = temporary(t); mkdirSync(join(home, '.codex'));
+  const personalToml = '# personal bytes\nmodel = "my-model"\n[mcp_servers.personal]\ncommand = "mine"\n';
+  const personalJson = '{\n "theme" : "dark", "mcpServers" : { "personal" : {"type":"stdio", "command":"mine"} }, "tail" : [1, 2] }\n';
+  writeFileSync(join(home, '.codex/config.toml'), personalToml); writeFileSync(join(home, '.claude.json'), personalJson);
+  const config = { name: 'workpartner-hub', url: 'https://example.com/mcp', keyEnvironment: 'PERSON_KEY' };
+  const run = (enabled, selected = config) => {
+    const result = spawnSync('python3', ['-I', 'image/bin/wp-mcp-config.py'], { input: JSON.stringify({ home, config: selected, enabled }), env: { ...process.env, PERSON_KEY: key }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return [readFileSync(join(home, '.codex/config.toml'), 'utf8'), readFileSync(join(home, '.claude.json'), 'utf8')];
+  };
+  const first = run(true); assert.deepEqual(run(true), first);
+  assert.ok(first[0].startsWith(personalToml));
+  assert.ok(first[1].includes('"personal" : {"type":"stdio", "command":"mine"}'));
+  assert.ok(first[1].includes('"theme" : "dark"')); assert.ok(first[1].includes('"tail" : [1, 2]'));
+  assert.ok(!first.join('').includes(key));
+  const claude = JSON.parse(first[1]); assert.equal(claude.mcpServers['workpartner-hub'].alwaysLoad, true);
+  assert.ok(claude.mcpServers['workpartner-hub'].headersHelper.endsWith(' PERSON_KEY'));
+  const renamed = run(true, { ...config, name: 'new-hub' }); assert.ok(!renamed.join('').includes('workpartner-hub'));
+  const removed = run(false, null); assert.equal(removed[0], personalToml);
+  assert.deepEqual(JSON.parse(removed[1]), JSON.parse(personalJson)); assert.deepEqual(run(false, null), removed);
+  // A conflicting personal entry in either engine prevents changes to both.
+  writeFileSync(join(home, '.claude.json'), '{"mcpServers":{"workpartner-hub":{"command":"personal"}}}');
+  const result = spawnSync('python3', ['-I', 'image/bin/wp-mcp-config.py'], { input: JSON.stringify({ home, config, enabled: true }), encoding: 'utf8' });
+  assert.equal(result.status, 1); assert.ok(!result.stderr.includes(key)); assert.equal(readFileSync(join(home, '.codex/config.toml'), 'utf8'), personalToml);
+});
+
+test('dynamic header helper supplies only the environment credential to Claude', () => {
+  const result = spawnSync('python3', ['-I', 'image/bin/wp-mcp-headers.py', 'PERSON_KEY'], { env: { ...process.env, PERSON_KEY: key }, encoding: 'utf8' });
+  assert.equal(result.status, 0); assert.deepEqual(JSON.parse(result.stdout), { Authorization: `Bearer ${key}` }); assert.equal(result.stderr, '');
+});
+
+test('market is authenticated, read-only, personal, localized, sanitized and uncached', async t => {
+  const directory = temporary(t);
+  writeFileSync(join(directory, 'labels.json'), JSON.stringify({ server__tool: { zh: { name: '工具名称', description: '一句话说明' }, en: { name: 'Tool name', description: 'One line' } } }));
+  let keys = [];
+  const route = createMarketTools({ organization: { directory, mcpHub: { url: 'https://example.com/mcp', keyEnvironment: 'PERSON_KEY', displayNames: 'labels.json' } },
+    authenticate: req => req.headers['x-test-user'] ? { slug: req.headers['x-test-user'] } : null,
+    keyFor: user => `secret-${user.slug}`,
+    discover: async (config, token) => { keys.push(token); if (token === 'secret-denied') throw new Error('MCP hub denied'); if (token === 'secret-error') throw new Error(token);
+      return [{ name: 'server__tool', description: 'raw' }, { name: 'server__fallback', description: `First line ${token}\nSecond line`, inputSchema: { secret: token } }]; } });
+  const base = await server(t, async (req, res) => { if (!await route(req, res, new URL(req.url, 'http://local'))) { res.writeHead(404); res.end(); } });
+  const request = (user, method = 'GET') => fetch(base.replace('/mcp', '/_wp/market/tools'), { method, headers: user ? { 'x-test-user': user } : {} });
+  assert.equal((await request()).status, 401); assert.equal((await request('one', 'POST')).status, 405); assert.deepEqual(keys, []);
+  const first = await request('one'); assert.equal(first.headers.get('cache-control'), 'no-store');
+  const text = await first.text(), data = JSON.parse(text);
+  assert.equal(data.tools[0].title.zh, '工具名称'); assert.equal(data.tools[0].title.en, 'Tool name');
+  assert.equal(data.tools[1].title.en, 'server__fallback'); assert.equal(data.tools[1].description.en, 'First line [redacted]');
+  assert.ok(!text.includes('secret-one')); assert.ok(!text.includes('inputSchema')); assert.ok(!text.includes('Second line'));
+  await request('two'); assert.deepEqual(keys, ['secret-one', 'secret-two']);
+  assert.deepEqual(await (await request('denied')).json(), { tools: [] });
+  assert.deepEqual(await (await request('error')).json(), { error: 'temporarily_unavailable' });
+});
+
+test('assembled image starts discovery, then removes entries after denial without storing credentials', async t => {
+  const { materializeNext } = await import('../gateway/organization/materialize-next.mjs');
+  const { cpSync } = await import('node:fs');
+  const directory = temporary(t), context = join(directory, 'context'), home = join(directory, 'home'), org = join(directory, 'org');
+  mkdirSync(join(context, 'image'), { recursive: true }); mkdirSync(home); mkdirSync(org);
+  cpSync(new URL('../image/bin', import.meta.url), join(context, 'image/bin'), { recursive: true });
+  cpSync(new URL('../image/home', import.meta.url), join(context, 'image/home'), { recursive: true });
+  let authorized = true;
+  const url = await server(t, async (req, res) => {
+    if (!authorized) { res.writeHead(403); res.end(); return; }
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const message = JSON.parse(Buffer.concat(chunks));
+    res.setHeader('Content-Type', 'application/json');
+    if (message.method === 'notifications/initialized') { res.writeHead(202); res.end(); return; }
+    const result = message.method === 'initialize' ? { protocolVersion: '2025-03-26' } : { tools: [{ name: 'server__tool' }] };
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+  });
+  writeFileSync(join(org, 'organization.json'), JSON.stringify({ mcpHub: { url, keyEnvironment: 'PERSON_KEY' } }));
+  // Neutral assets remain organization-owned inputs, copied here only for this disposable assembly.
+  cpSync(new URL('../org/default/appearance', import.meta.url), join(org, 'appearance'), { recursive: true });
+  materializeNext(context, { WORKPARTNER_ORG_DIR: org });
+  cpSync(join(context, 'organization'), join(context, 'image/organization'), { recursive: true });
+  const { spawn } = await import('node:child_process');
+  async function start() {
+    const child = spawn(process.execPath, [join(context, 'image/bin/wp-mcp-start.mjs')], {
+      env: { ...process.env, HOME: home, WORKPARTNER_ORG_DIR: join(context, 'organization/selected'), PERSON_KEY: key }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = ''; child.stdout.on('data', value => { output += value; }); child.stderr.on('data', value => { output += value; });
+    assert.equal((await once(child, 'exit'))[0], 0); assert.ok(!output.includes(key)); return output;
+  }
+  await start(); const first = readFileSync(join(home, '.claude.json'), 'utf8'); await start(); assert.equal(readFileSync(join(home, '.claude.json'), 'utf8'), first);
+  authorized = false; assert.match(await start(), /disabled/);
+  assert.ok(!readFileSync(join(home, '.codex/config.toml'), 'utf8').includes('mcp_servers'));
+  assert.deepEqual(JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8')).mcpServers, {});
+});

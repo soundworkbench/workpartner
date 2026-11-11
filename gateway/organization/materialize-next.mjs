@@ -19,7 +19,7 @@ export function materializeNext(context, environment = process.env) {
   const home = join(context, 'image/home');
   const selected = join(context, 'organization/selected');
   mkdirSync(selected, { recursive: true });
-  for (const name of ['resolve.mjs', 'default.json']) cpSync(new URL(name, import.meta.url), join(context, 'organization', name));
+  for (const name of ['resolve.mjs', 'default.json', 'mcp-hub.mjs']) cpSync(new URL(name, import.meta.url), join(context, 'organization', name));
   const { directory, ...release } = data;
   const catalog = loadDataTools(data);
   const previousFile = join(selected, 'organization.json');

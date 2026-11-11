@@ -456,6 +456,7 @@ css = open(os.path.join(overlay, 'wp-overlay.css'), encoding='utf8').read().repl
 js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
 js = js.replace('__WP_CHAT_MODULE__', chat_modules[0]).replace('__WP_CHAT_STYLES__', json.dumps(chat_styles))
 js += '\n' + Path(overlay, 'wp-skills.js').read_text()
+js += '\n' + Path(overlay, 'wp-tools.js').read_text()
 js += '\n' + Path(overlay, 'wp-data-tools.js').read_text()
 skills_zh = json.loads(Path(overlay, '..', '..', 'skills-zh.json').read_text())
 js += '\n' + Path(overlay, 'wp-slash-skills.js').read_text().replace('__WP_SKILLS_ZH__', json.dumps(skills_zh, ensure_ascii=False))

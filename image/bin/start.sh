@@ -55,6 +55,9 @@ if ! instructions_error=$(python3 -I /opt/workpartner/bin/wp-sync-instructions.p
   printf '警告：%s；继续启动，下次启动重试。\n' "$instructions_error" >&2
 fi
 
+# MCP discovery has a three-second total deadline; failures do not block startup.
+node /opt/workpartner/bin/wp-mcp-start.mjs || echo "Managed MCP setup unavailable; startup continues." >&2
+
 . /opt/workpartner/bin/wp-init-hooks.sh
 wp_ensure_srv_directory
 wp_init_hooks
