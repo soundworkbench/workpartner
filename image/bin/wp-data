@@ -1,12 +1,16 @@
 #!/usr/bin/python3
 """Discover and call external data tools through the gateway using the existing personal container identity."""
 import argparse
+import base64
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -14,6 +18,62 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def save_images(result, target):
+    """Materialize image results locally without forwarding gateway credentials."""
+    policy = result['fileResult']
+    result['files'] = []
+    rows = result['data']
+    for key in policy['path'].split('.') if policy['path'] else []:
+        rows = rows[key]
+    if not isinstance(rows, list):
+        rows = [rows]
+    if not rows or len(rows) > policy['maxFiles']:
+        raise ValueError('Invalid image count')
+    workspace = Path(os.environ.get('WORKPARTNER_WORKSPACE', '/data/work')).resolve()
+    directory = (workspace / 'outputs' / 'images').resolve()
+    if not directory.is_relative_to(workspace):
+        raise ValueError('Image directory is outside the workspace')
+    directory.mkdir(parents=True, exist_ok=True)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    for row in rows:
+        encoded = row.get(policy.get('base64Field'))
+        limit = policy['maxBytes']
+        if encoded:
+            if not isinstance(encoded, str) or len(encoded) > 4 * ((limit + 2) // 3):
+                raise ValueError('Image exceeds size limit')
+            content = base64.b64decode(encoded, validate=True)
+        else:
+            url = row[policy['urlField']]
+            parsed = urlsplit(url)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError('Invalid image URL')
+            # No personal or provider authorization headers are sent to image hosts.
+            with opener.open(url, timeout=60) as response:
+                if int(response.headers.get('Content-Length', 0)) > limit:
+                    raise ValueError('Image exceeds size limit')
+                content = response.read(limit + 1)
+        if len(content) > limit:
+            raise ValueError('Image exceeds size limit')
+        if content.startswith(b'\x89PNG\r\n\x1a\n'):
+            extension = 'png'
+        elif content.startswith(b'\xff\xd8\xff'):
+            extension = 'jpg'
+        elif content.startswith((b'GIF87a', b'GIF89a')):
+            extension = 'gif'
+        elif content.startswith(b'RIFF') and content[8:12] == b'WEBP':
+            extension = 'webp'
+        else:
+            raise ValueError('Unsupported image format')
+        slug = ''.join(c if c.isascii() and c.isalnum() else '-' for c in target)[:80]
+        name = datetime.now(timezone.utc).strftime('%Y-%m-%d') + '-' + slug + '-' + uuid4().hex[:12] + '.' + extension
+        destination = directory / name
+        with destination.open('xb') as output:
+            output.write(content)
+        result['files'].append(str(destination))
+    # Large base64 payloads must not flood agent context after the files are saved.
+    del result['data']
 
 
 def main(argv=None):
@@ -68,7 +128,14 @@ def main(argv=None):
                                      headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
-        with opener.open(request, timeout=80) as response:
+        timeout = 80
+        if args.action == 'call':
+            info_request = urllib.request.Request(base + '/_wp/data/info/' + args.target,
+                                                  headers={'Authorization': 'Bearer ' + token})
+            with opener.open(info_request, timeout=40) as response:
+                execution = json.load(response)['execution']
+            timeout = execution['timeoutMs'] / 1000 + 20
+        with opener.open(request, timeout=timeout) as response:
             result = json.load(response)
     except urllib.error.HTTPError as error:
         try:
@@ -78,6 +145,11 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
         return 1
     if args.action == 'call':
+        if result.get('fileResult'):
+            try:
+                save_images(result, args.target)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                result['fileError'] = '调用已完成，图片保存未完成。保留已保存的文件和花费，不要重新生图。 / Call completed; image saving failed. Keep saved files and cost; do not regenerate.'
         usage_request = urllib.request.Request(base + '/_wp/data/usage',
                                                headers={'Authorization': 'Bearer ' + token})
         try:
@@ -89,7 +161,7 @@ def main(argv=None):
             # The data call completed; a usage failure must never cause it to be repeated.
             result['usageError'] = '查询已完成，用量暂时无法读取。用 wp-data balance 核实，不要重试查询。 / Call completed; check wp-data balance without repeating the call.'
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    return 1 if result.get('fileError') else 0
 
 
 if __name__ == '__main__':

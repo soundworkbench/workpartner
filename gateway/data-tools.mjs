@@ -29,7 +29,7 @@ function micro(value) {
 export function dataRequest(ep, input) {
   if (ep.bodyArray && Array.isArray(input) && input.length === 1) input = input[0];
   if (!object(input)) throw fail(400, '参数必须是 JSON 对象 / Expected a JSON object');
-  const params = { ...input };
+  const params = { ...ep.defaults, ...input };
   for (const key of Object.keys(params)) {
     if (!Object.hasOwn(ep.parameters, key)) throw fail(403, '此参数未开放 / Parameter is not allowed');
   }
@@ -111,6 +111,9 @@ function liveDirectory(catalog, provider, fetcher) {
   function presentation(ep, callMaxUsd, task) {
     const example = catalog.tools.find(tool => tool.endpoints.some(row => row.id === ep.id));
     const exampleEndpoint = example?.endpoints.find(row => row.id === ep.id);
+    const prompt = exampleEndpoint?.example || example?.example || null;
+    const examplePrompt = prompt && exampleEndpoint?.defaults ? Object.fromEntries(['zh', 'en'].map(language => [language,
+      prompt[language] + '\n\n' + `wp-data call ${ep.id} --json '${JSON.stringify({ ...exampleEndpoint.template, ...exampleEndpoint.defaults }).replaceAll("'", "'\\''")}'`])) : prompt;
     const clean = value => {
       let text = String(value || '');
       for (const name of [...(policy.presentationRedactions || []), ep.provider, ep.provider_display].filter(Boolean)) {
@@ -131,7 +134,7 @@ function liveDirectory(catalog, provider, fetcher) {
       variable: cost.varies === true || cost.display?.variable === true || !!cost.modifiers,
     } : null;
     return { name: task?.id || ep.id, endpoint: ep.id, title: { zh: localized?.title || exampleEndpoint?.title?.zh || example?.title?.zh || title, en: exampleEndpoint?.title?.en || example?.title?.en || task?.description || title },
-      description: { zh: localized?.description || example?.description?.zh || description, en: description }, example: exampleEndpoint?.example || example?.example || null,
+      description: { zh: localized?.description || example?.description?.zh || description, en: description }, example: examplePrompt,
       price,
       recommended: !!example };
   }
@@ -180,7 +183,9 @@ function liveDirectory(catalog, provider, fetcher) {
   }
   async function info(id) {
     const ep = await endpoint(id), details = await read(pathFor('endpointPath', id));
-    return { endpoint: ep, example_response: details.example_response ?? null };
+    const example = catalog.tools.flatMap(tool => tool.endpoints).find(row => row.id === id || row.command === id);
+    return { endpoint: ep, example_response: details.example_response ?? null,
+      execution: { timeoutMs: example?.timeoutMs ?? 60000, defaults: example?.defaults || {}, fileResult: example?.fileResult || null } };
   }
   return { groups, list, search, endpoint, info };
 }
@@ -292,7 +297,7 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       }
       const info = /^\/_wp\/data\/info\/([a-zA-Z0-9_.-]+)$/.exec(url.pathname);
       if (directory && req.method === 'GET' && info && !url.search) {
-        json(res, 200, await directory.info(info[1])); return true;
+        json(res, 200, await directory.info(endpoints.get(info[1])?.id || info[1])); return true;
       }
       const match = /^\/_wp\/data\/call\/([a-zA-Z0-9_.-]+)$/.exec(url.pathname);
       if (!directory || req.method !== 'POST' || !match || url.search) throw fail(403, '此数据接口未开放 / Data endpoint is not allowed');
@@ -331,9 +336,10 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       try {
         response = await fetcher(new URL(path + (request.query ? '?' + request.query : ''), provider.origin), {
           method: ep.method, headers: callHeaders, ...(ep.method === 'POST' ? { body: JSON.stringify(request.body) } : {}),
-          redirect: 'error', signal: AbortSignal.timeout(60000),
+          redirect: 'error', signal: AbortSignal.timeout(ep.timeoutMs ?? 60000),
         });
-        result = JSON.parse((await bytes(response.body || [], 16 * 1024 * 1024)).toString());
+        result = JSON.parse((await bytes(response.body || [], ep.fileResult ? Math.min(64 * 1024 * 1024,
+          Math.ceil(ep.fileResult.maxBytes * 4 / 3) * ep.fileResult.maxFiles + 1024 * 1024) : 16 * 1024 * 1024)).toString());
       } catch (error) { throw fail(502, '调用结果未知，请核实用量，不要自动重试 / Outcome unknown; check usage before retrying'); }
       if (!response.ok) {
         const rawCode = result?.detail?.error || result?.error;
@@ -347,9 +353,11 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
           : '数据接口未返回结果，请检查参数或额度 / Check the parameters and data budget';
         throw fail(response.status === 429 || code?.startsWith('tag_') ? 429 : 502, message);
       }
+      // A queued acknowledgement is not a completed, chargeable result.
+      if (response.status === 202) throw fail(502, '任务尚未完成，请核实用量，不要自动重试 / Job pending; check usage and do not retry automatically');
       const cost = response.headers.get(headers.cost);
       json(res, 200, { data: result, costUsd: cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null,
-        callId: response.headers.get(headers.callId) });
+        callId: response.headers.get(headers.callId), ...(ep.fileResult ? { fileResult: ep.fileResult } : {}) });
     } catch (error) { json(res, error.status || 503, { error: error.status ? error.message : '数据服务暂不可用 / Data service unavailable' }); }
     return true;
   };
