@@ -45,7 +45,10 @@ test('neutral organizations expose no data tools; a selected table controls card
       const source = { ...ep, platform: 'measurements', kind: 'data', platform_eligible: true,
         name: 'Find measurements', summary: 'Find measurement data', cost: { usd: .01, unit: 'call' },
         input: { body: Object.fromEntries(Object.entries(ep.parameters).map(([key, rule]) => [key, rule])) } };
-      if (url.pathname === '/directory/platforms') return Response.json({ platforms: [{ slug: 'measurements', label: 'Measurements', category: 'Research' }] });
+      if (url.pathname === '/directory/platforms') return Response.json({ platforms: [
+        { slug: 'new-platform', label: 'New platform', category: 'Research' },
+        { slug: 'measurements', label: 'Measurements', category: 'Research' },
+      ] });
       if (url.pathname.startsWith('/directory/platforms/')) return Response.json({ platform: { slug: 'measurements' }, capabilities: [{ id: 'measurements.search', endpoints: [source] }] });
       if (url.pathname.startsWith('/directory/endpoints/')) return Response.json({ endpoint: source, example_response: { value: 42 } });
       if (url.pathname.startsWith('/usage/')) return Response.json({ key: 'user', rows: [
@@ -55,6 +58,8 @@ test('neutral organizations expose no data tools; a selected table controls card
       return new Response('{"rows":[{"value":42}]}', { headers: { 'x-data-cost': '10000', 'x-data-id': 'one' } });
     } });
   assert.equal((await fetch(base + '/_wp/data/tools')).status, 401);
+  const groups = await (await fetch(base + '/_wp/data/tools', { headers })).json();
+  assert.deepEqual(groups.groups[0].platforms.map(row => row.id), ['measurements', 'new-platform']);
   const cards = await (await fetch(base + '/_wp/data/catalog?platform=measurements', { headers })).json();
   assert.equal(cards.tools[0].title.en, 'Find measurements');
   assert.match(dataToolsSkill(catalog), /wp-data call example.measurements.search --json/);

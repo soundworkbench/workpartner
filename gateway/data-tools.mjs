@@ -137,6 +137,8 @@ function liveDirectory(catalog, provider, fetcher) {
   }
   async function groups() {
     const rows = await platforms();
+    const order = new Map(catalog.platforms.map((row, index) => [row.id, index]));
+    rows.sort((a, b) => (order.get(a.slug) ?? order.size) - (order.get(b.slug) ?? order.size));
     return catalog.categories.map(category => ({ name: category, platforms: rows.filter(row => row.category === category.en).map(row => ({
       id: row.slug, name: { en: row.label, zh: policy.platformNames[row.slug] || row.label }, summary: row.summary || '' })) }));
   }
