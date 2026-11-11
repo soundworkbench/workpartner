@@ -76,6 +76,11 @@ def template_upgrades(config, template, upgrades):
                         wanted.get(platform.get('type'), {}))
                        for i, project in enumerate(config.get('projects', []))
                        for j, platform in enumerate(project.get('platforms', []))]
+        elif table == ['projects', 'agent', 'options']:
+            # Every project takes the template project's agent options.
+            wanted = template.get('projects', [{}])[0].get('agent', {}).get('options', {})
+            targets = [(('projects', i, 'agent', 'options'), project.get('agent', {}).get('options', {}), wanted)
+                       for i, project in enumerate(config.get('projects', []))]
         else:
             current, source = config, template
             for part in table:
