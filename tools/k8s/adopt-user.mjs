@@ -605,7 +605,7 @@ export async function main(argv = process.argv.slice(2), injected = {}) {
       timeoutMs: organization.runtime.k8s?.apiTimeoutMs,
     });
     const createRuntime = injected.createRuntime ?? (await import('../../gateway/runtime/index.mjs')).createRuntime;
-    const modelConfig = injected.modelConfig ?? JSON.stringify(nextModelConfig(organization));
+    const modelConfig = injected.modelConfig ?? JSON.stringify(nextModelConfig(organization, {}, options.slug));
     return (await runAdopt(options, { ...injected, organization, users, client, createRuntime, modelConfig, log })).exitCode;
   } catch { log('FAILED to load command/configuration. NEXT: use --help and check organization, users, owners and JSON kubeconfig.'); return 1; }
 }

@@ -38,7 +38,7 @@ if (migration.kind === 'docker' && Object.keys(organization.runtime.k8s?.userIma
 const runtime = migration.guardRuntime(createRuntime(organization), users);
 const legacyRuntime = migration.kind === 'k8s' ? undefined : migration.guardRuntime(createLegacyRuntime(organization), users);
 const aionui = createAionui({
-  runtime, owns: migration.owns, kind: migration.kind, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
+  runtime, owns: migration.owns, kind: migration.kind, modelConfig: slug => nextModelConfig(organizationData(), {}, slug), image: organization.runtime.nextImage,
   userImages: migration.kind === 'k8s' ? organization.runtime.k8s?.userImages : undefined,
   uid: organization.runtime.uid, reconcileExclude: organization.runtime.k8s?.reconcileExclude,
   secretDir: `${organization.runtime.secureDirectory}/aionui`,

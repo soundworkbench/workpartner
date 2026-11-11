@@ -55,6 +55,15 @@ export function organizationData(environment = process.env) {
     throw new Error('runtime.k8s.reconcileExclude must be an array of nonempty user slugs');
   }
   quickLineModel(data.model.quickLineModel);
+  const userCatalog = data.model.userCatalog;
+  if (userCatalog !== undefined) {
+    if (!userCatalog || Object.getPrototypeOf(userCatalog) !== Object.prototype || Object.entries(userCatalog).some(([slug, added]) => !slug.trim()
+      || !added || Object.getPrototypeOf(added) !== Object.prototype
+      || Object.entries(added).some(([backend, entries]) => !['codex', 'claude'].includes(backend) || !Array.isArray(entries) || !entries.length))) {
+      throw new Error('model.userCatalog must be an object mapping nonempty user slugs to catalogs with nonempty codex or claude arrays');
+    }
+    for (const slug of Object.keys(userCatalog)) nextModelConfig(data, {}, slug);
+  }
   const upgradeKeys = data.bridge.upgradeKeys;
   if (upgradeKeys !== undefined && (!Array.isArray(upgradeKeys) || upgradeKeys.some(entry => !entry || typeof entry.key !== 'string'
     || !/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/.test(entry.key)
@@ -76,8 +85,8 @@ export function organizationData(environment = process.env) {
   return { ...data, directory };
 }
 
-/** Model defaults and optional catalog entries, shared by gateway and image startup. */
-export function nextModelConfig(data, environment = {}) {
+/** Model defaults and optional catalog entries, shared by gateway and image startup; slug appends that user's model.userCatalog entries. */
+export function nextModelConfig(data, environment = {}, slug) {
   const selected = environment.WORKPARTNER_MODEL_CONFIG
     ? JSON.parse(environment.WORKPARTNER_MODEL_CONFIG) : { defaults: data.model.defaults, catalog: data.model.catalog, quickLineModel: data.model.quickLineModel };
   const defaults = { ...selected.defaults };
@@ -88,11 +97,13 @@ export function nextModelConfig(data, environment = {}) {
   for (const name of ['codex', 'claude', 'opus', 'sonnet', 'haiku', 'effort', 'language', 'claudePrefix']) {
     if (typeof defaults?.[name] !== 'string' || !defaults[name] || /[\r\n]/.test(defaults[name])) throw new Error(`Invalid model.defaults.${name}`);
   }
+  // An injected configuration already carries the user's entries.
+  const added = environment.WORKPARTNER_MODEL_CONFIG || slug === undefined ? undefined : data.model.userCatalog?.[slug];
   const catalog = {};
   for (const backend of ['codex', 'claude']) {
     const entries = selected.catalog?.[backend] || [{ default: backend, also: ['default'] }];
     if (!Array.isArray(entries) || !entries.length) throw new Error(`Invalid model.catalog.${backend}`);
-    catalog[backend] = entries.map(entry => {
+    catalog[backend] = [...entries, ...(added?.[backend] || [])].map(entry => {
       const key = entry.default ? defaults[entry.default] : entry.key;
       const id = entry.id || key;
       if (typeof key !== 'string' || !key || typeof id !== 'string' || !id
