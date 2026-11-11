@@ -97,7 +97,7 @@
           return rows.map(function (tool) { return Object.assign({}, tool, { platform: platform }); });
         }));
         if (disposed || current !== revision) return;
-        tools = results.flat().sort(function (a, b) { return Number(b.recommended) - Number(a.recommended); });
+        tools = results.flat();
         visible = 0; status.textContent = tools.length ? '' : copy.empty; appendCards();
       } catch (error) { if (!disposed && current === revision) { status.textContent = copy.failed; retry.hidden = false; } }
     }
