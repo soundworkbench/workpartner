@@ -1,6 +1,8 @@
 /** Category-based data gateway. Provider details and request policies belong to organization data. */
 import fs from 'node:fs';
-import { loadDataTools } from './organization/data-tools.mjs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadDataTools, parseDataTools } from './organization/data-tools.mjs';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -8,6 +10,21 @@ const json = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
 };
+/** Dollar amounts as people read them: sub-cent values keep up to 4 significant digits, others 2–4 decimals so a sub-cent spend stays visible. */
+export function formatUsd(value) {
+  const amount = Math.round(value * 1e6) / 1e6;
+  if (amount > 0 && amount < .01) return '$' + String(Number(amount.toPrecision(4)));
+  return '$' + amount.toFixed(4).replace(/0{1,2}$/, '');
+}
+/** One line per language shared by the Tools tab wording, `wp-data balance` and agent replies. */
+export function usageSummary(usage) {
+  const part = ({ usedUsd, limitUsd }) => [formatUsd(usedUsd), formatUsd(Math.max(0, limitUsd - usedUsd)), formatUsd(limitUsd)];
+  const [dailyUsed, dailyLeft, dailyLimit] = part(usage.daily), [monthlyUsed, monthlyLeft, monthlyLimit] = part(usage.monthly);
+  return {
+    zh: `今天已用 ${dailyUsed} · 剩余 ${dailyLeft} / ${dailyLimit}；本月已用 ${monthlyUsed} · 剩余 ${monthlyLeft} / ${monthlyLimit}`,
+    en: `Today used ${dailyUsed} · ${dailyLeft} left of ${dailyLimit}; this month used ${monthlyUsed} · ${monthlyLeft} left of ${monthlyLimit}`,
+  };
+}
 async function bytes(stream, limit) {
   const chunks = []; let size = 0;
   for await (const chunk of stream) {
@@ -99,12 +116,18 @@ function liveDirectory(catalog, provider, fetcher) {
     if (ep?.id !== id || !permitted(ep, await platforms())) throw fail(403, '此数据接口未开放 / Data endpoint is not allowed');
     if (ep.kind === 'routed') {
       if (!Array.isArray(ep.routed_children) || !ep.routed_children.length) throw fail(403, '无法核对路由 / Cannot verify route');
+      const exclude = new Set();
       let available = 0;
       for (const child of ep.routed_children) {
-        try { await endpoint(child, new Set([...ancestors, id])); available++; }
-        catch (error) { if (error.upstreamStatus !== 404 && !error.providerPaused) throw error; }
+        try { (await endpoint(child, new Set([...ancestors, id]))).routeExclude?.forEach(name => exclude.add(name)); available++; }
+        catch (error) {
+          // A child closed by this policy is left out of the route instead of closing the whole route.
+          if (error.status === 403 && error.upstreamStatus === undefined) exclude.add(child.split('.')[0]);
+          else if (error.upstreamStatus !== 404 && !error.providerPaused) throw error;
+        }
       }
       if (!available) throw fail(403, '路由暂无可用数据接口 / No available route');
+      if (exclude.size) return { ...ep, routeExclude: [...exclude].sort() };
     }
     return ep;
   }
@@ -199,6 +222,19 @@ function liveDirectory(catalog, provider, fetcher) {
   return { groups, list, search, endpoint, info };
 }
 
+/** Confirm that every endpoint the examples and skill guidance call directly passes the gateway policy against the live catalog. */
+export async function checkDataTools(catalog, fetcher = fetch) {
+  const examples = catalog.tools.flatMap(tool => tool.endpoints);
+  const named = [...JSON.stringify(catalog.skill || {}).matchAll(/wp-data call ([a-zA-Z0-9_.-]+)/g)]
+    .map(match => examples.find(ep => ep.command === match[1])?.id || match[1]);
+  const directory = liveDirectory(catalog, catalog.directory, fetcher), failures = [];
+  for (const id of new Set([...examples.map(ep => ep.id), ...named])) {
+    try { await directory.endpoint(id); }
+    catch (error) { failures.push({ id, error: error.message }); }
+  }
+  return failures;
+}
+
 /** Create authenticated catalog/call routes. Legacy provider prefixes are denied before extension dispatch. */
 export function createDataTools({ organization, authenticate, sessionAuthenticate, env = process.env, fetcher = fetch, now = Date.now }) {
   const config = organization.dataTools;
@@ -213,6 +249,7 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
     if (!object(provider) || !['http:', 'https:'].includes(new URL(provider.origin).protocol)
       || !provider.tokenFile || !object(headers)
       || ['token', 'organization', 'tag', 'routeMax', 'cost', 'callId'].some(key => typeof headers[key] !== 'string' || !/^[a-z0-9-]+$/i.test(headers[key]))
+      || (headers.routeExclude !== undefined && !/^[a-z0-9-]+$/i.test(headers.routeExclude))
       || ['orgIdEnvironment', 'orgSlugEnvironment', 'enabledEnvironment', 'verifiedEnvironment'].some(key => !/^[A-Z_][A-Z0-9_]*$/.test(provider[key] || ''))
       || !provider.budgetPath?.startsWith('/') || !provider.budgetPath.includes('{orgId}')
       || !provider.callPath?.startsWith('/') || !provider.callPath.includes('{id}')
@@ -277,10 +314,11 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       return (rows[0]?.charged_micro ?? 0) / 1e6;
     }
     const [daily, monthly] = await Promise.all([spend(1), spend(date.getUTCDate())]);
-    return { timezone: 'UTC', date: day, month: day.slice(0, 7),
+    const value = { timezone: 'UTC', date: day, month: day.slice(0, 7),
       resetMessage: '北京时间每天 08:00、每月 1 日 08:00 重置额度',
       daily: { usedUsd: daily, limitUsd: limits.daily / 1e6 },
       monthly: { usedUsd: monthly, limitUsd: limits.monthly / 1e6 }, call: { limitUsd: limits.call / 1e6 } };
+    return { ...value, summary: usageSummary(value) };
   }
   return async (req, res, url) => {
     const blocked = config?.blockedPrefixes?.some(prefix => url.pathname === prefix || url.pathname.startsWith(prefix + '/'));
@@ -313,6 +351,7 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       if (req.headers.origin && req.headers.origin !== organization.server.publicOrigin) throw fail(403, '请求来源无效 / Invalid request origin');
       const example = endpoints.get(match[1]);
       const source = await directory.endpoint(example?.id || match[1]);
+      if (source.routeExclude && !headers.routeExclude) throw fail(403, '此数据接口未开放 / Data endpoint is not allowed');
       const parameters = {};
       const bodySchema = source.input?.body;
       const bodyArray = example?.bodyArray || source.input?.bodyType === 'array' || bodySchema?.type === 'array';
@@ -339,7 +378,8 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       await budget('', defaults, auth);
       if (Object.hasOwn(overrides, user.slug)) await budget(user.slug, limits, auth);
       const callHeaders = { ...auth, [headers.tag]: `user=${user.slug}`, 'content-type': 'application/json',
-        [headers.routeMax]: String(Math.min(limits.call / 1e6, ep.routeMaxUsd ?? Infinity)) };
+        [headers.routeMax]: String(Math.min(limits.call / 1e6, ep.routeMaxUsd ?? Infinity)),
+        ...(source.routeExclude ? { [headers.routeExclude]: source.routeExclude.join(',') } : {}) };
       const path = provider.callPath.replace('{id}', encodeURIComponent(ep.id));
       let response, result;
       try {
@@ -365,9 +405,18 @@ export function createDataTools({ organization, authenticate, sessionAuthenticat
       // A queued acknowledgement is not a completed, chargeable result.
       if (response.status === 202) throw fail(502, '任务尚未完成，请核实用量，不要自动重试 / Job pending; check usage and do not retry automatically');
       const cost = response.headers.get(headers.cost);
-      json(res, 200, { data: result, costUsd: cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null,
+      const costUsd = cost !== null && /^\d+$/.test(cost) && Number.isSafeInteger(Number(cost)) ? Number(cost) / 1e6 : null;
+      json(res, 200, { data: result, costUsd, costText: costUsd === null ? null : formatUsd(costUsd),
         callId: response.headers.get(headers.callId), ...(ep.fileResult ? { fileResult: ep.fileResult } : {}) });
     } catch (error) { json(res, error.status || 503, { error: error.status ? error.message : '数据服务暂不可用 / Data service unavailable' }); }
     return true;
   };
+}
+
+// node gateway/data-tools.mjs --check <catalog.json> fails when an example or a command named in the skill guidance is refused.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv[2] !== '--check' || !process.argv[3]) { console.error('Usage: node gateway/data-tools.mjs --check <catalog.json>'); process.exit(2); }
+  const failures = await checkDataTools(parseDataTools(JSON.parse(fs.readFileSync(resolve(process.argv[3]), 'utf8'))));
+  for (const row of failures) console.error(`${row.id}: ${row.error}`);
+  process.exit(failures.length ? 1 : 0);
 }
