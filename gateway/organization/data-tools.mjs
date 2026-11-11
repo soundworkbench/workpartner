@@ -20,8 +20,8 @@ export function parseDataTools(value) {
   if (value.directory.categoryEndpoints !== undefined && (!object(value.directory.categoryEndpoints)
     || Object.entries(value.directory.categoryEndpoints).some(([category, ids]) => !value.categories.some(row => row.en === category)
       || !Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(id))))) throw new Error('Invalid category endpoint policy');
-  if (!object(value.directory.platformNames) || Object.values(value.directory.platformNames).some(name =>
-    typeof name === 'string' ? !name.trim() : !object(name) || ['zh', 'en'].some(key => typeof name[key] !== 'string' || !name[key].trim()))) throw new Error('Invalid platform display names');
+  if (value.directory.platformNames !== undefined && (!object(value.directory.platformNames) || Object.values(value.directory.platformNames).some(name =>
+    typeof name === 'string' ? !name.trim() : !object(name) || ['zh', 'en'].some(key => typeof name[key] !== 'string' || !name[key].trim())))) throw new Error('Invalid platform display names');
   if (value.presentation !== undefined && (!object(value.presentation)
     || !['tasks', 'endpoints'].every(key => object(value.presentation[key]) && Object.values(value.presentation[key]).every(row => object(row) && typeof row.title === 'string' && row.title.trim() && typeof row.description === 'string' && row.description.trim())))) throw new Error('Invalid data presentation copy');
   const ids = new Set(), commands = new Set(), names = new Set();
