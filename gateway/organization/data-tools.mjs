@@ -35,6 +35,16 @@ export function parseDataTools(value) {
       for (const rule of Object.values(ep.parameters)) {
         if (!object(rule) || !['query', 'body'].includes(rule.in) || typeof rule.type !== 'string' || typeof rule.required !== 'boolean') throw new Error('Invalid data parameter policy');
       }
+      if (ep.defaults !== undefined && (!object(ep.defaults) || Object.keys(ep.defaults).some(key => !Object.hasOwn(ep.parameters, key)))) throw new Error('Invalid data defaults');
+      if (ep.timeoutMs !== undefined && (!Number.isSafeInteger(ep.timeoutMs) || ep.timeoutMs < 1000 || ep.timeoutMs > 600000)) throw new Error('Invalid data timeout');
+      if (ep.fileResult !== undefined) {
+        const result = ep.fileResult;
+        if (!object(result) || typeof result.path !== 'string' || !/^(?:[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)?$/.test(result.path)
+          || ![result.urlField, result.base64Field].some(Boolean)
+          || [result.urlField, result.base64Field].some(field => field !== undefined && (typeof field !== 'string' || !/^[a-zA-Z0-9_]+$/.test(field)))
+          || !Number.isSafeInteger(result.maxBytes) || result.maxBytes < 1 || result.maxBytes > 32 * 1024 * 1024
+          || !Number.isSafeInteger(result.maxFiles) || result.maxFiles < 1 || result.maxFiles > 10) throw new Error('Invalid data file result policy');
+      }
       for (const [name, rule] of Object.entries(ep.rules)) {
         if (!Object.hasOwn(ep.parameters, name) || !object(rule)
           || (rule.max !== undefined && (!Number.isSafeInteger(rule.max) || rule.max < 1))
@@ -63,6 +73,10 @@ export function dataToolsSkill(catalog) {
     '今天额度用完时说明北京时间 08:00 恢复；本月额度用完时说明下月 1 日北京时间 08:00 恢复。Daily budgets reset at 08:00 Beijing time; monthly budgets reset at 08:00 on the first of next month.',
     '`wp-data search <想要的数据>` 在开放大类里找接口。`wp-data info <接口>` 查看参数、价格和返回样例。',
     '`wp-data call <接口> key=value ...` 或 `wp-data call <接口> --json \'{"key":"value"}\'`。',
+    '目录默认参数会自动应用；只覆盖已开放的参数。生图可能耗时数分钟，请等待命令完成，不要重复调用。',
+    'Catalog defaults apply automatically; override only allowed parameters. Image generation can take minutes: wait for the command and do not repeat it.',
+    '图片保存在工作区 outputs/images；收到 files 路径后向用户展示保存的图片。保存失败时保留花费记录，不要重新生图。',
+    'Images are saved under outputs/images in the workspace. Show the saved images to the user using the returned files paths. A save failure preserves cost; never regenerate automatically.',
     '常用示例可直接调用，不必先搜索。其他需求先按地图搜索，再读接口详情。示例不是白名单。',
     '通用网页搜索和抓取已内置，请使用内置工具。Generic web search and extraction use the built-in tools.',
     'Use common examples directly; otherwise search the platform map and read endpoint details. Examples are not an allowlist.',
@@ -80,7 +94,7 @@ export function dataToolsSkill(catalog) {
       `例句：${tool.example.zh}`, `Example: ${tool.example.en}`, `返回：${tool.returns}`, `大约费用：${tool.price}`, '');
     if (tool.usageNote) lines.push(tool.usageNote, '');
     for (const ep of tool.endpoints) {
-      const json = JSON.stringify(ep.template).replaceAll("'", "'\\''");
+      const json = JSON.stringify({ ...ep.template, ...ep.defaults }).replaceAll("'", "'\\''");
       lines.push('```sh', `wp-data call ${ep.id} --json '${json}'`, '```',
         `参数：${Object.entries(ep.parameters).map(([key, rule]) => `${key} (${rule.type}${rule.required ? ', required' : ''})`).join('; ')}`,
         `上限：${JSON.stringify(ep.rules)}${ep.routeMaxUsd ? `; 单次最高 $${ep.routeMaxUsd}` : ''}`, '');

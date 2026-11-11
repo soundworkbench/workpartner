@@ -82,4 +82,32 @@ Authenticated routes are `GET /_wp/data/tools`, `GET /_wp/data/catalog?platform=
 
 The image includes `wp-data search`, `info`, `call` (with `key=value` or `--json`) and `balance`. Image preparation generates a `data-tools` skill with the category/platform map and direct examples. Existing startup exposes it to both agent engines and messaging sessions. The skill requires a unit-price quote before spending, actual cost and remaining allowance afterwards, and source citations. A call with an unknown outcome is never automatically retried. A usage-read failure after a completed call preserves the completed result.
 
+### Content generation and file results
+
+Add a localized category such as `{"en":"Content generation","zh":"内容生成"}` and its provider platforms to the same catalog. The provider's live platform category must match. Generation uses the existing data provider, personal identity and daily/monthly/per-call budgets; model gateway configuration does not change. Cards reuse the platform chip, price and fixed “Try it” prompt of other categories.
+
+Common endpoint examples can set `defaults`, `timeoutMs` and `fileResult`, for example:
+
+```json
+{
+  "defaults": { "model": "image-standard", "quality": "medium", "size": "1024x1024" },
+  "timeoutMs": 180000,
+  "fileResult": {
+    "path": "data",
+    "urlField": "url",
+    "base64Field": "b64_json",
+    "maxBytes": 8388608,
+    "maxFiles": 4
+  }
+}
+```
+
+Every default key must appear in the endpoint's allowed `parameters`. Defaults fill omitted input; agents may override allowed parameters, while `rules.fixed` and other limits still apply. The generated skill's command and the card's “Try it” prompt combine `template` with these defaults. `wp-data info` exposes the execution policy for both endpoint IDs and command aliases. Organization defaults take precedence over template values in generated examples.
+
+`timeoutMs` bounds the provider HTTP request, including the response body (1–600 seconds; default 60 seconds). The command reads this policy before calling and waits 20 seconds longer than the gateway. This supports slow image endpoints that hold the request open until generation completes. The provider must enforce budgets and charge only successful generations. The gateway passes through the successful cost and call ID; failed or timed-out requests are never retried automatically. A bare HTTP 202 acknowledgement is reported as pending, not as a completed image: job submission/polling APIs require a provider adapter that waits for completion. Do not resubmit an unknown or pending job.
+
+`fileResult.path` selects an image array or object inside the provider JSON using dot-separated keys; use `""` for the root. Configure one or both of `urlField` / `base64Field` to match its image objects. Base64 is decoded inside the personal container. URL downloads send no gateway or provider credentials and reject redirects. Both paths enforce `maxBytes` per image (up to 32 MiB), `maxFiles` (up to 10), and PNG/JPEG/GIF/WebP signatures. The gateway also caps the entire JSON response at 64 MiB. Returned image URLs must be directly downloadable HTTP(S) resources.
+
+The command saves files under `/data/work/outputs/images/<UTC-date>-<endpoint>-<unique-id>.<format>` and returns absolute `files` paths alongside `costUsd`, `callId` and personal usage. `WORKPARTNER_WORKSPACE` can select a different workspace for standalone use. Once saved, base64 payloads are omitted from command output. The generated skill tells every agent to show the saved images to the user. A local save failure returns a nonzero exit code with `fileError`, the successful generation cost and any files already saved; do not pay to regenerate. Workspace files are never uploaded automatically. Reference-image endpoints can accept existing public URLs as allowed parameters; local reference-image hosting is not implemented.
+
 The Tools tab reads the live directory, displays personal remaining daily/monthly allowance, horizontal category buttons, platform filters and priced cards. Common examples appear first and open a new conversation through “Try it”. The page never shows organization balances or provider names. Build a new personal image and gateway image when enabling these capabilities; organization catalogs and provider settings must also be mounted into the gateway.
