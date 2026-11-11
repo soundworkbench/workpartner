@@ -364,7 +364,8 @@ if(input==='set -eu\\nnft list table inet workpartner_guard\\n') { console.error
       assert.equal(state.results.at(-1).status, 'FAIL');
       const diagnostics = state.results.at(-1).evidence.policyDiagnostics;
       assert.equal(diagnostics.gatewayPods[0].name, 'gateway');
-      assert.equal(diagnostics.probes.length, 10);
+      assert.equal(diagnostics.probes.length, 12);
+      assert.equal(diagnostics.probes.filter(probe => probe.target.kind === 'lookup').length, 1);
       assert.equal(diagnostics.guards.length, 2);
       assert.ok(diagnostics.guards.every(g => g.status === 'unavailable'));
       assert.ok(!JSON.stringify(diagnostics).includes('counter diagnostic'));
