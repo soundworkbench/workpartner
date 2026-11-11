@@ -16,7 +16,11 @@ import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMat
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
 import { createChatTitles } from "./title.mjs";
 
-import { createMarketSkills } from "./market-skills.mjs";
+import { createSharedSkillStore, createSharedSkillsHandler } from './market-shared.mjs';
+import { marketNotifications } from './market-notifications.mjs';
+import { createMarketSkills, skillExecutor } from "./market-skills.mjs";
+
+import { createDataTools } from './data-tools.mjs';
 
 const organization = resolveOrganization();
 const PORT = organization.runtime.gatewayPort;
@@ -32,8 +36,13 @@ const legacyRuntime = migration.kind === 'k8s' ? undefined : migration.guardRunt
 const aionui = createAionui({
   runtime, owns: migration.owns, kind: migration.kind, modelConfig: () => nextModelConfig(organizationData()), image: organization.runtime.nextImage,
   secretDir: `${organization.runtime.secureDirectory}/aionui`,
+  sharedSkills: organization.features.marketSkills ? {
+    container: organization.market.containerDirectory, preinstalled: organization.market.preinstalled,
+  } : undefined,
 });
+const executeSkill = skillExecutor(runtime, organization.runtime.uid);
 const marketSkills = createMarketSkills({
+  execute: (user, action, data) => action === 'delete' && sharedStore ? sharedStore.uninstall(user, data.name, executeSkill) : executeSkill(user, action, data),
   authenticate: req => userFor(req).user, runtime, uid: organization.runtime.uid, origin: `https://${PUBLIC_HOST}`,
 });
 const feishuOnboarding = createFeishuOnboarding({
@@ -60,7 +69,17 @@ const docker = migration.kind === 'k8s' ? undefined : (await import('./runtime/d
 const legacy = loadExtension ? await gatewayExtension(organization, {
   routePrefix: "/_wp", organization, docker, runtime: legacyRuntime, personalRuntime: runtime, SESSION_KEY, users, userFor, cookieOf, page, redirect: (...args) => redirect(...args), MODEL, MODEL_KEY_PREFIX, PUBLIC_HOST,
 }) : null;
-const services = await createGatewayServices({ organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+const sharedStore = organization.features.marketSkills ? createSharedSkillStore({
+  stateDir: `${organization.runtime.stateDirectory}/skill-market`, sharedDir: organization.market.sharedDirectory,
+  ...organization.market, ...marketNotifications(organization),
+}) : null;
+const sharedSkills = sharedStore && createSharedSkillsHandler({
+  store: sharedStore, authenticate: req => userFor(req).user || (sharedStore.admin(userFor(req).who) ? userFor(req).who : null),
+  tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()), origin: organization.server.publicOrigin,
+  execute: executeSkill,
+});
+const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
+const services = await createGatewayServices({ dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
@@ -231,6 +250,8 @@ const server = http.createServer(async (req, res) => {
       || (url.pathname === '/_wp/preparing' && !user)
       || url.pathname.startsWith('/_wp/preview/');
     if (!local && migration.forward(req, res, user)) return;
+    if (sharedSkills && await sharedSkills(req, res, url)) return;
+    if (await dataTools(req, res, url)) return;
     if ((!user || migration.owns(user)) && await legacy?.handle(req, res, url)) return;
     if (await preview?.handle(req, res, url)) return;
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;

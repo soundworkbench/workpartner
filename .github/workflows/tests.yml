@@ -15,4 +15,9 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci --prefix gateway --ignore-scripts --no-audit --no-fund
+      - name: Prepare Python check dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/workpartner-check-env"
+          "$RUNNER_TEMP/workpartner-check-env/bin/python" -m pip install PyYAML==6.0.3
+          echo "$RUNNER_TEMP/workpartner-check-env/bin" >> "$GITHUB_PATH"
       - run: bash tools/check.sh

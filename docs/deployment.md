@@ -43,7 +43,7 @@ Run Linux checks before building an image. After building, run `WORKPARTNER_TEST
 
 An administrator supplies a dedicated HTTPS hostname with its identity callback set to `https://<host>/_wp/callback`, an existing test application secret file, and existing test model keys. This guide does not create or rotate credentials. Use empty preview directories, and keep them separate from any running deployment.
 
-Copy `org/default` to an external organization directory. Edit its `organization.json`: set `publicHost`, `identity.appId`, `model.baseUrl`, `runtime.nextImage` to `workpartner-user:local`, `runtime.hostData` to the absolute host preview data directory, and `runtime.hostSecure` to the absolute host preview secret directory. The default `runtime.nextDirectory` is `/workspaces`; create `<data>/workspaces`, `<data>/users`, `<data>/state`, and `<secrets>/aionui`, and put an empty JSON array in `<data>/users.json`. Give UID 1001 access to its user volumes. Store the existing identity secret at `<secrets>/identity-app.secret`. Place pre-created test model key files in `<secrets>/model-pool/*.key`; the gateway assigns one to each newly admitted test user. Do not use production keys or user lists.
+Copy `org/default` to an external organization directory. Edit its `organization.json`: set `publicHost`, `identity.appId`, `model.baseUrl`, `runtime.nextImage` to `workpartner-user:local`, `runtime.hostData` to the absolute host preview data directory, and `runtime.hostSecure` to the absolute host preview secret directory. The default `runtime.nextDirectory` is `/workspaces`; create `<data>/workspaces`, `<data>/users`, `<data>/state`, `<data>/shared-skills`, and `<secrets>/aionui`, and put an empty JSON array in `<data>/users.json`. Give UID 1001 access to its user volumes. Store the existing identity secret at `<secrets>/identity-app.secret`. Place pre-created test model key files in `<secrets>/model-pool/*.key`; the gateway assigns one to each newly admitted test user. Do not use production keys or user lists.
 
 Set `model.defaults.codex` and `model.defaults.claude` to available test models before building. With `ORG_DIR` set to the absolute host organization directory and `PKG` set to the verified build inputs, build the user image with that organization:
 
@@ -67,6 +67,7 @@ docker run -d --name workpartner-preview-gateway --hostname workpartner-preview-
   -v "$DATA_DIR/workspaces:/workspaces" \
   -v "$DATA_DIR/users:/users" \
   -v "$DATA_DIR/state:/state" \
+  -v "$DATA_DIR/shared-skills:/shared-skills" \
   -v "$SECURE_DIR:/secure" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   workpartner-gateway:local
@@ -76,7 +77,7 @@ Forward the preview hostname to `127.0.0.1:3090` with WebSocket upgrades. Open i
 
 ## Current preview limits
 
-The lock selects cc-connect `v1.5.0-sw.87`, SHA-256 `1ff8ac28424d9f6627db3241eb8d24cd9a62769104aa3db00deb02c3e2afac13`. The downloader fetches the `cc-connect-v1.5.0-sw.87-linux-amd64` asset from the public `soundworkbench/cc-connect` release. The build reads `cc-connect` from the download directory and verifies the pinned digest again. A missing binary or mismatched digest stops the build. The image workflow downloads the bridge together with all other inputs.
+The lock selects cc-connect `v1.5.2-beta.1-sw.167`, SHA-256 `c6716448a5570a27df2f964ba492ebe7671095d300939263d8bc8336beca272e`. The downloader fetches the `cc-connect-v1.5.2-beta.1-sw.167-linux-amd64` asset from the public `soundworkbench/cc-connect` release. The build reads `cc-connect` from the download directory and verifies the pinned digest again. A missing binary or mismatched digest stops the build. The image workflow downloads the bridge together with all other inputs.
 
 Official skills use the same upstream commits as the private bundle and verified source archive hashes. `image/build.sh --prepare-only <new-directory>` assembles the full context without invoking Docker, including deterministic skill repacking. Playwright is pinned to version 1.61.1 but its npm dependency graph and Chromium download are not yet SHA-256 locked. Third-party license packaging for the remaining programs and an actual Linux image build remain release checks. The gateway includes personal platform authorization and bot onboarding, selected by the organization feature fields.
 
@@ -85,3 +86,5 @@ Official skills use the same upstream commits as the private bundle and verified
 `features.feishuAuthorization` controls personal authorization and CLI identity preparation. `FEISHU_USER_AUTH_ENABLED=0` stops new authorizations and token issuance while retaining revocation and status for an already configured integration. The internal token listener uses `runtime.internalPort`; never publish it on the host. `runtime.stateDirectory` selects its persistent authorization state. `features.feishuOnboarding`, `features.marketSkills`, `features.autoTitle` and `features.preview` select the remaining gateway capabilities. Preview also needs a separate `previewHost` (or `PREVIEW_HOST`) and the user-image relay on its reserved internal port. The gateway writes the personal relay key before starting a workspace. The image starts the relay only when that key exists, resolves the gateway address from `runtime.gatewayOrigin`, and exits for the container runtime to restart if the relay fails.
 
 `extensions.gatewayModule` optionally names a trusted local module relative to the organization directory. The public default leaves it empty and has no legacy backend or desktop implementation. When extension loading is enabled, a configured but missing or broken extension is a startup error. Kubernetes skips extensions by default (`runtime.k8s.loadGatewayExtension` defaults to false); legacy users continue through the Docker peer. Set this flag to true when organization-provided routes are needed; the extension must not depend on Docker transport. Keep extension code outside the public snapshot.
+
+When upgrading the bridge, check `cc-connect --version` inside the built user image and require `v1.5.2-beta.1-sw.167`. Start it with the rendered template configuration and inspect the complete startup log for unknown-key or deprecation warnings. The template remains Codex-only; source inspection and a downloaded binary version check do not replace image startup or real Feishu acceptance.

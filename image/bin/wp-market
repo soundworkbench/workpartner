@@ -1,0 +1,53 @@
+#!/usr/bin/python3
+"""Submit personal skills through the same authenticated API used by the market page."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['list', 'submit', 'install', 'uninstall', 'withdraw', 'refresh-preinstalled'])
+    parser.add_argument('name', nargs='?')
+    parser.add_argument('--title')
+    parser.add_argument('--description')
+    parser.add_argument('--example')
+    args = parser.parse_args()
+    if args.action == 'refresh-preinstalled':
+        for name in json.loads(os.environ.get('WORKPARTNER_MARKET_PREINSTALLED', '[]')):
+            result = subprocess.run([str(Path(__file__).with_name('wp-skill')), 'shared-install', '--', name], capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+            if data.get('error'):
+                raise ValueError('A configured preinstalled skill is unavailable')
+        return
+    body = None
+    if args.action != 'list':
+        if not args.name:
+            parser.error('name is required')
+        body = json.dumps({'action': args.action, 'name': args.name,
+                           'displayName': args.title, 'description': args.description,
+                           'example': args.example}, ensure_ascii=False).encode()
+    url = os.environ['PARTNER_GATEWAY_ORIGIN'].rstrip('/') + '/_wp/market/shared'
+    token = (Path.home() / '.zp-market-token').read_text().strip()
+    request = urllib.request.Request(url, data=body, headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        result = json.load(error)
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(1)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        print(json.dumps({'message': '结果未确认，请打开技能市场核实后再试。'}, ensure_ascii=False))
+        sys.exit(1)

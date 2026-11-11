@@ -19,7 +19,7 @@ flowchart LR
 Use a Linux host with Docker, Node.js 24, Python 3, outbound HTTPS, a domain with TLS termination, and your own identity application and model endpoint. See [deployment](docs/deployment.md) for mounts and privileges.
 
 1. Copy `org/default` to a separate directory and fill in your deployment values as described in [organization configuration](docs/organization.md).
-2. Run Linux checks: `bash tools/check.sh`.
+2. Run Linux checks with Python PyYAML available: `bash tools/check.sh`. For an isolated environment, run `python3 -m venv /tmp/workpartner-check-env`, install `PyYAML==6.0.3` with its `bin/python -m pip`, and prepend its `bin` directory to `PATH`.
 3. Download and verify the pinned build inputs, then build the user image:
 
    ```sh

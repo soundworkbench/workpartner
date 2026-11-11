@@ -23,6 +23,7 @@ test('gateway preserves a reused extension result and refreshes its upstream add
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-legacy-resolve-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
+  org.market.sharedDirectory = path.join(dir, 'shared-skills');
   org.publicHost = 'workspace.example.test';
   org.model.baseUrl = 'http://models.example.test/v1';
   for (const key of Object.keys(org.features)) org.features[key] = false;
@@ -91,9 +92,14 @@ async function fixture(t, { disabled = false, extension = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-services-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
+  org.market.sharedDirectory = path.join(dir, 'shared-skills');
   org.publicHost = 'workspace.example.test';
   org.model.baseUrl = 'http://models.example.test/v1';
   org.features.feishuAuthorization = true;
+  if (!disabled) {
+    org.extensions.gatewayModule = 'greedy-extension.mjs';
+    fs.writeFileSync(path.join(dir, 'greedy-extension.mjs'), `export async function createGatewayExtension() { return { async handle(req, res, url) { if (!url.pathname.startsWith('/_wp/market/shared')) return false; res.writeHead(500); res.end('Extension must not own core skill routes'); return true; } }; }`);
+  }
   if (disabled) for (const key of Object.keys(org.features)) org.features[key] = false;
   Object.assign(org.runtime, { gatewayPort: 0, internalPort: 0, uid: process.getuid(), nextImage: 'fixture-image',
     sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'), cookieFile: path.join(dir, 'cookies.json'),
@@ -150,7 +156,7 @@ export function createGatewayExtension({ docker, runtime, personalRuntime, SESSI
         : { skills: [{ id: 'one', name: 'one', description: 'Skill', preinstalled: true }] };
       return res.end(frame(value));
     }
-    if (req.url.startsWith('/containers/')) return res.end(JSON.stringify({ Config: { Image: 'fixture-image', Env: ['WORKPARTNER_MODEL_CONFIG=' + JSON.stringify(nextModelConfig(org))] }, Image: 'sha256:fixture', State: { Running: true }, NetworkSettings: { Networks: { 'workpartner-next-user1-net': { IPAddress: '127.0.0.1' } } } }));
+    if (req.url.startsWith('/containers/')) return res.end(JSON.stringify({ Config: { Image: 'fixture-image', Env: ['WORKPARTNER_MODEL_CONFIG=' + JSON.stringify(nextModelConfig(org)), 'WORKPARTNER_SHARED_SKILLS=' + org.market.containerDirectory, 'WORKPARTNER_MARKET_PREINSTALLED=' + JSON.stringify(org.market.preinstalled)] }, Image: 'sha256:fixture', State: { Running: true }, NetworkSettings: { Networks: { 'workpartner-next-user1-net': { IPAddress: '127.0.0.1' } } } }));
     if (req.url.startsWith('/images/')) return res.end('{"Id":"sha256:fixture"}');
     if (req.url.startsWith('/networks/')) return res.end('{"Containers":{}}');
     res.writeHead(500); res.end('{}');
@@ -235,6 +241,8 @@ test('exported gateway serves authorization, skill uploads, automatic titles and
   const forged = issueToken('other-signing-key', f.user);
   assert.equal((await f.request('/token', { method: 'POST', internal: true, headers: { authorization: 'Bearer ' + forged } })).status, 401);
   assert.equal((await f.request('/_wp/market/skills', { headers })).status, 200);
+  const shared = await f.request('/_wp/market/shared', { headers });
+  assert.equal(shared.status, 200); assert.deepEqual(JSON.parse(shared.body).company, []);
   const before = f.calls.length;
   assert.equal((await f.request('/_wp/market/skills?filename=SKILL.md', { method: 'POST', headers: { ...headers, origin: 'https://other.example.test', 'content-type': 'application/octet-stream' }, body: 'invalid' })).status, 403);
   assert.equal(f.calls.length, before);
@@ -248,7 +256,7 @@ test('exported gateway serves authorization, skill uploads, automatic titles and
   assert.equal(created.headers['set-cookie'], undefined);
   await f.request('/api/conversations/new-chat/messages', { method: 'POST', headers, body: '{"content":"帮我整理报告"}' });
   const title = await f.request('/_wp/next-title/new-chat', { method: 'POST', headers });
-  assert.equal(title.body, '{"changed":true}');
+  assert.equal(title.status, 200); // The message-triggered background job may already have set the title.
   const chat = JSON.parse((await f.request('/api/conversations/new-chat', { headers })).body);
   assert.equal(chat.data.name, '自动标题');
   const preview = await f.request('/_wp/preview/open?port=8080&path=%2F', { headers });
@@ -287,6 +295,7 @@ async function migrationGateway(t, { kind, ownersFile, peerOrigin, extension = f
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-migration-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
+  org.market.sharedDirectory = path.join(dir, 'shared-skills');
   org.publicHost = 'workspace.example.test';
   org.model.baseUrl = 'http://models.example.test/v1';
   org.features.feishuAuthorization = true;
@@ -483,6 +492,7 @@ test('k8s gateway startup, local entry routes and ownership guards work without 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-migration-routing-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
+  org.market.sharedDirectory = path.join(dir, 'shared-skills');
   org.publicHost = 'workspace.example.test'; org.model.baseUrl = 'http://models.example.test/v1';
   for (const key of Object.keys(org.features)) org.features[key] = false;
   Object.assign(org.runtime, { kind: 'k8s', gatewayPort: 0, k8s: { keepRunningIntervalMs: 0 },

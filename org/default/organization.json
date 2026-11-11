@@ -166,5 +166,20 @@
     "marketSkills": true,
     "autoTitle": true,
     "preview": true
+  },
+  "market": {
+    "approvers": [],
+    "reservedPrefixes": [],
+    "protectedNames": [
+      "officecli",
+      "pptx",
+      "word",
+      "excel",
+      "feishu",
+      "share-skill"
+    ],
+    "sharedDirectory": "/shared-skills",
+    "containerDirectory": "/opt/shared-skills",
+    "preinstalled": []
   }
 }

@@ -44,11 +44,6 @@
   function description(value) {
     return !value ? t('checking') : value.error ? t('unknown') : value.enabled === false ? t('disabled') : value.revoking ? t('revoking') : t(value.connected ? 'connected' : 'disconnected');
   }
-  function updateMenu() {
-    document.querySelectorAll('[data-wp-feishu-auth]').forEach(function (node) {
-      node.textContent = t('title') + ' · ' + description(state);
-    });
-  }
   function close() {
     clearTimeout(poll); clearTimeout(projectPoll); poll = null; projectPoll = null;
     if (dialog) { dialog.close(); dialog.remove(); dialog = null; }
@@ -134,7 +129,7 @@
   async function refresh() {
     if (pending) return pending;
     pending = api('status').then(function (value) { state = value; }).catch(function () { state = { error: true }; }).finally(function () {
-      pending = null; updateMenu(); mount();
+      pending = null; mount();
       var status = dialog?.querySelector('.wp-auth-state'); if (status) status.textContent = description(state);
       var action = dialog?.querySelector('.wp-auth-main-action');
       if (action) { action.textContent = t(state?.connected || state?.revoking ? 'manage' : 'connect'); action.disabled = !state || !!state.error || state.enabled === false; }
@@ -142,11 +137,6 @@
     });
     return pending;
   }
-  window.wpFeishuAuth = { appendMenu: function (menu) {
-    var item = button(t('title') + ' · ' + description(state), function () { show(false); });
-    item.className = 'wp-pick-item'; item.dataset.wpFeishuAuth = ''; item.setAttribute('role', 'menuitem'); menu.append(item);
-    void refresh();
-  } };
   window.addEventListener('message', function (event) {
     if (event.origin === location.origin && event.source === popup && event.data?.type === 'workpartner.identity.connected') void refresh();
   });

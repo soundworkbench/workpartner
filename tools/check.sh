@@ -18,7 +18,7 @@ python3 -I -B tools/wp-seed.test.py image/bin/wp-seed.py
 for test in image/tests/*.test.py; do python3 -I -B "$test"; done
 python3 -I -B image/agent-baseline/hooks/test_no_blocking_foreground.py
 python3 -I -B image/agent-baseline/hooks/test_no_repeat_poll.py
-node --test tools/*.test.mjs
+node --test tools/*.test.mjs gateway/tests/*.test.mjs
 if [ -n "${WORKPARTNER_TEST_IMAGE:-}" ]; then
   # Use the image's configured runtime user and system trust store, without networking.
   docker run --rm -i --network none --entrypoint python3 "$WORKPARTNER_TEST_IMAGE" -I - <<'PY'

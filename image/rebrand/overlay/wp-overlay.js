@@ -1106,7 +1106,19 @@
     updateMarket();
   }
   /** Register a synchronous renderer for skills/tools; it may return cleanup. The returned disposer unregisters this renderer. */
-  window.wpMarket = { register: function (tab, render) {
+  window.wpMarket = { tryExample: function (example) {
+    location.hash = '#/guid';
+    var timer, observer = new MutationObserver(fill);
+    function fill() {
+      var input = document.querySelector('[data-testid="guid-input"]');
+      if (!input) return;
+      observer.disconnect(); clearTimeout(timer);
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, example);
+      input.dispatchEvent(new Event('input', { bubbles: true })); input.focus();
+    }
+    observer.observe(document.body, { subtree: true, childList: true });
+    timer = setTimeout(function () { observer.disconnect(); }, 10000); fill();
+  }, register: function (tab, render) {
     if (['skills', 'tools'].indexOf(tab) < 0 || typeof render !== 'function') throw new TypeError('Expected skills/tools and a renderer');
     var entry = { render: render };
     marketRenderers.set(tab, entry);
@@ -1186,7 +1198,6 @@
     m.setAttribute('aria-label', t('settings'));
     var status = document.createElement('div'); status.className = 'wp-settings-status'; status.setAttribute('role', 'status');
     function appendLogout() {
-      if (window.wpFeishuAuth) window.wpFeishuAuth.appendMenu(m);
       var sep = document.createElement('div'); sep.className = 'wp-pick-sep'; m.appendChild(sep);
       var logout = document.createElement('button'); logout.type = 'button'; logout.className = 'wp-pick-item';
       logout.setAttribute('role', 'menuitem'); text(logout, t('logout'));

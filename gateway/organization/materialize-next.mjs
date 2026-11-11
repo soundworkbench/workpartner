@@ -4,6 +4,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { organizationData } from './resolve.mjs';
 import { materializeAppearance } from './materialize-appearance.mjs';
+import { loadDataTools, dataToolsSkill } from './data-tools.mjs';
 
 /** Copy local organization assets and render only pristine image templates. */
 export function materializeNext(context, environment = process.env) {
@@ -20,7 +21,28 @@ export function materializeNext(context, environment = process.env) {
   mkdirSync(selected, { recursive: true });
   for (const name of ['resolve.mjs', 'default.json']) cpSync(new URL(name, import.meta.url), join(context, 'organization', name));
   const { directory, ...release } = data;
+  const catalog = loadDataTools(data);
+  const previousFile = join(selected, 'organization.json');
+  if (existsSync(previousFile)) {
+    const previous = JSON.parse(readFileSync(previousFile, 'utf8')).dataTools?.catalog;
+    if (previous && previous !== data.dataTools?.catalog) {
+      const stale = resolve(selected, previous);
+      if (!stale.startsWith(selected + '/')) throw new Error('Invalid previous data catalog path');
+      rmSync(stale, { force: true });
+    }
+  }
   writeFileSync(join(selected, 'organization.json'), JSON.stringify(release, null, 2) + '\n');
+  if (data.dataTools) {
+    const destination = resolve(selected, data.dataTools.catalog);
+    if (!destination.startsWith(selected + '/')) throw new Error('Data catalog must be inside the organization');
+    mkdirSync(resolve(destination, '..'), { recursive: true });
+    writeFileSync(destination, JSON.stringify(catalog, null, 2) + '\n');
+  }
+  const skillDirectory = join(context, 'image/skills/data-tools');
+  if (catalog.categories.length) {
+    mkdirSync(skillDirectory, { recursive: true });
+    writeFileSync(join(skillDirectory, 'SKILL.md'), dataToolsSkill(catalog));
+  } else rmSync(skillDirectory, { recursive: true, force: true });
   if (data.image.homeDirectory) cpSync(resolve(data.directory, data.image.homeDirectory), home, { recursive: true });
   if (data.image.instructions) cpSync(resolve(data.directory, data.image.instructions), join(home, 'CLAUDE.md'));
   // Organization instructions may predate the background-task policy. Keep that

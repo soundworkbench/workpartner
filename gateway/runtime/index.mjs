@@ -19,8 +19,13 @@ const require = createRequire(import.meta.url);
 export function createRuntime(organization, overrides = {}) {
   const { runtime: r, model = {} } = organization;
   const kind = r.kind === undefined ? 'docker' : r.kind;
+  const sharedSkills = organization.features?.marketSkills ? {
+    ...(kind === 'k8s' ? { claim: r.k8s?.sharedSkillsClaim ?? 'workpartner-shared-skills' }
+      : { host: `${r.hostData}${organization.market.sharedDirectory}` }),
+    container: organization.market.containerDirectory, preinstalled: organization.market.preinstalled,
+  } : undefined;
   if (kind === 'k8s') return createK8sRuntime({
-    ...r.k8s, image: r.nextImage, containerPrefix: r.nextContainerPrefix, userLabel: r.nextUserLabel,
+    ...r.k8s, sharedSkills, image: r.nextImage, containerPrefix: r.nextContainerPrefix, userLabel: r.nextUserLabel,
     modelKeyFile: r.nextModelKeyFile, port: r.nextPort, uid: r.uid,
     secureDir: r.secureDirectory, keyPrefix: model.keyPrefix,
     modelBaseUrl: model.baseUrl ? new URL(model.baseUrl).href : undefined, modelBaseEnvironment: model.baseEnvironment,
@@ -29,7 +34,7 @@ export function createRuntime(organization, overrides = {}) {
   if (kind !== 'docker') throw new Error(`Unsupported runtime kind: ${kind}`);
   const { createDockerRuntime } = require('./docker.mjs');
   return createDockerRuntime({
-    self: os.hostname(), modelContainer: r.modelContainer, modelBaseUrl: model.baseUrl ? new URL(model.baseUrl).href : undefined, modelBaseEnvironment: model.baseEnvironment,
+    sharedSkills, self: os.hostname(), modelContainer: r.modelContainer, modelBaseUrl: model.baseUrl ? new URL(model.baseUrl).href : undefined, modelBaseEnvironment: model.baseEnvironment,
     image: r.nextImage, containerPrefix: r.nextContainerPrefix, userLabel: r.nextUserLabel,
     modelKeyFile: r.nextModelKeyFile, port: r.nextPort, uid: r.uid,
     dataDir: r.nextDirectory, hostData: `${r.hostData}${r.nextDirectory}`,

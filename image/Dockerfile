@@ -63,14 +63,16 @@ RUN for d in /opt/aionui/bundled-aioncore/linux-x64/managed-resources/cli/codex/
 RUN for d in /opt/workpartner/bin /opt/aionui/bundled-aioncore/linux-x64/managed-resources/cli/codex/*/linux-x64/vendor/*/bin; do \
       mv "$d/codex" "$d/codex.real"; \
       cp /opt/workpartner/bin/wp-codex.py "$d/codex"; chmod 755 "$d/codex"; done
+COPY image/skills/ /opt/workpartner/extra-skills/
 RUN mkdir -p /tmp/skel/.claude/skills \
  && for s in ${IMAGE_SKILLS}; do \
       if [ "$s" = officecli ]; then HOME=/tmp/skel /opt/workpartner/bin/officecli skills claude; \
       else HOME=/tmp/skel /opt/workpartner/bin/officecli skills install "$s" claude; fi; done \
  && mv /tmp/skel/.claude/skills /opt/workpartner/skills && rm -rf /tmp/skel \
  && if [ -f /opt/workpartner/organization/official-skills.tar.gz ]; then python3 -I /opt/workpartner/bin/wp-feishu-skills.py /opt/workpartner/organization/official-skills.tar.gz /opt/workpartner/skills; fi \
+ && cp -R /opt/workpartner/extra-skills/. /opt/workpartner/skills/ \
  && node /opt/workpartner/bin/wp-skill-catalog.mjs /opt/workpartner/skills /opt/workpartner/skills-zh.json /opt/workpartner/home/CLAUDE.md \
- && chmod 755 /opt/workpartner/bin/wp-skill \
+ && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data \
  && chmod -R a+rX /opt/workpartner /opt/aionui \
  && ln -sf python3 /usr/bin/python
 
