@@ -151,6 +151,9 @@ def main():
             assert all(value == 'Bearer ' + KEY for value in state['headers'])
             assert KEY not in (home / '.claude.json').read_text()
             assert KEY not in (home / '.codex/config.toml').read_text()
+            for artifact in home.rglob('*'):
+                if artifact.is_file() and artifact.suffix in {'.log', '.json', '.jsonl', '.toml', '.yaml'}:
+                    assert KEY.encode() not in artifact.read_bytes(), 'Client persisted the test credential in logs or configuration'
             print(json.dumps({'versions': versions, 'toolsPerEngine': 12, 'successfulCalls': {'claude': 1, 'codex': 1}, 'externalModelRequests': 0}, indent=2))
     finally:
         service.shutdown(); service.server_close()
