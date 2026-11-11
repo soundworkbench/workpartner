@@ -78,8 +78,8 @@ export function createMarketSkills({ authenticate, runtime, origin, uid = 1001, 
       if (result.error) {
         json(res, ERROR_STATUS[result.error] || 400, { error: result.error, message: result.message, ...(result.name ? { name: result.name } : {}) });
       } else if (req.method === 'GET') {
-        json(res, 200, { skills: result.skills.map(({ id, name, description, displayName, displayDescription, preinstalled, shared, withdrawn }) =>
-          ({ id, name, description, displayName, displayDescription, preinstalled, shared, withdrawn })) });
+        json(res, 200, { skills: result.skills.map(({ id, name, description, displayName, displayDescription, source, preinstalled, shared, withdrawn }) =>
+          ({ id, name, description, displayName, displayDescription, source, preinstalled, shared, withdrawn })) });
       } else json(res, 200, { name: result.name });
     } catch (error) {
       json(res, 503, { error: 'temporarily_unavailable', message: '技能操作尚未确认完成，请刷新列表后重试。' });

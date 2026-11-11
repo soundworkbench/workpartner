@@ -71,6 +71,15 @@ class SkillsTest(unittest.TestCase):
         self.assertEqual(row['description'], 'Multiline description\n'); self.assertFalse(row['preinstalled'])
         self.assertEqual(len(self.store.run('list')['skills']), 7)
 
+    def test_list_returns_only_a_named_https_source(self):
+        head = '---\nname: {}\ndescription: Data\nmetadata:\n  source-name: "Example Data"\n  source-url: "{}"\n---\n'
+        for name, url in [('sourced', 'https://data.example.com'), ('plain-link', 'http://data.example.com')]:
+            upload = self.uploads / 'SKILL.md'; upload.write_text(head.format(name, url))
+            self.store.run('install', str(upload))
+        rows = {row['name']: row for row in self.store.run('list')['skills']}
+        self.assertEqual(rows['sourced']['source'], {'name': 'Example Data', 'url': 'https://data.example.com'})
+        self.assertNotIn('source', rows['plain-link']); self.assertNotIn('source', rows['feishu'])
+
     def test_zip_root_and_one_folder_install_link_persist_overwrite_and_delete(self):
         for prefix in ['', 'bundle/']:
             with self.subTest(prefix=prefix):

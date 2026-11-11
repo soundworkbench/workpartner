@@ -15,6 +15,7 @@ import zipfile
 import yaml
 
 NAME = re.compile(r"^[a-z0-9-]+$")
+SOURCE_URL = re.compile(r"https://[^\s\"'<>]+")
 MAX_UPLOAD = 10 * 1024 * 1024
 # A small compressed file must not exhaust the personal volume during extraction.
 MAX_EXPANDED = 100 * 1024 * 1024
@@ -37,7 +38,12 @@ def metadata(source):
         meta = None
     if not isinstance(meta, dict) or not isinstance(meta.get("name"), str) or not NAME.fullmatch(meta["name"]):
         reject("invalid_name", "技能名称只能包含小写字母、数字和连字符。")
-    return {"name": meta["name"], "description": str(meta.get("description") or "")}
+    row = {"name": meta["name"], "description": str(meta.get("description") or "")}
+    extra = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    name, url = extra.get("source-name"), extra.get("source-url")
+    if isinstance(name, str) and 0 < len(name.strip()) <= 80 and isinstance(url, str) and SOURCE_URL.fullmatch(url):
+        row["source"] = {"name": name.strip(), "url": url}
+    return row
 
 
 class SkillStore:
