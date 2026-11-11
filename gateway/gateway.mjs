@@ -207,7 +207,11 @@ async function login(req, res, url, host) {
       return redirect(res, "/_wp/pilot", session);
     }
     const candidate = { ...who, slug: slugFor(who.unionId), backend: 'aionui' };
-    if (!migration.owns(candidate)) return page(res, 503, "工作区迁移中", "请稍后重试。");
+    const owner = migration.owner(candidate);
+    if (owner !== migration.kind) {
+      console.log('[migration] Onboarding denied', JSON.stringify({ slug: candidate.slug, name: who.name, owner, kind: migration.kind }));
+      return page(res, 503, "工作区迁移中", "请稍后重试。");
+    }
     legacy?.clear?.(slugFor(who.unionId)); // 同一人删掉重开时，旧空间的登录凭证不能沿用
     provision(migration.guardRuntime(runtime, users, candidate), who).catch((e) => console.log("开通失败", who.name, e.message));
   }
@@ -245,8 +249,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(403); return res.end();
     }
     const user = userFor(req).user || (req.headers.authorization && tokenUser(req, SESSION_KEY, users()));
+    const loginCallback = (url.pathname === '/_wp/callback' || url.pathname === organization.identity.callbackPath)
+      && !String(url.searchParams.get('state') || '').startsWith('feishu-');
     const local = ['/_wp/login', '/_wp/logout', '/_wp/pilot'].includes(url.pathname)
-      || (url.pathname === organization.identity.callbackPath && !String(url.searchParams.get('state') || '').startsWith('feishu-'))
+      || loginCallback
       || (url.pathname === '/_wp/preparing' && !user)
       || url.pathname.startsWith('/_wp/preview/');
     if (!local && migration.forward(req, res, user)) return;
@@ -265,7 +271,7 @@ const server = http.createServer(async (req, res) => {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
     }
-    if (url.pathname === "/_wp/login" || url.pathname === "/_wp/callback") return await login(req, res, url, oldHost ? host : PUBLIC_HOST);
+    if (url.pathname === "/_wp/login" || url.pathname === "/_wp/callback" || loginCallback) return await login(req, res, url, oldHost ? host : PUBLIC_HOST);
     if (url.pathname === "/_wp/me") {
       const { who, user } = userFor(req);
       if (!user) { res.writeHead(401); return res.end(); }
