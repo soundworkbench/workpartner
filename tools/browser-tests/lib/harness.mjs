@@ -28,6 +28,77 @@ export const USERS = [
 ];
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
 
+export const MODEL_KEYS = Object.fromEntries(USERS.map((user, index) =>
+  [user.slug, `sk-fixture-${user.slug}-${'x'.repeat(40)}m00${index + 1}`]));
+export const MODEL_MODELS = [
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+  { id: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' },
+];
+export const MODEL_PRIVATE = ['fixture-host.example.test', 'fixture-session-private', 'Fixture Account Private',
+  ...USERS.map(user => `Fixture Caller ${user.slug === 'member' ? 'Member' : user.slug}`), 'Fixture Caller Foreign'];
+
+/** UTC windows and deterministic totals, including the single-day (Monday) case. */
+export function modelFixture(owner = 'member', mode = 'ok', now = Date.now()) {
+  const day = 86400000, today = new Date(now).setUTCHours(0, 0, 0, 0);
+  const days = (new Date(today).getUTCDay() + 6) % 7, monday = today - days * day;
+  const iso = time => new Date(time).toISOString();
+  const name = `Fixture Caller ${owner === 'member' ? 'Member' : owner}`;
+  const totals = { today: { calls: 86, cost: 3.2 }, week: { calls: days ? 512 : 86, cost: days ? 18.4 : 3.2 } };
+  // On Monday a single 00:00 hourly bucket satisfies both boundaries, even just after midnight.
+  const series = Array.from({ length: days + 1 }, (_, index) => ({ time: iso(monday + index * day),
+    calls: index === days ? 86 : index === 0 ? 426 : 0,
+    cost: index === days ? 3.2 : index === 0 ? 15.2 : 0 }));
+  const limits = [
+    { period: 'day', start: iso(today), reset: iso(today + day), calls: 86, tokens: 1200, cost: 3.2,
+      costLimit: 15, costLeft: 11.8, tokensLeft: 0, spent: false },
+    { period: 'week', start: iso(monday), reset: iso(monday + 7 * day), calls: totals.week.calls, tokens: 7200, cost: totals.week.cost,
+      costLimit: 60, costLeft: Number((60 - totals.week.cost).toFixed(2)), tokensLeft: 0, spent: false },
+  ];
+  const privateFields = { rows: [{ host: MODEL_PRIVATE[0], session: MODEL_PRIVATE[1] }], accounts: [{ name: MODEL_PRIVATE[2] }] };
+  return {
+    totals,
+    profile: { name, limits: mode === 'limited' ? limits : [], models: MODEL_MODELS, ...privateFields },
+    usage: { ...totals.week, series, ...privateFields,
+      callerKeys: [{ name }, ...(mode === 'foreign' ? [{ name: 'Fixture Caller Foreign' }] : [])],
+      by: { callerKey: [{ name }], model: MODEL_MODELS.map((model, index) => ({ id: 'fixture/' + model.id,
+        calls: [62, 27, 11][index], cost: totals.week.cost * [0.62, 0.27, 0.11][index] })) } },
+  };
+}
+
+/** Standalone so the fixture protocol can be checked with plain Node, without Playwright. */
+export async function startModelGateway() {
+  let mode = 'ok';
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const owner = Object.keys(MODEL_KEYS).find(slug => req.headers.authorization === 'Bearer ' + MODEL_KEYS[slug]) || null;
+    requests.push({ method: req.method, path: req.url, owner });
+    res.setHeader('content-type', 'application/json');
+    const end = (status, data) => { res.writeHead(status); res.end(JSON.stringify(data)); };
+    if (!owner) return end(401, {});
+    if (mode === 'down') return end(500, {});
+    const route = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (req.method !== 'GET') return end(405, {});
+    const fixture = modelFixture(owner, mode);
+    if (route === '/v1/magpie/me') return end(200, fixture.profile);
+    if (route === '/v1/magpie/usage/requests') return end(200, fixture.usage);
+    end(404, {});
+  });
+  const port = await listen(server);
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`, requests,
+    setMode(value) {
+      if (!['ok', 'limited', 'down', 'foreign'].includes(value)) throw new Error('Unknown model fixture mode');
+      mode = value;
+    },
+    async stop() {
+      const closed = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      server.closeAllConnections();
+      await closed;
+    },
+  };
+}
+
 async function listen(server) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -51,6 +122,7 @@ export async function createHarness(group) {
   const { organizationData, nextModelConfig } = await import(pathToFileURL(path.join(repo, 'gateway/organization/resolve.mjs')).href);
   const sessionKey = crypto.randomBytes(24).toString('hex');
   const gateways = [];
+  const model = await startModelGateway();
 
   // Fixture upstream: login always succeeds, API calls return an empty list, everything else is a static file.
   const upstream = http.createServer((req, res) => {
@@ -83,16 +155,18 @@ export async function createHarness(group) {
     return data + '.' + crypto.createHmac('sha256', sessionKey).update(data).digest('base64url');
   }
 
-  async function startGateway(name, { preview = true, feedback = true, allow = ['member'], handlers = ['union-handler'], maxImageBytes = 300000, maxImagesPerItem = 3 } = {}) {
+  async function startGateway(name, { preview = true, feedback = true, allow = ['member'], handlers = ['union-handler'], maxImageBytes = 300000, maxImagesPerItem = 3, myKey = null } = {}) {
     const run = path.join(work, 'run-' + name);
     fs.mkdirSync(path.join(run, 'secure/aionui'), { recursive: true });
     const org = structuredClone(organizationData({}));
     org.market.sharedDirectory = path.join(run, 'shared-skills');
     org.publicHost = HOST;
-    org.model.baseUrl = 'http://127.0.0.1:9/v1';
+    org.model.baseUrl = myKey ? model.baseUrl : 'http://127.0.0.1:9/v1';
     for (const key of Object.keys(org.features)) org.features[key] = false;
     org.features.preview = preview;
     org.features.feedback = feedback;
+    org.features.myKey = Boolean(myKey);
+    if (myKey) org.myKey = { allow: ['member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 2, ...myKey };
     Object.assign(org.runtime, { gatewayPort: 0, internalPort: 0, uid: process.getuid(), nextImage: 'fixture-image', nextPort: upstreamPort,
       sessionKeyFile: path.join(run, 'session.key'), usersFile: path.join(run, 'users.json'), cookieFile: path.join(run, 'cookies.json'),
       nextDirectory: path.join(run, 'workspaces'), stateDirectory: path.join(run, 'state'), secureDirectory: path.join(run, 'secure') });
@@ -105,7 +179,7 @@ export async function createHarness(group) {
     fs.writeFileSync(org.identity.appSecretFile, 'fixture-app-secret');
     for (const user of USERS) {
       fs.writeFileSync(path.join(run, `secure/aionui/aionui-${user.slug}.pass`), 'fixture-password');
-      fs.writeFileSync(path.join(run, `secure/model-${user.slug}.key`), 'fixture-model-key');
+      fs.writeFileSync(path.join(run, `secure/model-${user.slug}.key`), myKey ? MODEL_KEYS[user.slug] : 'fixture-model-key');
     }
     fs.writeFileSync(org.runtime.usersFile, JSON.stringify(USERS));
 
@@ -173,6 +247,17 @@ globalThis.fetch = async url => { throw new Error('fixture: external fetch block
 
     const gateway = {
       name, port, preview, feedback, botToken,
+      setMyKey(settings) {
+        const data = JSON.parse(fs.readFileSync(organizationFile, 'utf8'));
+        data.myKey = { ...data.myKey, ...settings };
+        fs.writeFileSync(organizationFile + '.tmp', JSON.stringify(data, null, 2));
+        fs.renameSync(organizationFile + '.tmp', organizationFile);
+      },
+      readAuditRaw() {
+        try { return fs.readFileSync(path.join(run, 'state/my-key/audit.log'), 'utf8'); }
+        catch (error) { if (error.code === 'ENOENT') return ''; throw error; }
+      },
+      readAudit() { return this.readAuditRaw().split('\n').filter(line => line.trim()).map(line => JSON.parse(line)); },
       // The gateway re-reads the organization file on every request, so this takes effect immediately.
       setPolicy(nextAllow, nextHandlers = handlers) {
         const data = JSON.parse(fs.readFileSync(organizationFile, 'utf8'));
@@ -181,12 +266,12 @@ globalThis.fetch = async url => { throw new Error('fixture: external fetch block
         fs.renameSync(organizationFile + '.tmp', organizationFile);
       },
       /** Plain HTTP straight to the gateway port, with the public Host header. */
-      async request(method, route, { who = 'none', bot = false, body, raw = false, headers = {} } = {}) {
+      async request(method, route, { who = 'none', bot = false, body, raw = false, headers = {}, origin = ORIGIN } = {}) {
         const all = { host: HOST, ...headers };
         if (bot) all.authorization = 'Bearer ' + botToken;
         else if (who !== 'none') all.cookie = 'wp_sid=' + cookie(who);
         if (method === 'POST') {
-          if (!bot) all.origin = ORIGIN;
+          if (!bot && origin !== null) all.origin = origin;
           all['content-type'] = raw ? 'application/octet-stream' : 'application/json';
         }
         const req = http.request({ host: '127.0.0.1', port, method, path: route, headers: all });
@@ -208,11 +293,12 @@ globalThis.fetch = async url => { throw new Error('fixture: external fetch block
   }
 
   return {
-    group, frontPort, sessionKey, cookie, startGateway,
+    group, frontPort, sessionKey, cookie, startGateway, model,
     /** Point the browser-facing front at another gateway. */
     use(gateway) { target = gateway.port; },
     async stop() {
       for (const gateway of gateways) await gateway.stop();
+      await model.stop();
       front.close(); upstream.close();
       front.closeAllConnections?.(); upstream.closeAllConnections?.();
       fs.rmSync(work, { recursive: true, force: true });
