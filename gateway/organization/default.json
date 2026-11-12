@@ -163,11 +163,19 @@
   },
   "features": {
     "feedback": false,
+    "myKey": false,
     "feishuAuthorization": false,
     "feishuOnboarding": true,
     "marketSkills": true,
     "autoTitle": true,
     "preview": true
+  },
+  "myKey": {
+    "allow": [],
+    "publicBaseUrl": "",
+    "revealSeconds": 30,
+    "reset": { "enabled": false, "blockedNote": "" },
+    "reference": { "weekly": 0, "accounts": {} }
   },
   "feedback": {
     "allow": [],

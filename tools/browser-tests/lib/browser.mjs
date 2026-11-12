@@ -5,6 +5,7 @@ import { chromium } from 'playwright-core';
 import { HOST, ORIGIN, outputRoot } from './harness.mjs';
 
 export const D = 'dialog.wp-feedback-dialog';
+export const K = 'dialog.wp-my-key-dialog';
 export const DESKTOP = { width: 1440, height: 900 };
 export const PHONE = { width: 390, height: 844 };
 
@@ -99,23 +100,36 @@ export async function openDialog(page) {
   await page.waitForTimeout(200);
 }
 
+/** Open My key and wait for a terminal usage state, including an unavailable upstream. */
+export async function openMyKey(page) {
+  if (!(await page.$('.wp-settings-menu'))) await page.click('button.wp-user');
+  await page.click('.wp-settings-menu [data-wp-my-key]');
+  await page.waitForSelector(K + '[open]');
+  await page.waitForFunction(selector => {
+    const state = document.querySelector(selector + ' [data-wp-my-key-card="usage"]')?.dataset.state;
+    return state === 'ready' || state === 'unavailable';
+  }, K);
+}
+
 export async function openEntry(page, text) {
   await page.click(`${D} .wp-feedback-entry:has-text(${JSON.stringify(text)})`);
   await page.waitForFunction(text => (document.querySelector('#wp-feedback-detail:not([hidden]) h3')?.textContent || '').includes(text), text);
   await page.waitForTimeout(200);
 }
 
-/** The settings menu as a comma separated list of its children. OWNSEP is a separator added by the feedback script. */
+/** The settings menu as a comma separated list of its children. OWNSEP belongs to an optional entry. */
 export function menuShape(page) {
   return page.evaluate(() => {
     const menu = document.querySelector('.wp-settings-menu');
     if (!menu) return null;
     const kids = [...menu.children].map(kid => kid.hasAttribute('data-wp-feedback') ? 'FEEDBACK'
-      : kid.classList.contains('wp-pick-sep') ? (kid.hasAttribute('data-wp-feedback-separator') ? 'OWNSEP' : 'SEP')
+      : kid.hasAttribute('data-wp-my-key') ? 'MYKEY'
+      : kid.classList.contains('wp-pick-sep') ? (kid.hasAttribute('data-wp-feedback-separator') || kid.hasAttribute('data-wp-my-key-separator') ? 'OWNSEP' : 'SEP')
         : kid.getAttribute('role') === 'menuitem' ? 'LOGOUT' : kid.className.split(' ')[0]);
     const box = menu.getBoundingClientRect(), avatar = document.querySelector('button.wp-user').getBoundingClientRect();
     return {
       kids: kids.join(','), entries: kids.filter(kid => kid === 'FEEDBACK').length, separators: kids.filter(kid => kid.endsWith('SEP')).length,
+      ...(kids.includes('MYKEY') ? { myKeyEntries: kids.filter(kid => kid === 'MYKEY').length } : {}),
       label: menu.querySelector('[data-wp-feedback]')?.textContent ?? null, menus: document.querySelectorAll('.wp-settings-menu').length,
       aboveAvatar: box.bottom <= avatar.top + 0.5, inViewport: box.top >= 0 && box.left >= 0 && box.bottom <= innerHeight && box.right <= innerWidth,
     };
@@ -123,7 +137,7 @@ export function menuShape(page) {
 }
 
 /** Horizontal overflow facts for the open dialog and the page behind it. */
-export function overflow(page) {
+export function overflow(page, selector = D) {
   return page.evaluate(selector => {
     const dialog = document.querySelector(selector), box = dialog.getBoundingClientRect();
     const outside = [...dialog.querySelectorAll('*')].filter(node => {
@@ -135,7 +149,7 @@ export function overflow(page) {
       dialogScrollWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth, outside,
       dialogInViewport: box.left >= 0 && box.top >= 0 && box.right <= innerWidth + 0.5 && box.bottom <= innerHeight + 0.5,
     };
-  }, D);
+  }, selector);
 }
 
 /** Where the detail heading and any status message sit relative to the visible part of the dialog. */

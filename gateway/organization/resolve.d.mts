@@ -67,7 +67,8 @@ export interface Organization {
     tools?: Record<string, { category?: string; platform?: { id: string; name: { zh: string; en: string } }; example?: { zh: string; en: string } }> };
   bridge: { template: string; upgradeKeys?: { key: string; from?: (string | number | boolean)[] }[] };
   tools?: { legacyRollout?: string };
-  features: { feishuAuthorization: boolean; feishuOnboarding: boolean; marketSkills: boolean; autoTitle: boolean; preview: boolean };
+  myKey: { allow: string[]; publicBaseUrl: string; revealSeconds: number };
+  features: { myKey: boolean; feishuAuthorization: boolean; feishuOnboarding: boolean; marketSkills: boolean; autoTitle: boolean; preview: boolean };
   extensions: { configFiles: string[]; gatewayModule: string };
   dataTools?: { catalog: string; blockedPrefixes?: string[]; legacyPassthrough?: string[]; usageAliases?: string[]; provider: {
     origin: string; tokenFile: string; orgIdEnvironment: string; orgSlugEnvironment: string;

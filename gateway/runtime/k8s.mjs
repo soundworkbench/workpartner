@@ -234,6 +234,16 @@ export function createK8sRuntime(o = {}) {
       });
     });
   }
+  const rekey = slug => exclusive(slug, async c => {
+    const route = `${core}/secrets/${names(slug).modelKey}`;
+    let key;
+    try { key = fs.readFileSync(path.join(o.secureDir, `${o.keyPrefix ?? 'model-'}${slug}.key`)); }
+    catch { throw new Error('Cannot read model key file'); }
+    if (await c.get(route)) {
+      try { await c.patch(route, { data: { 'model.key': key.toString('base64') } }, 'merge'); }
+      catch (error) { if (error.status !== 404) throw error; }
+    }
+  });
   async function inspect(slug) {
     const n = names(slug), cached = caches.get(slug);
     if (cached && cached.expires > Date.now()) return copy(cached.value);
@@ -350,7 +360,7 @@ export function createK8sRuntime(o = {}) {
     const factory = o.createK8sFiles ?? (await import('./k8s-files.mjs')).createK8sFiles;
     return factory({ ...await context(), exec });
   })();
-  return { inspect, ensureIsolation, create, start, stop, restart, remove, runOnce, imageId, exec,
+  return { inspect, ensureIsolation, create, start, stop, restart, rekey, remove, runOnce, imageId, exec,
     execNamed: async (name, ...args) => {
       if (!dnsLabel(name)) throw new Error('Invalid runtime Pod name');
       return (await execMethods(o.systemContainer ?? name)).execNamed(name, ...args);

@@ -86,19 +86,26 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
   execute: executeSkill,
 });
 const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
-let feedback; // The preview callback is evaluated per request, after feedback initialization.
-const services = await createGatewayServices({ extraClient: user => feedback?.clientFor(user) || '', dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+let feedback, myKey; // Preview callbacks run per request after feature initialization.
+const services = await createGatewayServices({ extraClient: user => (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || ''), dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
 aionui.startReconcileImages(users, organization.runtime.k8s?.reconcileImagesIntervalMs);
-const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
+const modelKeyFile = user => `${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`;
+const modelKeyFor = user => fs.readFileSync(modelKeyFile(user), 'utf8').trim();
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
 import { createFeedback } from './feedback.mjs';
+import { createMyKey } from './my-key.mjs';
 feedback = organization.features.feedback ? createFeedback({ organization, organizationData,
   authenticate: req => userFor(req).user, tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()),
   sessionAuthenticate: sessionOf,
+}) : undefined;
+
+myKey = organization.features.myKey === true ? createMyKey({ organization, organizationData,
+  authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
+  runtime, restarted: slug => aionui.forget(slug), keyFile: modelKeyFile,
 }) : undefined;
 
 function sessionOf(req) {
@@ -283,7 +290,7 @@ const server = http.createServer(async (req, res) => {
     if (await preview?.handle(req, res, url)) return;
     if (!preview && url.pathname === "/_wp/preview/client.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
-      return res.end("// Workspace preview is disabled." + (feedback?.clientFor(userFor(req).user) || ""));
+      return res.end("// Workspace preview is disabled." + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || ""));
     }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
@@ -294,6 +301,7 @@ const server = http.createServer(async (req, res) => {
     if (await marketTools(req, res, url)) return;
     if (organization.features.marketSkills && await marketSkills(req, res, url)) return;
     if (feedback && await feedback(req, res, url)) return;
+    if (myKey && await myKey(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
