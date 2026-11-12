@@ -156,3 +156,67 @@ Regression development runs (before fixes or before updating explicitly changed 
 - No real SSH, Docker rotation, external key store or deployed workspace was contacted. Broker/integration tests use actual Python helpers and local files; upstream HTTP is exercised through in-memory transport fixtures.
 - S11 intentionally limits daily completion lookup to today's file. The last outcome ordinarily provides retry deduplication across midnight. If the previous day's count was saved but the last outcome was not saved before midnight, recovery can also charge the new day. The organization documentation now states this narrow limit instead of claiming unconditional cross-midnight protection.
 - The existing organization startup test needs rerunning in an environment that permits normal child-process output capture.
+
+## Rework 4
+
+`tools/key-reset/key-store.py`, `main()`: after rotation, `rotate-failed` now requires a completed command with status 1–124 and the old hash still stored. Signal termination (negative return code), status 125 or above, timeout, OS error, and zero exit without the new value remain `unknown`, preserving the broker's existing quiet-period recovery. New-value success and pre-execution rejection of option-like identifiers are unchanged. Updated the result table and store-helper explanation in `docs/key-reset.md`.
+
+Added `store helper returns unknown for signal and exec-client failures, and rotate-failed only for ordinary failures with the old hash`: real Python rotate subprocesses kill themselves with SIGKILL or exit 125/126/127/255 and must return `unknown`; exits 1 and 124 must return `rotate-failed`. Every case verifies the store is unchanged. Existing assertions were retained, including `store helper returns unknown on timeout, OS error or zero exit without a change, and rejects option identifiers` and `uncertain rotations wait through the quiet period, resume after restart and finish forward when they land`.
+
+Commands and results (Node v24.22.1, Python 3.14.4; no downloads):
+
+```sh
+/tmp/r3-node24 --test --test-isolation=none --test-name-pattern='store helper returns unknown for signal' tools/key-reset-broker.test.mjs
+```
+
+Before the fix: **0 passed, 1 failed**, the expected SIGKILL regression (`rotate-failed` instead of `unknown`).
+
+```sh
+/tmp/r3-node24 --test --test-isolation=none tools/key-reset-broker.test.mjs tools/key-reset-integration.test.mjs
+```
+
+After the fix: **45 passed, 0 failed**, no skips or cancellations (37 broker tests and 8 integration tests).
+
+```sh
+/tmp/r3-node24 --check tools/key-reset-broker.test.mjs
+python3 -I -B - <<'PY'
+import ast
+from pathlib import Path
+file = Path('tools/key-reset/key-store.py')
+ast.parse(file.read_bytes(), filename=str(file))
+print('1 Python file parsed; 0 failures')
+PY
+git diff --check
+```
+
+JavaScript syntax: **1 passed, 0 failed**. Python parse: **1 passed, 0 failed**. Whitespace check: **1 passed, 0 failed**.
+
+Browser and socket-based tests were not run under the unchanged sandbox restrictions. No real remote rotation was attempted. No commit, push, or branch switch was performed; HEAD remains `bc88ca2` on `T-1163-my-key-reset`.
+
+## Rework 5
+
+`tools/key-reset-broker.mjs`, `start()`: any signal-check error now makes the recorded lock owner stale, including `EPERM` under a hardened service with hidden `/proc` entries. Successful checks retain the existing start-time comparison. Added optional `signal` and `processStart` dependencies with the real implementations as defaults, and one sentence documenting the rule in `docs/key-reset.md`. The gateway's per-person lock and all rework 4 changes are preserved.
+
+Added `broker lock reclaims an owner when the signal check fails with EPERM or another error`: injects `EPERM`, `ESRCH`, and `EIO` with an unreadable process start time; checks startup, owner replacement, continued single-instance exclusion, and lock release. Existing lock assertions are unchanged.
+
+Exact validation commands:
+
+```sh
+/tmp/r3-node24 --test --test-isolation=none --test-name-pattern='broker lock reclaims an owner when the signal check fails' tools/key-reset-broker.test.mjs
+```
+
+With injection added but before fixing the error handling: **0 passed, 1 failed**, reproducing `broker-running` for `EPERM`.
+
+```sh
+/tmp/r3-node24 --test --test-isolation=none tools/key-reset-broker.test.mjs tools/key-reset-integration.test.mjs
+```
+
+After the fix: **46 passed, 0 failed** (38 broker tests and 8 integration tests), with no skips or cancellations.
+
+```sh
+/tmp/r3-node24 --check tools/key-reset-broker.mjs
+/tmp/r3-node24 --check tools/key-reset-broker.test.mjs
+git diff --check
+```
+
+JavaScript syntax: **2 passed, 0 failed**. Whitespace check: **1 passed, 0 failed**. Browser and socket-based tests were not run under the unchanged sandbox restrictions; no real remote rotation was attempted. No commit, push, or branch switch was performed.

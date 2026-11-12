@@ -83,7 +83,8 @@ def main(request):
             drift = sorted(k for k in before.keys() | fields.keys()
                            if (k not in before or k not in fields or before[k] != fields[k]))
             return {"ok": True, "drift": drift, "entries": len(after) == len(rows)}
-        if completed is not None and completed.returncode != 0 and isinstance(entry.get("secret"), str) and digest(entry["secret"]) == current:
+        # Signals and exec-client failures cannot rule out a later remote write.
+        if completed is not None and 1 <= completed.returncode <= 124 and isinstance(entry.get("secret"), str) and digest(entry["secret"]) == current:
             return {"ok": False, "code": "rotate-failed"}
     except Exception:
         pass

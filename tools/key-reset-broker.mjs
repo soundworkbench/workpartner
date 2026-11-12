@@ -158,6 +158,7 @@ function saveState(filename, data) {
 }
 
 export function createBroker(input, { now = Date.now, randomBytes = crypto.randomBytes, run = runHelper,
+  signal = process.kill, processStart: startTime = processStart,
   log = line => process.stderr.write(line + '\n') } = {}) {
   const config = validateConfig(input), root = config.stateDirectory;
   const pending = new Map(), stuck = new Map(), unresolved = new Map(), malformed = new Set();
@@ -188,9 +189,10 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
         for (const name of fs.readdirSync(filename)) {
           const match = /^(\d+)-(\d+|unknown)-[0-9a-f]{32}$/.exec(name);
           if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) < 1) throw error('broker-running');
-          const pid = Number(match[1]), started = processStart(pid);
+          const pid = Number(match[1]), started = startTime(pid);
           let alive = true;
-          try { process.kill(pid, 0); } catch (failure) { if (failure.code === 'ESRCH') alive = false; }
+          // The lock owner runs as our user, so any signal error means it is stale.
+          try { signal(pid, 0); } catch { alive = false; }
           // A reused PID is not the lock owner; this process has no active lock here.
           if (pid !== process.pid && alive && (!started || match[2] === 'unknown' || started === match[2])) throw error('broker-running');
           try { fs.unlinkSync(path.join(filename, name)); } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
@@ -198,7 +200,7 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
         try { fs.rmdirSync(filename); } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
       } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
       const token = crypto.randomBytes(16).toString('hex'), temporary = path.join(root, `.broker-lock-${token}`);
-      const owner = `${process.pid}-${processStart(process.pid) || 'unknown'}-${token}`;
+      const owner = `${process.pid}-${startTime(process.pid) || 'unknown'}-${token}`;
       fs.mkdirSync(temporary, { mode: 0o700 });
       try {
         fs.writeFileSync(path.join(temporary, owner), '', { flag: 'wx', mode: 0o600, flush: true });

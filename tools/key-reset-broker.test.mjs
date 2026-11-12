@@ -642,6 +642,24 @@ test('store helper returns unknown on timeout, OS error or zero exit without a c
   assert.equal(fs.existsSync(f.argvFile), false);
 });
 
+test('store helper returns unknown for signal and exec-client failures, and rotate-failed only for ordinary failures with the old hash', async t => {
+  const f = fixture(t), current = hash(f.original[0].secret);
+  for (const [behavior, code] of [
+    ['import os,signal; os.kill(os.getpid(), signal.SIGKILL)', 'unknown'],
+    ['sys.exit(125)', 'unknown'],
+    ['sys.exit(126)', 'unknown'],
+    ['sys.exit(127)', 'unknown'],
+    ['sys.exit(255)', 'unknown'],
+    ['sys.exit(1)', 'rotate-failed'],
+    ['sys.exit(124)', 'rotate-failed'],
+  ]) {
+    const rotate = ['python3', '-c', `import sys; sys.stdin.read(); ${behavior}`, '{id}'];
+    assert.deepEqual(await f.helper('key-store', 'rotate', { current, next: 'fixture-next-key', rotate }),
+      { ok: false, code }, behavior);
+    assert.deepEqual(read(f.store), f.original);
+  }
+});
+
 test('malformed inflight records are audited once and do not block other requests', async t => {
   const f = fixture(t), service = f.broker(); service.start();
   const bad = identifier(9);
@@ -707,6 +725,32 @@ test('staged lookup uses the exact configured prefix and slug even when one slug
   await f.helper('gateway-host', 'claim', { ...row, stage: false });
   await f.helper('gateway-host', 'finish', { ...row, ok: false, code: 'no-key' });
   assert.equal(fs.readFileSync(other, 'utf8'), 'fixture-other-key');
+});
+
+test('broker lock reclaims an owner when the signal check fails with EPERM or another error', t => {
+  for (const code of ['EPERM', 'ESRCH', 'EIO']) {
+    const f = fixture(t), pid = process.pid + 1;
+    const lock = path.join(f.local, 'broker.lock'), owner = `${pid}-123-${identifier(99)}`;
+    fs.mkdirSync(lock, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(lock, owner), '', { mode: 0o600 });
+    const checks = [];
+    const service = f.broker({
+      signal: (checkedPid, signal) => {
+        checks.push([checkedPid, signal]);
+        throw Object.assign(new Error('fixture signal denied'), { code });
+      },
+      processStart: () => null,
+    });
+    assert.doesNotThrow(() => service.start(), code);
+    assert.deepEqual(checks, [[pid, 0]]);
+    const owners = fs.readdirSync(lock);
+    assert.equal(owners.length, 1);
+    assert.ok(owners[0].startsWith(`${process.pid}-unknown-`));
+    assert.equal(fs.existsSync(path.join(lock, owner)), false);
+    assert.throws(() => f.broker().start(), /broker-running/);
+    service.close();
+    assert.equal(fs.existsSync(lock), false);
+  }
 });
 
 test('broker lock reclaims a reused PID with a different start time and a stale self PID', async t => {
