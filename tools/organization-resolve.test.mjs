@@ -148,3 +148,12 @@ test('my key defaults are disabled and organization overrides preserve the secti
   assert.equal(org.features.myKey, true);
   assert.deepEqual(org.myKey, { ...myKey, reference: { weekly: 0, accounts: {} } });
 });
+
+test('voice input defaults are disabled with no model and overrides merge into the section', t => {
+  const defaults = resolveOrganization(fixture(t));
+  assert.equal(defaults.features.voiceInput, false);
+  assert.deepEqual(defaults.voiceInput, { allow: [], model: '', language: '', maxSeconds: 60, maxBytes: 5242880 });
+  const org = resolveOrganization(fixture(t, { features: { voiceInput: true }, voiceInput: { allow: ['*'], model: 'speech-model' } }));
+  assert.equal(org.features.voiceInput, true);
+  assert.deepEqual(org.voiceInput, { allow: ['*'], model: 'speech-model', language: '', maxSeconds: 60, maxBytes: 5242880 });
+});

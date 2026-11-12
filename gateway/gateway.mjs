@@ -86,8 +86,9 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
   execute: executeSkill,
 });
 const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
-let feedback, myKey; // Preview callbacks run per request after feature initialization.
-const services = await createGatewayServices({ extraClient: user => (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || ''), dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+let feedback, myKey, voiceInput; // Preview callbacks run per request after feature initialization.
+const extraClient = user => (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || '') + (voiceInput?.clientFor(user) || '');
+const services = await createGatewayServices({ extraClient, dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
@@ -103,6 +104,10 @@ feedback = organization.features.feedback ? createFeedback({ organization, organ
 }) : undefined;
 
 myKey = organization.features.myKey === true ? createMyKey({ organization, organizationData,
+  authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
+}) : undefined;
+import { createVoiceInput } from './voice-input.mjs';
+voiceInput = organization.features.voiceInput === true ? createVoiceInput({ organization, organizationData,
   authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
 }) : undefined;
 
@@ -288,7 +293,7 @@ const server = http.createServer(async (req, res) => {
     if (await preview?.handle(req, res, url)) return;
     if (!preview && url.pathname === "/_wp/preview/client.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
-      return res.end("// Workspace preview is disabled." + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || ""));
+      return res.end("// Workspace preview is disabled." + extraClient(userFor(req).user));
     }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
@@ -300,6 +305,7 @@ const server = http.createServer(async (req, res) => {
     if (organization.features.marketSkills && await marketSkills(req, res, url)) return;
     if (feedback && await feedback(req, res, url)) return;
     if (myKey && await myKey(req, res, url)) return;
+    if (voiceInput && await voiceInput(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
