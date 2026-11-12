@@ -819,6 +819,102 @@ test('organization userResources overrides each user limit independently without
     { requests: { memory: '768Mi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } });
 });
 
+test('organization userResources overrides requests independently alongside limits', async t => {
+  const { client, secureDir } = fixture(t);
+  const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    nextMemory: 4294967296, nanoCpus: 1500000000, secureDirectory: secureDir,
+    k8s: { namespace: 'users', storageClass: 'local-data', memoryRequest: '768Mi', cpuRequest: '200m',
+      userResources: { 'fixture-memory': { memoryRequest: '1Gi' }, 'fixture-cpu': { cpuRequest: '500m' },
+        person: { memoryRequest: '2Gi', cpuRequest: '750m', memory: '8Gi', cpu: '3' }, 'fixture-empty': {} } } } };
+  const runtime = createRuntime(organization, { client });
+  const expected = {
+    'fixture-memory': { requests: { memory: '1Gi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } },
+    'fixture-cpu': { requests: { memory: '768Mi', cpu: '500m' }, limits: { memory: '4294967296', cpu: '1.5' } },
+    person: { requests: { memory: '2Gi', cpu: '750m' }, limits: { memory: '8Gi', cpu: '3' } },
+    'fixture-empty': { requests: { memory: '768Mi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } },
+    'fixture-default': { requests: { memory: '768Mi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } },
+  };
+  for (const [slug, resources] of Object.entries(expected)) {
+    fs.writeFileSync(path.join(secureDir, `model-${slug}.key`), 'fixture-key');
+    await runtime.create({ slug });
+    assert.deepEqual(client.objects.get(`${apps}/fixture-${slug}`).spec.template.spec.containers[0].resources, resources);
+  }
+  await runtime.runOnce('person');
+  const job = client.calls.find(([method, route]) => method === 'create' && route === `${core}/pods`)[2];
+  assert.deepEqual(job.spec.containers[0].resources,
+    { requests: { memory: '768Mi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } });
+});
+
+test('organization userResources stringifies finite numeric requests and limits', async t => {
+  const { client, secureDir } = fixture(t);
+  const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    secureDirectory: secureDir, k8s: { namespace: 'users', storageClass: 'local-data' } } };
+  for (const [overrides, expected] of [
+    [{ memoryRequest: 268435456, cpuRequest: 0.5, memory: 4294967296, cpu: 2 },
+      { requests: { memory: '268435456', cpu: '0.5' }, limits: { memory: '4294967296', cpu: '2' } }],
+    [{ memoryRequest: 0, cpuRequest: 0, memory: 0, cpu: 0 },
+      { requests: { memory: '0', cpu: '0' }, limits: { memory: '0', cpu: '0' } }],
+  ]) {
+    organization.runtime.k8s.userResources = { person: overrides };
+    await createRuntime(organization, { client }).create({ slug: 'person' });
+    assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources, expected);
+  }
+});
+
+test('organization userResources ignores invalid values independently without affecting other users', async t => {
+  const { client, secureDir } = fixture(t);
+  fs.writeFileSync(path.join(secureDir, 'model-fixture-default.key'), 'fixture-key');
+  const valid = { memoryRequest: '1Gi', cpuRequest: '500m', memory: '8Gi', cpu: '3' };
+  const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    nextMemory: 4294967296, nanoCpus: 1500000000, secureDirectory: secureDir,
+    k8s: { namespace: 'users', storageClass: 'local-data', memoryRequest: '768Mi', cpuRequest: '200m' } } };
+  const expected = {
+    memoryRequest: { requests: { memory: '768Mi', cpu: '500m' }, limits: { memory: '8Gi', cpu: '3' } },
+    cpuRequest: { requests: { memory: '1Gi', cpu: '200m' }, limits: { memory: '8Gi', cpu: '3' } },
+    memory: { requests: { memory: '1Gi', cpu: '500m' }, limits: { memory: '4294967296', cpu: '3' } },
+    cpu: { requests: { memory: '1Gi', cpu: '500m' }, limits: { memory: '8Gi', cpu: '1.5' } },
+  };
+  for (const value of [null, '', {}, [], true, false, NaN, Infinity, -Infinity]) {
+    for (const [key, resources] of Object.entries(expected)) {
+      organization.runtime.k8s.userResources = { person: { ...valid, [key]: value } };
+      const runtime = createRuntime(organization, { client });
+      await assert.doesNotReject(() => runtime.create({ slug: 'person' }));
+      assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources, resources);
+      await runtime.create({ slug: 'fixture-default' });
+      assert.deepEqual(client.objects.get(`${apps}/fixture-fixture-default`).spec.template.spec.containers[0].resources,
+        { requests: { memory: '768Mi', cpu: '200m' }, limits: { memory: '4294967296', cpu: '1.5' } });
+    }
+  }
+});
+
+test('organization userResources persists requests on recreation and restores removed keys to global values', async t => {
+  const { client, secureDir } = fixture(t);
+  const organization = { runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    nextMemory: 4294967296, nanoCpus: 1500000000, secureDirectory: secureDir,
+    k8s: { namespace: 'users', storageClass: 'local-data', memoryRequest: '768Mi', cpuRequest: '200m',
+      userResources: { person: { memoryRequest: '1Gi', cpuRequest: '500m', memory: '8Gi', cpu: '3' } } } } };
+  await createRuntime(organization, { client }).create({ slug: 'person' });
+  assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources,
+    { requests: { memory: '1Gi', cpu: '500m' }, limits: { memory: '8Gi', cpu: '3' } });
+  organization.runtime.k8s.memoryRequest = '256Mi';
+  organization.runtime.k8s.cpuRequest = '100m';
+  await createRuntime(organization, { client }).create({ slug: 'person' });
+  assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources,
+    { requests: { memory: '1Gi', cpu: '500m' }, limits: { memory: '8Gi', cpu: '3' } });
+  await createRuntime(organization, { client }).remove('person');
+  await createRuntime(organization, { client }).create({ slug: 'person' });
+  assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources,
+    { requests: { memory: '1Gi', cpu: '500m' }, limits: { memory: '8Gi', cpu: '3' } });
+  delete organization.runtime.k8s.userResources.person.memoryRequest;
+  await createRuntime(organization, { client }).create({ slug: 'person' });
+  assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources,
+    { requests: { memory: '256Mi', cpu: '500m' }, limits: { memory: '8Gi', cpu: '3' } });
+  delete organization.runtime.k8s.userResources;
+  await createRuntime(organization, { client }).create({ slug: 'person' });
+  assert.deepEqual(client.objects.get(stsPath).spec.template.spec.containers[0].resources,
+    { requests: { memory: '256Mi', cpu: '100m' }, limits: { memory: '4294967296', cpu: '1.5' } });
+});
+
 test('user Pod renders and clears the optional quick-line model from runtime configuration', async t => {
   const { runtime, client } = fixture(t);
   for (const quickLineModel of ['fast-model', undefined, '']) {

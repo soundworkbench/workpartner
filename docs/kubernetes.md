@@ -39,7 +39,7 @@
 | `newUserNodeSelector` | `{}` | 字符串映射；仅当 PVC 非 Bound 且没有 `spec.volumeName` 时加入模板。已绑定卷由卷的节点约束决定位置。 |
 | `memoryRequest` | `512Mi` | 用户主容器内存 request，Kubernetes quantity 字符串。 |
 | `cpuRequest` | `100m` | 用户主容器 CPU request。 |
-| `userResources` | 无（各用户 `{}`） | `{slug: {memory?, cpu?}}`，覆盖用户主容器 limits；字符串或数值，写模板时转字符串；不覆盖 requests，也不覆盖一次性维护 Pod 的全局 limits。 |
+| `userResources` | 无（各用户 `{}`） | `{slug: {memory?, cpu?, memoryRequest?, cpuRequest?}}`；`memory`、`cpu` 分别覆盖用户主容器 `limits.memory`、`limits.cpu`，`memoryRequest`、`cpuRequest` 分别覆盖 `requests.memory`、`requests.cpu`。四个键独立，仅采用非空字符串或有限数值，写模板时转字符串；其他值（如 `null`、空串、对象、数组、布尔、`NaN`、无穷）忽略并回落到对应全局值，不因这些值抛错或影响其他用户。未配置或撤掉某个键后，下次 `create` 使用对应全局值；保留的键在重建时继续生效。一次性维护 Pod 的 requests 和 limits 仍用全局值。按人 request 不能超过实际生效的 limit（按人或全局），否则 API Server 会拒绝该用户的模板，`create` 报错。 |
 | `userPriorityClass` | 无 | 可选的已有 PriorityClass；工具不会创建它。 |
 | `imageConfigMap` | `workpartner-images` | 系统命名空间的镜像登记；`data["images.json"]` 是 `{镜像引用: config摘要}`。 |
 | `governingService` | `workpartner-users` | 用户 StatefulSet 的 headless Service。 |
