@@ -164,6 +164,7 @@
   "features": {
     "feedback": false,
     "myKey": false,
+    "voiceInput": false,
     "feishuAuthorization": false,
     "feishuOnboarding": true,
     "marketSkills": true,
@@ -175,6 +176,13 @@
     "publicBaseUrl": "",
     "revealSeconds": 30,
     "reference": { "weekly": 0, "accounts": {} }
+  },
+  "voiceInput": {
+    "allow": [],
+    "model": "",
+    "language": "",
+    "maxSeconds": 60,
+    "maxBytes": 5242880
   },
   "feedback": {
     "allow": [],
