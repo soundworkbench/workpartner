@@ -4,6 +4,7 @@ import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import { myKeyClient } from './my-key-client.mjs';
+import { createMyKeyReset } from './my-key-reset.mjs';
 
 const API = '/_wp/api/my-key';
 export const USAGE_ZONE = 'UTC';
@@ -124,7 +125,7 @@ function upstream(url, key, timeoutMs) {
   });
 }
 
-function readAction(req) {
+function readAction(req, reset = false) {
   return new Promise((resolve, reject) => {
     const chunks = []; let size = 0, oversized = false;
     req.on('data', chunk => {
@@ -137,25 +138,30 @@ function readAction(req) {
       if (oversized) return;
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        if (!object(body) || !['show', 'copy', 'copy-config'].includes(body.action)) throw fail(400);
+        if (!object(body) || (reset ? body.confirm !== 'reset' : !['show', 'copy', 'copy-config'].includes(body.action))) throw fail(400);
         resolve(body.action);
       } catch { reject(fail(400)); }
     });
   });
 }
 
-export function createMyKey({ organization, organizationData, authenticate, sessionAuthenticate = () => null, keyFor, now = Date.now, timeoutMs = 5000 }) {
+export function createMyKey({ organization, organizationData, authenticate, sessionAuthenticate = () => null, keyFor, now = Date.now, timeoutMs = 5000,
+  runtime, restarted = () => {}, keyFile = user => path.join(organization.runtime.secureDirectory, `${organization.model.keyPrefix ?? 'model-'}${user.slug}.key`),
+  timers, timing }) {
   const origin = organization.server.publicOrigin || `https://${organization.server.publicHost}`;
   function policy() {
     try {
       const config = organizationData()?.myKey;
       return { allow: Array.isArray(config?.allow) && config.allow.every(v => typeof v === 'string') ? config.allow : [],
+        reset: { enabled: config?.reset?.enabled === true,
+          blocked: Array.isArray(config?.reset?.blocked) && config.reset.blocked.every(v => typeof v === 'string') ? config.reset.blocked : ['*'],
+          blockedNote: typeof config?.reset?.blockedNote === 'string' ? config.reset.blockedNote.trim().slice(0, 200) : '' },
         reference: config?.reference,
         baseUrl: publicBaseUrl(config?.publicBaseUrl),
         revealSeconds: Number.isInteger(config?.revealSeconds) ? Math.max(2, Math.min(300, config.revealSeconds)) : 30 };
     } catch { return { allow: [], baseUrl: '', revealSeconds: 30 }; }
   }
-  const admitted = (user, config) => Boolean(user?.slug && user?.unionId && config.allow.some(v => v === '*' || v === user.slug || v === user.unionId));
+  const admitted = (user, config) => Boolean(typeof user?.slug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(user.slug) && user?.unionId && config.allow.some(v => v === '*' || v === user.slug || v === user.unionId));
   async function readKey(user) {
     try { return (await keyFor(user))?.trim() || null; }
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -165,13 +171,26 @@ export function createMyKey({ organization, organizationData, authenticate, sess
       ...(data === undefined ? { 'content-length': 0 } : {}) });
     res.end(data === undefined ? '' : JSON.stringify(data));
   };
+  const reset = createMyKeyReset({ organization, policy, runtime, restarted, keyFile, now, timers, timing,
+    verify: key => upstream(organization.model.baseUrl.replace(/\/+$/, '') + '/magpie/me', key, timeoutMs) });
   const handle = async (req, res, url) => {
-    if (![API, API + '/reveal'].includes(url.pathname)) return false;
+    if (![API, API + '/reveal', API + '/reset'].includes(url.pathname)) return false;
     try {
       const user = authenticate(req);
       if (!user && !sessionAuthenticate(req)) throw fail(401);
       const config = policy();
       if (!admitted(user, config)) { reply(res, 404); return true; }
+      if (url.pathname === API + '/reset') {
+        if (!reset.enabled(config)) { reply(res, 404); return true; }
+        if (!['GET', 'POST'].includes(req.method)) throw fail(405);
+        if (req.method === 'GET') reply(res, 200, reset.status(user, config));
+        else {
+          if (req.headers.origin !== origin || !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) throw fail(403);
+          await readAction(req, true);
+          reply(res, 202, await reset.accept(user));
+        }
+        return true;
+      }
       const reveal = url.pathname.endsWith('/reveal');
       if (req.method !== (reveal ? 'POST' : 'GET')) throw fail(405);
       if (reveal) {
@@ -195,15 +214,17 @@ export function createMyKey({ organization, organizationData, authenticate, sess
           const reference = [accounts[user.slug], accounts[user.unionId], config.reference?.weekly].find(positive);
           mapped = mapUpstream(profile, usage, windows, reference);
         }
-        reply(res, 200, { key: key ? { masked: maskKey(key) } : null, revealSeconds: config.revealSeconds, baseUrl: config.baseUrl, defaults, ...mapped });
+        reply(res, 200, { key: key ? { masked: maskKey(key) } : null, revealSeconds: config.revealSeconds, baseUrl: config.baseUrl, defaults, ...mapped, reset: reset.summary(user, config) });
       }
     } catch (error) {
       // Only known system codes may be logged; never error messages, bodies or upstream data.
       if (!error.status) console.error('[my-key] ' + (['ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'ENOSPC', 'EROFS', 'EIO'].includes(error.code) ? error.code : 'UNAVAILABLE'));
-      reply(res, error.status || 503, { error: 'My key request failed' });
+      if (error.status === 404 && url.pathname === API + '/reset') reply(res, 404);
+      else reply(res, error.status || 503, { error: 'My key request failed', ...(['blocked', 'no-key', 'limit', 'unavailable', 'busy'].includes(error.reason) ? { reason: error.reason } : {}) });
     }
     return true;
   };
+  handle.close = reset.close;
   handle.clientFor = user => organization.features?.myKey === false || !admitted(user, policy()) ? '' : myKeyClient();
   return handle;
 }

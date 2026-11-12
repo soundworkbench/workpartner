@@ -71,7 +71,7 @@ export function createMigration({ runtime }, log = console.error) {
   // Recheck before each runtime write, including work queued before an ownership change.
   function guardRuntime(runtime, users, fixedUser) {
     if (!config?.ownersFile) return runtime;
-    const writes = new Set(['ensureIsolation', 'create', 'start', 'stop', 'restart', 'remove', 'exec', 'processes', 'runOnce', 'putFiles', 'removeFiles']);
+    const writes = new Set(['ensureIsolation', 'create', 'start', 'stop', 'restart', 'rekey', 'remove', 'exec', 'processes', 'runOnce', 'putFiles', 'removeFiles']);
     return new Proxy(runtime, { get(target, name) {
       const method = target[name];
       if (typeof method !== 'function') return method;

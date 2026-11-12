@@ -74,7 +74,7 @@ test('session identity owns masked and revealed keys regardless of selectors', a
   for (const [index, person] of people.entries()) {
     const other = people[1 - index];
     const get = await f.request(API + `?slug=${other.slug}&user=${other.unionId}`, { member: person.slug, headers: { 'x-user': other.slug, 'x-union-id': other.unionId } });
-    assert.equal(get.status, 200); assert.deepEqual(get.data.key, { masked: maskKey(keys[index]) });
+    assert.equal(get.status, 200); assert.equal(get.data.reset, null); assert.deepEqual(Object.keys(get.data).sort(), ['baseUrl', 'defaults', 'key', 'models', 'reset', 'revealSeconds', 'usage']); assert.deepEqual(get.data.key, { masked: maskKey(keys[index]) });
     assert.ok(!get.body.includes(keys[index])); assert.ok(!get.body.includes(keys[1 - index]));
     const reveal = await f.reveal('copy', { member: person.slug, body: JSON.stringify({ action: 'copy', slug: other.slug, user: other.unionId }), headers: { 'x-user': other.slug } });
     assert.deepEqual(reveal.data, { key: keys[index] });

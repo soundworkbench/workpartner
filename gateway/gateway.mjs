@@ -92,7 +92,8 @@ const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
 aionui.startReconcileImages(users, organization.runtime.k8s?.reconcileImagesIntervalMs);
-const modelKeyFor = user => fs.readFileSync(`${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`, 'utf8').trim();
+const modelKeyFile = user => `${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`;
+const modelKeyFor = user => fs.readFileSync(modelKeyFile(user), 'utf8').trim();
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
 import { createFeedback } from './feedback.mjs';
@@ -104,6 +105,7 @@ feedback = organization.features.feedback ? createFeedback({ organization, organ
 
 myKey = organization.features.myKey === true ? createMyKey({ organization, organizationData,
   authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
+  runtime, restarted: slug => aionui.forget(slug), keyFile: modelKeyFile,
 }) : undefined;
 
 function sessionOf(req) {
