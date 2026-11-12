@@ -81,8 +81,8 @@ function installMyKey() {
     }
     function styles() {
       const style = node('style'); style.textContent = `
-.wp-my-key-dialog { position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(720px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:hidden; padding:0; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; color-scheme:light; }
-html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
+.wp-my-key-dialog { --wp-my-key-warn:#9a3412; --wp-my-key-over:#b42318; position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(720px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:hidden; padding:0; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; color-scheme:light; }
+html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-key-over:#ffb4a9; color-scheme:dark; }
 .wp-my-key-dialog::backdrop { background:rgba(0,0,0,.35); }
 .wp-my-key-content { --wp-my-key-padding:24px; max-height:calc(100dvh - 26px); overflow:auto; overflow-x:hidden; padding:0 var(--wp-my-key-padding) var(--wp-my-key-padding); }
 .wp-my-key-header { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 calc(-1 * var(--wp-my-key-padding)); padding:12px var(--wp-my-key-padding); background:var(--wp-card, #FDFDF8); border-bottom:1px solid var(--wp-line, #ddd); }
@@ -107,12 +107,17 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
 .wp-my-key-value { display:block; overflow-wrap:anywhere; margin:12px 0; }
 .wp-my-key-tiles { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 .wp-my-key-tile { padding:12px; border:1px solid var(--wp-line, #ddd); border-radius:8px; }
-.wp-my-key-tile[data-state=ready] [data-wp-my-key-cost] { font-size:20px; font-weight:600; }
+.wp-my-key-tile[data-state=ready] [data-wp-my-key-percent] { font-size:20px; font-weight:600; }
 .wp-my-key-dialog pre { max-width:100%; overflow:auto; padding:12px; background:var(--wp-main, #F2F2ED); border:1px solid var(--wp-line, #ddd); border-radius:8px; font-size:12px; }
 .wp-my-key-models { max-height:160px; overflow:auto; overflow-wrap:anywhere; }
 .wp-my-key-dialog input { width:100%; max-width:100%; display:block; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:8px 10px; background:var(--wp-main, #F2F2ED); color:var(--wp-ink, #222); font:inherit; margin:12px 0; }
 .wp-my-key-track { height:8px; background:var(--wp-hover, #eee); border-radius:8px; overflow:hidden; }
 .wp-my-key-fill { height:100%; background:var(--wp-send, #3C3F43); }
+.wp-my-key-tile[data-level=warn] { --wp-my-key-level:var(--wp-my-key-warn); }
+.wp-my-key-tile[data-level=over] { --wp-my-key-level:var(--wp-my-key-over); }
+.wp-my-key-tile[data-level=warn] .wp-my-key-fill, .wp-my-key-tile[data-level=over] .wp-my-key-fill { background:var(--wp-my-key-level); }
+.wp-my-key-tile[data-level=warn] [data-wp-my-key-percent], .wp-my-key-tile[data-level=over] [data-wp-my-key-percent], [data-wp-my-key-over] { color:var(--wp-my-key-level); }
+[data-wp-my-key-calls], [data-wp-my-key-over] { font-size:12px; margin-top:6px; }
 @media(max-width:400px) { .wp-my-key-content { --wp-my-key-padding:16px; } }
 `; document.head.append(style);
     }
@@ -196,10 +201,7 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
       } catch { if (current === version && dialog.open) failure(); }
       finally { if (result) result.key = ''; result = null; configuration = ''; if (current === version) { busy = false; renderKey(); } }
     }
-    const money = value => '$' + value.toFixed(2);
     const beijingTime = value => new Date(value).toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-    const beijingReset = value => new Date(value).toLocaleDateString(locale(), { timeZone: 'Asia/Shanghai', month: 'short', day: 'numeric' })
-      + t(' ', ', ') + beijingTime(value);
     function renderUsage() {
       const usage = data?.usage; ui.usage.replaceChildren(); ui.usage.dataset.state = loading ? 'loading' : usage ? 'ready' : 'unavailable';
       ui.usage.append(node('h3', t('用量', 'Usage')));
@@ -210,9 +212,27 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
       const tiles = node('div', undefined, 'wp-my-key-tiles');
       for (const name of ['today', 'week']) {
         const item = usage?.[name], tile = mark(node('div', undefined, 'wp-my-key-tile'), 'usage', name);
-        tile.dataset.state = item ? 'ready' : 'unavailable'; tile.append(node('strong', name === 'today' ? t('今天', 'Today') : t('本周', 'This week')));
-        tile.append(mark(node('div', item ? money(item.cost) : t('暂时取不到', 'Unavailable right now')), 'cost'),
-          mark(node('div', item ? t(`${item.calls} 次`, `${item.calls} requests`) : '', 'wp-my-key-muted'), 'calls')); tiles.append(tile);
+        const title = name === 'today' ? t('今天', 'Today') : t('本周', 'This week');
+        tile.dataset.state = item ? 'ready' : 'unavailable'; tile.append(node('strong', title));
+        if (!item) tile.append(node('div', t('暂时取不到', 'Unavailable right now')));
+        else {
+          if (typeof item.percent === 'number') {
+            const percent = item.percent, label = percent === 999 ? '999%+' : percent + '%';
+            const percentText = t(`已用 ${label}`, `${label} used`);
+            tile.dataset.level = percent >= 100 ? 'over' : percent >= 80 ? 'warn' : 'normal';
+            tile.append(mark(node('div', percentText), 'percent'));
+            const track = node('div', undefined, 'wp-my-key-track'); track.setAttribute('role', 'progressbar');
+            track.setAttribute('aria-label', title); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100');
+            track.setAttribute('aria-valuenow', String(Math.min(100, percent))); track.setAttribute('aria-valuetext', percentText);
+            const fill = node('div', undefined, 'wp-my-key-fill'); fill.style.width = Math.min(100, percent) + '%';
+            track.append(fill); tile.append(track);
+            if (percent >= 100) tile.append(mark(node('div', name === 'today'
+              ? t('已超过今天参考额度', "Over today's reference allowance")
+              : t('已超过本周参考额度', "Over this week's reference allowance")), 'over'));
+          }
+          tile.append(mark(node('div', t(`${item.calls} 次`, `${item.calls} requests`), 'wp-my-key-muted'), 'calls'));
+        }
+        tiles.append(tile);
       }
       ui.usage.append(tiles);
       const window = mark(node('p', '', 'wp-my-key-muted'), 'window');
@@ -220,25 +240,21 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
         const day = beijingTime(usage.today.start), week = beijingTime(usage.week.start);
         const weekday = new Date(usage.week.start).toLocaleDateString(locale(), { timeZone: 'Asia/Shanghai', weekday: 'long' });
         const zhWeekday = weekday.replace('星期', '周');
-        window.textContent = t(`今天从北京时间 ${day} 起算；本周从${zhWeekday} ${week}（北京时间）起算，与限额窗口一致。`,
-          `Today starts at ${day} Beijing time; the week starts on ${weekday} at ${week} Beijing time, the same windows the limits use.`);
+        window.textContent = t(`今天从北京时间 ${day} 起算；本周从${zhWeekday} ${week}（北京时间）起算。`,
+          `Today starts at ${day} Beijing time; the week starts on ${weekday} at ${week} Beijing time.`);
         ui.usage.append(window);
       }
-      const limits = mark(node('div'), 'limits'), entries = Object.entries(usage?.limits || {}).filter(([, limit]) => limit);
-      limits.dataset.state = entries.length ? 'limited' : 'none';
-      if (!entries.length) limits.textContent = t('暂不限额', 'No limit for now');
-      for (const [period, limit] of entries) {
-        const row = mark(node('div'), 'limit', period), format = limit.unit === 'cost' ? money : String;
-        const reset = beijingReset(limit.reset);
-        row.append(node('p', t(`${period === 'day' ? '每天' : '每周'}上限 ${format(limit.limit)} · 已用 ${format(limit.used)} · 剩余 ${format(limit.left)} · ${reset}（北京时间）恢复${limit.partial ? ' · 仅部分模型' : ''}`,
-          `${period === 'day' ? 'Daily' : 'Weekly'} limit ${format(limit.limit)} · Used ${format(limit.used)} · Left ${format(limit.left)} · Resets ${reset} Beijing time${limit.partial ? ' · Selected models only' : ''}`)));
-        const track = node('div', undefined, 'wp-my-key-track'); track.setAttribute('role', 'progressbar'); track.setAttribute('aria-label', period === 'day' ? t('今天', 'Today') : t('本周', 'This week'));
-        track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', String(limit.limit)); track.setAttribute('aria-valuenow', String(limit.used));
-        const fill = node('div', undefined, 'wp-my-key-fill'); fill.style.width = Math.min(100, limit.used / limit.limit * 100) + '%'; track.append(fill); row.append(track); limits.append(row);
+      if (['today', 'week'].some(name => typeof usage[name]?.percent === 'number')) {
+        const note = usage.enforced
+          ? t('进度条按每周参考额度计算，今天按它的五分之一。这把钥匙另设有用量上限，达到后会暂停，详情请问管理员。',
+            'The bars are measured against a weekly reference allowance (one fifth of it per day). This key also has a usage limit; it pauses when the limit is reached. Ask an administrator for details.')
+          : t('进度条按每周参考额度计算，今天按它的五分之一；目前超过不会停用，只作提醒。',
+            'The bars are measured against a weekly reference allowance (one fifth of it per day). Going over does not stop the key for now; it is only a reminder.');
+        ui.usage.append(mark(node('p', note, 'wp-my-key-muted'), 'reference-note'));
       }
       const models = mark(node('p'), 'top-models'); models.hidden = !usage?.week?.models?.length;
       if (!models.hidden) models.textContent = t('本周常用：', 'Top models this week: ') + usage.week.models.map(m => `${m.name} ${Number((m.share * 100).toFixed(2))}%`).join(' · ');
-      ui.usage.append(mark(node('p', t('金额为估算，仅供参考，不是账单。', 'Amounts are estimates for reference, not a bill.'), 'wp-my-key-muted'), 'estimate'), limits, models);
+      ui.usage.append(models);
     }
     const keyPlaceholder = () => t('<你的钥匙>', '<YOUR_KEY>');
     function renderGuide() {

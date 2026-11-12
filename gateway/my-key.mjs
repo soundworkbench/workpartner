@@ -10,6 +10,7 @@ export const USAGE_ZONE = 'UTC';
 const DAY = 86400000;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const positive = value => number(value) && value > 0;
 const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 const fail = status => Object.assign(new Error('My key request failed'), { status });
 
@@ -49,12 +50,14 @@ export function mapLimits(entries) {
   return result;
 }
 
-export function mapUsage(data, profileName, windows, limits) {
+export function mapUsage(data, profileName, windows, reference) {
   const unavailable = { today: null, week: null };
   if (!object(data) || !number(data.calls) || !number(data.cost) || !Array.isArray(data.series) || !data.series.length
     || !iso(data.series[0]?.time) || Date.parse(data.series[0].time) !== Date.parse(windows.week.start)
     || !Array.isArray(data.callerKeys) || data.callerKeys.length > 1 || !Array.isArray(data.by?.callerKey) || data.by.callerKey.length > 1
     || (data.callerKeys.length === 1 && data.callerKeys[0]?.name !== profileName)
+    || (data.callerKeys.length === 0 && (data.calls !== 0 || data.cost !== 0 || data.by.callerKey.length !== 0))
+    || (data.by.callerKey.length === 1 && data.by.callerKey[0]?.name !== profileName)
     || !Array.isArray(data.by?.model)) return unavailable;
   let calls = 0, cost = 0;
   for (const point of data.series) {
@@ -74,15 +77,18 @@ export function mapUsage(data, profileName, windows, limits) {
   const models = [...merged].map(([name, value]) => ({ name, share: total > 0 ? value / total : 0 }))
     .filter(m => number(m.share) && m.share >= 0.01).sort((a, b) => b.share - a.share).slice(0, 3)
     .map(m => ({ name: m.name, share: Number(m.share.toFixed(4)) }));
-  const window = (computed, limit) => ({ start: limit?.start || computed.start, reset: limit?.reset || computed.reset });
-  return { today: { ...window(windows.today, limits.day), calls, cost },
-    week: { ...window(windows.week, limits.week), calls: data.calls, cost: data.cost, models } };
+  const period = (window, calls, cost, allowance) => {
+    const percent = !positive(reference) ? null : cost <= 0 ? 0 : Math.min(999, Math.max(1, Math.round(cost / allowance * 100)));
+    return { start: window.start, reset: window.reset, calls, percent, over: percent !== null && percent >= 100 };
+  };
+  return { today: period(windows.today, calls, cost, reference / 5),
+    week: { ...period(windows.week, data.calls, data.cost, reference), models } };
 }
 
-export function mapUpstream(profile, usage, windows) {
+export function mapUpstream(profile, usage, windows, reference) {
   if (!object(profile) || typeof profile.name !== 'string' || !Array.isArray(profile.limits) || !Array.isArray(profile.models)) return { usage: null, models: [] };
   const limits = mapLimits(profile.limits);
-  return { usage: { ...mapUsage(usage, profile.name, windows, limits), limits },
+  return { usage: { ...mapUsage(usage, profile.name, windows, reference), enforced: Boolean(limits.day || limits.week) },
     models: profile.models.filter(m => object(m) && typeof m.id === 'string').slice(0, 500)
       .map(m => ({ id: m.id.slice(0, 200), label: (typeof m.label === 'string' ? m.label : m.id).slice(0, 200) })) };
 }
@@ -144,6 +150,7 @@ export function createMyKey({ organization, organizationData, authenticate, sess
     try {
       const config = organizationData()?.myKey;
       return { allow: Array.isArray(config?.allow) && config.allow.every(v => typeof v === 'string') ? config.allow : [],
+        reference: config?.reference,
         baseUrl: publicBaseUrl(config?.publicBaseUrl),
         revealSeconds: Number.isInteger(config?.revealSeconds) ? Math.max(2, Math.min(300, config.revealSeconds)) : 30 };
     } catch { return { allow: [], baseUrl: '', revealSeconds: 30 }; }
@@ -184,7 +191,9 @@ export function createMyKey({ organization, organizationData, authenticate, sess
           const base = organization.model.baseUrl.replace(/\/+$/, '');
           const [profile, usage] = await Promise.all([upstream(base + '/magpie/me', key, timeoutMs),
             upstream(base + '/magpie/usage/requests?period=' + windows.period + '&limit=1&offset=0', key, timeoutMs)]);
-          mapped = mapUpstream(profile, usage, windows);
+          const accounts = object(config.reference?.accounts) ? config.reference.accounts : {};
+          const reference = [accounts[user.slug], accounts[user.unionId], config.reference?.weekly].find(positive);
+          mapped = mapUpstream(profile, usage, windows, reference);
         }
         reply(res, 200, { key: key ? { masked: maskKey(key) } : null, revealSeconds: config.revealSeconds, baseUrl: config.baseUrl, defaults, ...mapped });
       }

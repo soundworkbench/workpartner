@@ -16,7 +16,7 @@ const masked = who => 'sk-' + '•'.repeat(8) + MODEL_KEYS[who].slice(-4);
 const text = (page, selector) => page.locator(selector).textContent();
 const NARROW = { width: 360, height: 740 };
 const VIEWPORTS = [['1440x900', DESKTOP], ['390x844', PHONE], ['360x740', NARROW]];
-const SETTINGS = { allow: ['member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 2 };
+const SETTINGS = { allow: ['member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 2, reference: { weekly: 40 } };
 const NOTICE = '这把钥匙与你本人实名绑定，每次使用都会按人记录，用于额度管理和安全审计，请只用于本人工作。';
 const NOTES = [
   '这把钥匙只限你本人工作使用，不要给别人用。',
@@ -73,6 +73,10 @@ async function session(label, options, body) {
     const responses = async () => {
       await Promise.all(pending);
       assert.deepEqual(replies.filter(reply => reply.error), [], 'all API response bodies were captured');
+      for (const reply of replies.filter(reply => reply.path === API && reply.method === 'GET')) {
+        assert.ok(!reply.body.includes('$'));
+        if (reply.body) noAmounts(JSON.parse(reply.body));
+      }
       return replies;
     };
     try {
@@ -81,9 +85,50 @@ async function session(label, options, body) {
       return await body({ ...current, responses });
     } finally {
       await responses();
+      if (await page.locator(K).count()) {
+        const content = await page.locator(K).evaluate(dialog => {
+          const copy = dialog.cloneNode(true); copy.querySelector('[data-wp-my-key-value]').textContent = '••••••••';
+          return copy.textContent;
+        });
+        assert.ok(!content.includes('$'));
+        assert.doesNotMatch(await text(page, USAGE), /[$¥￥]|USD|金额|估算|amount|estimate/i);
+      }
       assert.deepEqual(log.pageErrors, []);
     }
   });
+}
+
+function noAmounts(value) {
+  if (!value || typeof value !== 'object') return;
+  const forbidden = ['cost', 'costLimit', 'costLeft', 'limit', 'limits', 'used', 'left', 'reference', 'weekly', 'accounts'];
+  for (const [key, child] of Object.entries(value)) { assert.ok(!forbidden.includes(key), key); noAmounts(child); }
+}
+
+async function usageTile(page, period, percent, calls, english = false) {
+  const tile = page.locator(`${USAGE} [data-wp-my-key-usage="${period}"]`);
+  assert.equal(await tile.getAttribute('data-state'), 'ready');
+  const title = period === 'today' ? (english ? 'Today' : '今天') : (english ? 'This week' : '本周');
+  assert.equal(await tile.locator('strong').textContent(), title);
+  assert.equal(await tile.locator('[data-wp-my-key-calls]').textContent(), calls + (english ? ' requests' : ' 次'));
+  if (percent === null) {
+    assert.equal(await tile.locator('[data-wp-my-key-percent], [role="progressbar"], [data-wp-my-key-over]').count(), 0);
+    assert.equal(await tile.getAttribute('data-level'), null);
+    return;
+  }
+  const label = percent === 999 ? '999%+' : percent + '%', percentText = english ? label + ' used' : '已用 ' + label;
+  assert.equal(await tile.locator('[data-wp-my-key-percent]').textContent(), percentText);
+  assert.equal(await tile.getAttribute('data-level'), percent >= 100 ? 'over' : percent >= 80 ? 'warn' : 'normal');
+  const bar = tile.locator('.wp-my-key-track[role="progressbar"]');
+  for (const [name, value] of Object.entries({ 'aria-label': title, 'aria-valuemin': '0', 'aria-valuemax': '100',
+    'aria-valuenow': String(Math.min(100, percent)), 'aria-valuetext': percentText })) assert.equal(await bar.getAttribute(name), value);
+  assert.equal(await bar.locator('.wp-my-key-fill').evaluate(fill => fill.style.width), Math.min(100, percent) + '%');
+  assert.equal(await tile.locator('[data-wp-my-key-over]').count(), percent >= 100 ? 1 : 0);
+  if (percent >= 100) assert.equal(await tile.locator('[data-wp-my-key-over]').textContent(), period === 'today'
+    ? (english ? "Over today's reference allowance" : '已超过今天参考额度')
+    : (english ? "Over this week's reference allowance" : '已超过本周参考额度'));
+  return tile.evaluate(tile => ({ fill: getComputedStyle(tile.querySelector('.wp-my-key-fill')).backgroundColor,
+    percent: getComputedStyle(tile.querySelector('[data-wp-my-key-percent]')).color,
+    over: tile.querySelector('[data-wp-my-key-over]') ? getComputedStyle(tile.querySelector('[data-wp-my-key-over]')).color : null }));
 }
 
 // The existing feedback helpers retain their timing. New menu interactions await observable states.
@@ -147,12 +192,11 @@ async function emptyUsage(page, state) {
   assert.equal(await page.getAttribute(USAGE, 'data-state'), state);
   const message = state === 'loading' ? '加载中…' : '暂时取不到';
   assert.deepEqual(await page.locator(USAGE + ' > *').allTextContents(), ['用量', message]);
-  for (const name of ['usage', 'limits', 'window', 'estimate', 'top-models']) {
+  for (const name of ['usage', 'percent', 'window', 'reference-note', 'top-models']) {
     assert.equal(await page.locator(`${USAGE} [data-wp-my-key-${name}]`).count(), 0);
   }
   const content = await text(page, USAGE);
   assert.equal(content.split(message).length - 1, 1);
-  assert.ok(!content.includes('暂不限额'));
 }
 async function copyCount(page, count) {
   await page.waitForFunction(count => window.__copied.length === count, count);
@@ -386,7 +430,7 @@ test('key: delayed data loads before masking and failed requests stay unavailabl
   });
 });
 
-test('usage: totals, UTC windows, model shares and private-field isolation', LONG, async () => {
+test('usage: reference bars, UTC windows, model shares and private-field isolation', LONG, async () => {
   suite.harness.model.setMode('ok');
   suite.harness.model.requests.length = 0;
   await session('usage-ok', {}, async ({ page, responses }) => {
@@ -394,15 +438,11 @@ test('usage: totals, UTC windows, model shares and private-field isolation', LON
     assert.equal(await page.getAttribute(USAGE, 'data-state'), 'ready');
     const fixture = modelFixture();
     for (const period of ['today', 'week']) {
-      const tile = `${USAGE} [data-wp-my-key-usage="${period}"]`;
-      assert.equal(await text(page, tile + ' [data-wp-my-key-cost]'), '$' + fixture.totals[period].cost.toFixed(2));
-      assert.equal(await text(page, tile + ' [data-wp-my-key-calls]'), fixture.totals[period].calls + ' 次');
+      const percent = Math.round(fixture.totals[period].cost / (period === 'today' ? 8 : 40) * 100);
+      await usageTile(page, period, percent, fixture.totals[period].calls);
     }
-    const windowNote = await text(page, USAGE + ' [data-wp-my-key-window]');
-    assert.match(windowNote, /08:00/); assert.match(windowNote, /北京时间/);
-    assert.match(await text(page, USAGE + ' [data-wp-my-key-estimate]'), /估算/);
-    assert.equal(await page.getAttribute(USAGE + ' [data-wp-my-key-limits]', 'data-state'), 'none');
-    assert.match(await text(page, USAGE + ' [data-wp-my-key-limits]'), /暂不限额/);
+    assert.equal(await text(page, USAGE + ' [data-wp-my-key-window]'), '今天从北京时间 08:00 起算；本周从周一 08:00（北京时间）起算。');
+    assert.match(await text(page, USAGE + ' [data-wp-my-key-reference-note]'), /目前超过不会停用，只作提醒/);
     const shares = await text(page, USAGE + ' [data-wp-my-key-top-models]');
     for (const [index, model] of MODEL_MODELS.entries()) {
       assert.ok(shares.includes(model.id)); assert.ok(shares.includes([62, 27, 11][index] + '%'));
@@ -432,47 +472,113 @@ test('usage: totals, UTC windows, model shares and private-field isolation', LON
       assert.equal(url.searchParams.get('period'), fixture.usage.series[0].time.slice(0, 10) + '..' + fixture.usage.series.at(-1).time.slice(0, 10));
       assert.equal(url.searchParams.get('limit'), '1'); assert.equal(url.searchParams.get('offset'), '0');
     }
-    await suite.shot(page, 'usage-ok-light-desktop');
+    await suite.shot(page, 'usage-bars-light-desktop');
+    await page.click(action('close')); await closed(page);
+    await setting(page, 'language', 'en-US'); await openMyKey(page);
+    for (const period of ['today', 'week']) {
+      await usageTile(page, period, Math.round(fixture.totals[period].cost / (period === 'today' ? 8 : 40) * 100), fixture.totals[period].calls, true);
+    }
+    assert.match(await text(page, USAGE + ' [data-wp-my-key-reference-note]'), /Going over does not stop the key/);
+    assert.equal(await text(page, USAGE + ' [data-wp-my-key-window]'), 'Today starts at 08:00 Beijing time; the week starts on Monday at 08:00 Beijing time.');
   });
 });
 
-test('usage: daily and weekly cost limits expose amounts and accessible bars', LONG, async () => {
+test('usage: upstream enforcement only changes the reference note', LONG, async () => {
   suite.harness.model.setMode('limited');
   try {
     await session('usage-limited', {}, async ({ page }) => {
       await openMyKey(page);
-      const limits = USAGE + ' [data-wp-my-key-limits]';
-      assert.equal(await page.getAttribute(limits, 'data-state'), 'limited');
-      assert.equal(await page.locator(limits + ' [role="progressbar"]').count(), 2);
-      for (const limit of modelFixture('member', 'limited').profile.limits) {
-        const bar = `${limits} [data-wp-my-key-limit="${limit.period}"]`;
-        assert.equal(await page.locator(bar).count(), 1);
-        const progress = bar + ' [role="progressbar"]';
-        assert.equal(Number(await page.getAttribute(progress, 'aria-valuemin')), 0);
-        assert.equal(Number(await page.getAttribute(progress, 'aria-valuemax')), limit.costLimit);
-        assert.equal(Number(await page.getAttribute(progress, 'aria-valuenow')), limit.cost);
-        const label = await text(page, bar);
-        const reset = new Date(limit.reset);
-        const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric' })
-          .formatToParts(reset).map(part => [part.type, part.value]));
-        assert.ok(label.includes(`${parts.month}月${parts.day}日 08:00（北京时间）恢复`));
-        assert.doesNotMatch(label, /\d{2}:\d{2}:\d{2}/);
-        assert.ok(!label.includes(String(reset.getUTCFullYear())));
-        const amounts = (label.match(/\d+(?:\.\d+)?/g) || []).map(Number);
-        for (const amount of [limit.costLimit, limit.cost, limit.costLeft]) assert.ok(amounts.includes(amount), 'limit, used and left amounts are shown');
+      assert.equal(await page.locator(USAGE + ' [role="progressbar"]').count(), 2);
+      assert.match(await text(page, USAGE + ' [data-wp-my-key-reference-note]'), /另设有用量上限，达到后会暂停/);
+      const fixture = modelFixture('member', 'limited');
+      for (const period of ['today', 'week']) {
+        await usageTile(page, period, Math.round(fixture.totals[period].cost / (period === 'today' ? 8 : 40) * 100), fixture.totals[period].calls);
       }
-      await suite.shot(page, 'usage-limited-light-desktop');
       await page.click(action('close')); await closed(page);
       await setting(page, 'language', 'en-US'); await openMyKey(page);
-      for (const limit of modelFixture('member', 'limited').profile.limits) {
-        const date = new Date(limit.reset).toLocaleDateString('en-US', { timeZone: 'Asia/Shanghai', month: 'short', day: 'numeric' });
-        const label = await text(page, `${limits} [data-wp-my-key-limit="${limit.period}"]`);
-        assert.ok(label.includes(`Resets ${date}, 08:00 Beijing time`));
-        assert.doesNotMatch(label, /\d{2}:\d{2}:\d{2}/);
-      }
+      assert.match(await text(page, USAGE + ' [data-wp-my-key-reference-note]'), /This key also has a usage limit; it pauses when the limit is reached/);
     });
   } finally { suite.harness.model.setMode('ok'); }
 });
+
+test('usage: no reference keeps calls without bars or a reference note', LONG, async () => {
+  suite.main.setMyKey({ reference: { weekly: 0 } });
+  try {
+    await session('usage-no-reference', {}, async ({ page }) => {
+      await openMyKey(page);
+      for (const period of ['today', 'week']) await usageTile(page, period, null, modelFixture().totals[period].calls);
+      assert.equal(await page.locator(USAGE + ' [role="progressbar"], ' + USAGE + ' [data-wp-my-key-percent]').count(), 0);
+      assert.equal(await page.locator(USAGE + ' [data-wp-my-key-reference-note]').count(), 0);
+    });
+  } finally { suite.main.setMyKey(SETTINGS); }
+});
+
+test('usage: warning and over states have distinct theme colours and capped accessible bars', LONG, async () => {
+  const response = await suite.main.request('GET', API, { who: 'member' });
+  assert.equal(response.status, 200);
+  const base = JSON.parse(response.body);
+  for (const theme of ['light', 'dark']) {
+    await session('usage-levels-' + theme, { viewport: PHONE, storage: { 'fixture-theme': theme } }, async ({ page }) => {
+      const json = structuredClone(base), colours = [];
+      await page.route(ORIGIN + API, route => route.fulfill({ json }));
+      for (const [today, week] of [[40, 46], [80, 99], [100, 184], [999, 999]]) {
+        for (const [period, percent] of [['today', today], ['week', week]]) Object.assign(json.usage[period], { percent, over: percent >= 100 });
+        await openMyKey(page); await keyState(page, 'masked');
+        if (theme === 'dark') await page.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).colorScheme === 'dark', K);
+        const colour = await usageTile(page, 'today', today, json.usage.today.calls);
+        const weekColour = await usageTile(page, 'week', week, json.usage.week.calls);
+        assert.equal(colour.fill, weekColour.fill);
+        if (today >= 80) {
+          const expected = today < 100 ? (theme === 'light' ? 'rgb(154, 52, 18)' : 'rgb(255, 207, 133)')
+            : (theme === 'light' ? 'rgb(180, 35, 24)' : 'rgb(255, 180, 169)');
+          assert.equal(colour.fill, expected); assert.equal(colour.percent, expected);
+          assert.equal(weekColour.percent, expected);
+          if (today >= 100) { assert.equal(colour.over, expected); assert.equal(weekColour.over, expected); }
+        }
+        colours.push(colour.fill);
+        if (today === 40) await suite.shot(page, `usage-bars-${theme}-390x844`);
+        if (today === 100 && theme === 'light') await suite.shot(page, 'usage-over-light-390x844');
+        await page.click(action('close')); await closed(page);
+      }
+      assert.equal(new Set(colours.slice(0, 3)).size, 3);
+      await setting(page, 'language', 'en-US'); await openMyKey(page);
+      await usageTile(page, 'today', 999, json.usage.today.calls, true);
+      await usageTile(page, 'week', 999, json.usage.week.calls, true);
+    });
+  }
+});
+
+for (const [name, viewport] of VIEWPORTS.slice(1)) {
+  test(`usage: over-reference text and tiles fit ${name}`, LONG, async () => {
+    const response = await suite.main.request('GET', API, { who: 'member' });
+    assert.equal(response.status, 200);
+    const json = JSON.parse(response.body);
+    for (const period of ['today', 'week']) Object.assign(json.usage[period], { percent: 999, over: true });
+    await session('usage-over-layout-' + name, { viewport }, async ({ page }) => {
+      await page.route(ORIGIN + API, route => route.fulfill({ json }));
+      for (const english of [false, true]) {
+        if (english) await setting(page, 'language', 'en-US');
+        await openMyKey(page); await keyState(page, 'masked');
+        for (const period of ['today', 'week']) await usageTile(page, period, 999, json.usage[period].calls, english);
+        const facts = await overflow(page, K);
+        assert.ok(facts.pageScrollWidth <= facts.pageClientWidth && facts.dialogScrollWidth <= facts.dialogClientWidth);
+        assert.deepEqual(facts.outside, []); assert.ok(facts.dialogInViewport);
+        const tilesFit = await page.locator(USAGE + ' [data-wp-my-key-usage]').evaluateAll(tiles => tiles.every(tile => {
+          const box = tile.getBoundingClientRect(), dialog = tile.closest('dialog').getBoundingClientRect();
+          const walker = document.createTreeWalker(tile, NodeFilter.SHOW_TEXT);
+          for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+            const range = document.createRange(); range.selectNodeContents(text);
+            for (const rect of range.getClientRects()) if (rect.left < box.left || rect.right > box.right || rect.top < box.top || rect.bottom > box.bottom) return false;
+          }
+          return box.left >= dialog.left && box.right <= dialog.right && box.top >= dialog.top && box.bottom <= dialog.bottom
+            && tile.scrollWidth <= tile.clientWidth;
+        }));
+        assert.ok(tilesFit, 'both tiles and their text fit inside the dialog');
+        await page.click(action('close')); await closed(page);
+      }
+    });
+  });
+}
 
 for (const mode of ['down', 'foreign']) {
   test(`usage: ${mode} preserves key actions and the guide`, LONG, async () => {
@@ -495,8 +601,8 @@ for (const mode of ['down', 'foreign']) {
             assert.equal(await page.getAttribute(tile, 'data-state'), 'unavailable');
             assert.match(await text(page, tile), /暂时取不到/);
           }
-          assert.equal(await page.getAttribute(USAGE + ' [data-wp-my-key-limits]', 'data-state'), 'none');
-          assert.equal(await text(page, USAGE + ' [data-wp-my-key-limits]'), '暂不限额');
+          assert.equal(await page.locator(USAGE + ' [role="progressbar"]').count(), 0);
+          assert.equal(await page.locator(USAGE + ' [data-wp-my-key-reference-note]').count(), 0);
           assert.equal(await page.locator(USAGE + ' [data-wp-my-key-window]').count(), 0);
         }
         await suite.shot(page, `usage-${mode}-light-desktop`);
