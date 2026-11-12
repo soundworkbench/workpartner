@@ -8,6 +8,7 @@ function installMyKey() {
     const API = '/_wp/api/my-key', ui = {};
     let dialog, observer, data, hideTimer, statusTimer, settings, language, revoked = false;
     let tab = 'claude', loading = false, busy = false, version = 0, status = '';
+    let confirming = false, resetBusy = false, resetResult = '', pollTimer, pollStarted = 0;
     function locale() {
       let value = window.wpSettings ? window.wpSettings.get().language : null;
       if (!value) try { value = localStorage.getItem('i18nextLng'); } catch { /* Default to Chinese. */ }
@@ -31,7 +32,7 @@ function installMyKey() {
       document.querySelectorAll('button.wp-user').forEach(n => n.setAttribute('aria-expanded', 'false'));
     }
     function revoke() {
-      revoked = true; observer?.disconnect();
+      revoked = true; stopPolling(); observer?.disconnect();
       document.querySelectorAll('[data-wp-my-key], [data-wp-my-key-separator]').forEach(n => n.remove());
       hide(); dialog?.close();
     }
@@ -96,6 +97,9 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
 .wp-my-key-dialog section[data-wp-my-key-card="key"] > h3 { margin-top:0; }
 .wp-my-key-dialog button { cursor:pointer; max-width:100%; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:6px 12px; background:var(--wp-send, #3C3F43); color:var(--wp-send-ink, #FCFCFC); font:inherit; font-size:13px; overflow-wrap:anywhere; }
 .wp-my-key-dialog button:hover { background:var(--wp-send-hover, #2E3237); }
+.wp-my-key-dialog button[data-wp-my-key-action=reset] { background:transparent; border-color:var(--wp-my-key-over); color:var(--wp-my-key-over); }
+.wp-my-key-dialog button[data-wp-my-key-action=reset-confirm] { background:var(--wp-my-key-over); border-color:var(--wp-my-key-over); color:var(--wp-card, #FDFDF8); }
+.wp-my-key-dialog [data-wp-my-key-confirm] { padding:12px; border:1px solid var(--wp-my-key-over); border-radius:8px; }
 .wp-my-key-dialog button:disabled { opacity:.5; cursor:not-allowed; }
 .wp-my-key-dialog [role=tab][aria-selected=false] { background:var(--wp-hover, #eee); color:var(--wp-ink, #222); }
 .wp-my-key-dialog [role=tab] code, .wp-my-key-models code { font:inherit; color:inherit; background:none; padding:0; }
@@ -130,9 +134,13 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       for (const name of ['key', 'usage', 'guide']) { ui[name] = mark(node('section'), 'card', name); content.append(ui[name]); }
       ui.keyTitle = node('h3'); ui.value = mark(node('code', '', 'wp-my-key-value'), 'value');
       ui.toggle = button('toggle', () => ui.value.dataset.state === 'shown' ? hide() : reveal('show'));
-      ui.copy = button('copy', () => reveal('copy')); const actions = node('div', undefined, 'wp-my-key-row'); actions.append(ui.toggle, ui.copy);
+      ui.copy = button('copy', () => reveal('copy')); ui.actions = node('div', undefined, 'wp-my-key-row'); ui.actions.append(ui.toggle, ui.copy);
+      ui.reset = button('reset', () => { if (!data?.reset?.allowed || resetBusy) return; confirming = true; renderReset(); ui.resetCancel.focus(); });
+      ui.resetNote = mark(node('p', '', 'wp-my-key-muted'), 'reset-note');
+      ui.confirm = mark(node('div'), 'confirm'); ui.confirm.setAttribute('role', 'alertdialog'); ui.confirm.setAttribute('aria-labelledby', 'wp-my-key-confirm-title');
+      ui.resetResult = node('p', '', 'wp-my-key-muted'); ui.resetResult.setAttribute('role', 'status');
       ui.notice = mark(node('p', '', 'wp-my-key-muted'), 'notice'); ui.status = mark(node('p', '', 'wp-my-key-muted'), 'status'); ui.status.setAttribute('role', 'status');
-      ui.key.append(ui.keyTitle, ui.value, actions, ui.notice, ui.status);
+      ui.key.append(ui.keyTitle, ui.value, ui.actions, ui.confirm, ui.resetNote, ui.notice, ui.status, ui.resetResult);
       ui.guideTitle = node('h3'); const tabs = node('div', undefined, 'wp-my-key-row'); tabs.setAttribute('role', 'tablist'); ui.tabs = {};
       for (const name of ['claude', 'codex', 'other']) {
         const b = node('button'); b.type = 'button'; mark(b, 'tab', name); b.setAttribute('role', 'tab');
@@ -145,8 +153,10 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       ui.modelsTitle = node('h4'); ui.notesTitle = node('h4');
       ui.guide.append(ui.guideTitle, tabs, ui.caption, ui.snippet, ui.copyConfig, ui.modelsTitle, ui.filter, ui.models, ui.notesTitle, ui.notes);
       dialog.append(content); document.body.append(dialog);
-      dialog.addEventListener('cancel', safe(hide));
-      dialog.addEventListener('close', safe(() => { ++version; busy = false; hide(); document.querySelector('button.wp-user')?.focus(); }));
+      dialog.addEventListener('cancel', safe(event => {
+        if (confirming) { event.preventDefault(); cancelReset(); } else hide();
+      }));
+      dialog.addEventListener('close', safe(() => { ++version; stopPolling(); confirming = false; resetBusy = false; busy = false; hide(); document.querySelector('button.wp-user')?.focus(); }));
       dialog.addEventListener('click', safe(event => {
         if (event.target !== dialog) return;
         const r = dialog.getBoundingClientRect();
@@ -155,7 +165,9 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
     }
     function renderStatus() {
       if (!ui.status) return;
-      ui.status.textContent = status === 'error' ? t('操作失败，请稍后再试。', 'Something went wrong. Please try again.')
+      ui.status.textContent = status === 'reset-progress' ? t('正在重置钥匙，工作伙伴会重启约 1 分钟…', 'Resetting the key; your workspace restarts for about a minute…')
+        : status === 'reset-wait' ? t('还在处理中，请稍后重新打开「我的钥匙」查看。', 'Still working. Reopen My key later to check.')
+        : status === 'error' ? t('操作失败，请稍后再试。', 'Something went wrong. Please try again.')
         : status === 'copied' ? t('已复制', 'Copied') : status === 'shown' ? t(`${data.revealSeconds} 秒后自动隐藏`, `Hides automatically in ${data.revealSeconds} seconds`) : '';
     }
     function renderKey() {
@@ -167,14 +179,102 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       }
       ui.toggle.textContent = shown ? t('隐藏', 'Hide') : t('显示', 'Show'); ui.copy.textContent = t('复制', 'Copy');
       ui.copyConfig.textContent = t('复制整段', 'Copy all');
-      for (const control of [ui.toggle, ui.copy, ui.copyConfig]) control.disabled = !data?.key || busy || loading;
+      for (const control of [ui.toggle, ui.copy, ui.copyConfig]) control.disabled = !data?.key || busy || resetBusy || loading;
       ui.notice.textContent = t('这把钥匙与你本人实名绑定，每次使用都会按人记录，用于额度管理和安全审计，请只用于本人工作。',
         'This key is bound to your real identity. Every use is recorded per person for quota management and security audits; use it only for your own work.');
-      renderStatus();
+      renderReset(); renderStatus();
     }
     function hide() {
       clearTimeout(hideTimer); clearTimeout(statusTimer); status = '';
       if (ui.value) { ui.value.dataset.state = 'masked'; ui.value.textContent = ''; renderKey(); }
+    }
+    function stopPolling() { clearTimeout(pollTimer); pollTimer = undefined; }
+    function cancelReset() { confirming = false; renderReset(); ui.reset.focus(); }
+    function renderReset() {
+      const reset = data?.reset;
+      if (reset) { if (!ui.reset.isConnected) ui.actions.append(ui.reset); }
+      else { ui.reset.remove(); confirming = false; }
+      ui.reset.textContent = t('重置钥匙', 'Reset key');
+      ui.reset.disabled = !reset?.allowed || resetBusy || busy || loading;
+      ui.actions.hidden = confirming; ui.confirm.hidden = !confirming;
+      let note = '';
+      if (reset?.status === 'pending') note = t('正在重置钥匙…', 'Resetting the key…');
+      else if (reset?.reason === 'blocked') note = reset.note || t('这把钥匙暂不支持自助重置；需要更换请联系管理员。', 'This key cannot be reset here. Ask an administrator to replace it.');
+      else if (reset?.reason === 'limit') note = t('今天的重置次数已用完（每天 3 次），明天再试。', 'No resets left today (3 per day). Try again tomorrow.');
+      else if (reset?.reason === 'unavailable') note = t('暂时无法重置，请稍后再试。', 'Resetting is unavailable right now. Please try again later.');
+      ui.resetNote.textContent = note; ui.resetNote.hidden = !note || confirming;
+      ui.resetResult.hidden = !resetResult;
+      if (resetResult) mark(ui.resetResult, 'reset-result', resetResult); else ui.resetResult.removeAttribute('data-wp-my-key-reset-result');
+      ui.resetResult.textContent = resetResult === 'done'
+        ? t('钥匙已重置，旧钥匙已作废。你工作伙伴里的钥匙已自动换好（工作伙伴刚重启过，进行中的对话可能已中断）。只有在自己电脑的工具里填过旧钥匙的，请点「显示」查看新钥匙并自己换上。', 'The key has been reset and the old one no longer works. The key inside your workspace was replaced automatically (your workspace has just restarted, so a conversation in progress may have been interrupted). Only tools on your own computer that used the old key need it: press Show and give them the new one.')
+        : resetResult === 'failed' ? t('暂时无法重置，请稍后再试。你现在的钥匙没有变，可以照常使用。', 'Resetting is unavailable right now. Please try again later. Your current key is unchanged and still works.') : '';
+      if (!confirming) ui.confirm.replaceChildren();
+      if (confirming) {
+        const title = node('h3', t('确认重置钥匙？', 'Reset this key?')); title.id = 'wp-my-key-confirm-title';
+        ui.resetCancel = button('reset-cancel', cancelReset); ui.resetCancel.textContent = t('取消', 'Cancel');
+        const confirm = button('reset-confirm', confirmReset); confirm.textContent = t('确认重置', 'Reset');
+        const actions = node('div', undefined, 'wp-my-key-row'); actions.append(ui.resetCancel, confirm);
+        ui.confirm.replaceChildren(title,
+          node('p', t('旧钥匙会立刻作废，无法恢复。', 'The old key stops working immediately and cannot be restored.')),
+          node('p', t('你工作伙伴里的钥匙会自动换成新的；工作伙伴会重启约 1 分钟，进行中的对话会中断。', 'The key inside your workspace is replaced automatically; your workspace restarts for about a minute and a conversation in progress is interrupted.')),
+          node('p', t('只有在自己电脑的工具里填过旧钥匙的，需要自己换成新钥匙。', 'Only tools on your own computer that use the old key must be given the new one by you.')),
+          node('p', t(`今天还可以重置 ${reset.left} 次。`, `${reset.left} resets left today.`), 'wp-my-key-muted'), actions);
+      }
+    }
+    const currentReset = current => current === version && dialog.open && !revoked;
+    async function resetApi(post = false) {
+      const response = await fetch(API + '/reset', { method: post ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store',
+        ...(post ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'reset' }) } : {}) });
+      if (response.status === 401 || response.status === 404) { revoke(); return null; }
+      const body = await response.json();
+      return { status: response.status, ok: response.ok, body };
+    }
+    async function reloadReset(current, result = '') {
+      const fresh = await api();
+      if (!currentReset(current)) return;
+      data = fresh; resetBusy = false; status = ''; resetResult = result; render();
+    }
+    async function confirmReset() {
+      if (resetBusy || !confirming) return;
+      confirming = false; resetBusy = true; resetResult = ''; hide(); status = 'reset-progress'; renderKey();
+      const current = version;
+      try {
+        const response = await resetApi(true);
+        if (!response || !currentReset(current)) return;
+        if (response.status === 202 || (response.status === 409 && response.body.reason === 'busy')) startPolling();
+        else if (response.status === 429) {
+          resetBusy = false; status = ''; data.reset = { ...data.reset, allowed: false, reason: 'limit' }; renderKey();
+        } else if (response.status === 403 && response.body.reason === 'blocked') await reloadReset(current);
+        else await reloadReset(current, 'failed');
+      } catch {
+        if (!currentReset(current)) return;
+        // The server may have accepted the reset before its response was lost.
+        try {
+          const fresh = await api();
+          if (!currentReset(current)) return;
+          data = fresh;
+          if (data?.reset?.status === 'pending') { startPolling(); return; }
+        } catch { /* Fall back to failure only after checking the current reset state. */ }
+        if (currentReset(current)) { resetBusy = false; status = ''; resetResult = 'failed'; renderKey(); }
+      }
+    }
+    function startPolling() {
+      stopPolling(); resetBusy = true; hide(); status = 'reset-progress'; pollStarted = Date.now();
+      if (data?.reset) data.reset = { ...data.reset, status: 'pending', allowed: false };
+      renderKey(); const current = version;
+      async function poll() {
+        if (!currentReset(current)) return;
+        if (Date.now() - pollStarted >= 300000) { status = 'reset-wait'; renderStatus(); return; }
+        try {
+          const response = await resetApi();
+          if (!response || !currentReset(current)) return;
+          if (response.ok && ['done', 'failed'].includes(response.body.status)) {
+            await reloadReset(current, response.body.status); return;
+          }
+        } catch { /* A claimed rotation must be allowed to finish despite a lost poll. */ }
+        if (currentReset(current)) pollTimer = setTimeout(safe(poll), 2000);
+      }
+      pollTimer = setTimeout(safe(poll), 2000);
     }
     async function clipboard(value) {
       try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(value); return; } } catch { /* Use the dialog-local fallback. */ }
@@ -183,7 +283,7 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       finally { area.value = ''; area.remove(); }
     }
     async function reveal(action) {
-      if (busy || !data?.key) return;
+      if (busy || resetBusy || !data?.key) return;
       hide(); busy = true; renderKey(); const current = version;
       // Snapshot the visible configuration before the asynchronous reveal.
       let configuration = action === 'copy-config' ? ui.snippet.textContent : '', placeholder = keyPlaceholder(), result;
@@ -283,7 +383,9 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
         ['不要外传，不要发到群里或贴到网页上。', 'Do not share it, post it in chats or paste it into web pages.'],
         ['不要写进代码或脚本，也不要提交到代码仓库；放在配置文件或环境变量里。', 'Do not put it in code or scripts or commit it to a repository; keep it in a config file or an environment variable.'],
         ['在公司外（家里、出差）也可以用，地址就是上面配置里的地址。', 'It also works outside the office (at home, travelling); use the address shown in the configuration above.'],
-        ['怀疑泄露，马上联系管理员更换。', 'If you suspect it has leaked, contact an administrator right away to have it replaced.'],
+        data?.reset && data.reset.reason !== 'blocked'
+          ? ['怀疑泄露，马上点上面的「重置钥匙」换一把新的。', 'If you suspect it has leaked, press "Reset key" above right away to get a new one.']
+          : ['怀疑泄露，马上联系管理员更换。', 'If you suspect it has leaked, contact an administrator right away to have it replaced.'],
         ['有问题：在工作伙伴的「反馈」里留言。', 'Questions: leave a message in Feedback.'],
       ].map(([zh, en]) => node('li', t(zh, en))));
     }
@@ -301,15 +403,15 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
     }
     async function show() {
       if (revoked) return;
-      closeMenus(); mount(); data = null; loading = true; hide(); tab = 'claude'; busy = false; ui.filter.value = ''; const current = ++version;
+      closeMenus(); mount(); stopPolling(); confirming = false; resetBusy = false; resetResult = ''; data = null; loading = true; hide(); tab = 'claude'; busy = false; ui.filter.value = ''; const current = ++version;
       render(); if (!dialog.open) dialog.showModal();
       try { const result = await api(); if (current === version && dialog.open && !revoked) data = result; }
       catch { if (current === version && !revoked) failure(); }
-      finally { if (current === version && !revoked) { loading = false; render(); } }
+      finally { if (current === version && !revoked) { loading = false; render(); if (data?.reset?.status === 'pending') startPolling(); } }
     }
     const init = safe(() => { observer = new MutationObserver(safe(menus)); observer.observe(document.body, { childList: true, subtree: true }); menus(); });
     window.addEventListener('storage', safe(menus)); window.addEventListener('resize', safe(menus));
-    window.addEventListener('pagehide', safe(() => { ++version; hide(); }));
+    window.addEventListener('pagehide', safe(() => { ++version; stopPolling(); hide(); }));
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
   } catch { /* Optional UI must not break the preview client or the workspace. */ }
 }

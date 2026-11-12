@@ -830,3 +830,18 @@ test('user Pod renders and clears the optional quick-line model from runtime con
     assert.equal(env.find(value => value.name === 'WORKPARTNER_MODEL_CONFIG').value, modelConfig);
   }
 });
+
+test('rekey updates only an existing model Secret and preserves file bytes', async t => {
+  const { runtime, client, secureDir } = fixture(t);
+  await runtime.create({ slug: 'person' });
+  const route = `${core}/secrets/fixture-person-model-key`;
+  fs.writeFileSync(path.join(secureDir, 'model-person.key'), 'fixture-replacement\n');
+  client.calls.length = 0;
+  await runtime.rekey('person');
+  assert.deepEqual(writes(client), [['patch', route, { data: { 'model.key': Buffer.from('fixture-replacement\n').toString('base64') } }, 'merge']]);
+  assert.equal(Buffer.from(client.objects.get(route).data['model.key'], 'base64').toString(), 'fixture-replacement\n');
+  client.objects.delete(route); client.calls.length = 0;
+  await runtime.rekey('person');
+  assert.deepEqual(writes(client), []);
+  assert.equal(client.objects.has(route), false);
+});

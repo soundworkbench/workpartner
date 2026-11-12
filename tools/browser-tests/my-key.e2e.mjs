@@ -61,7 +61,7 @@ async function session(label, options, body) {
     const { page, log } = current, pending = [], replies = [];
     page.on('response', response => {
       const url = new URL(response.url());
-      if (url.pathname !== API && url.pathname !== API + '/reveal') return;
+      if (url.pathname !== API && url.pathname !== API + '/reveal' && url.pathname !== API + '/reset') return;
       const record = { method: response.request().method(), path: url.pathname, status: response.status() };
       replies.push(record);
       // Attach the rejection handler immediately so a failed read cannot escape the test runner.
@@ -84,6 +84,8 @@ async function session(label, options, body) {
       await waitAvatar(page);
       return await body({ ...current, responses });
     } finally {
+      // Remove routes and drain handlers before the suite closes this page, including on failure.
+      await page.unrouteAll({ behavior: 'wait' });
       await responses();
       if (await page.locator(K).count()) {
         const content = await page.locator(K).evaluate(dialog => {
@@ -98,10 +100,13 @@ async function session(label, options, body) {
   });
 }
 
-function noAmounts(value) {
+function noAmounts(value, context = '') {
   if (!value || typeof value !== 'object') return;
   const forbidden = ['cost', 'costLimit', 'costLeft', 'limit', 'limits', 'used', 'left', 'reference', 'weekly', 'accounts'];
-  for (const [key, child] of Object.entries(value)) { assert.ok(!forbidden.includes(key), key); noAmounts(child); }
+  for (const [key, child] of Object.entries(value)) {
+    if (context === 'reset' && ['left', 'limit'].includes(key)) { assert.ok(Number.isInteger(child) && child >= 0 && child <= 3); continue; }
+    assert.ok(!forbidden.includes(key), key); noAmounts(child, key);
+  }
 }
 
 async function usageTile(page, period, percent, calls, english = false) {
@@ -424,7 +429,7 @@ test('key: delayed data loads before masking and failed requests stay unavailabl
   });
   await session('key-missing', {}, async ({ page }) => {
     await page.route(ORIGIN + API, route => route.fulfill({ json: {
-      key: null, revealSeconds: SETTINGS.revealSeconds, baseUrl: SETTINGS.publicBaseUrl, defaults: {}, usage: null, models: [],
+      key: null, revealSeconds: SETTINGS.revealSeconds, baseUrl: SETTINGS.publicBaseUrl, defaults: {}, usage: null, models: [], reset: null,
     } }));
     await openMyKey(page); await keyState(page, 'missing'); await disabledKeyActions(page);
   });
@@ -807,4 +812,244 @@ test('appearance: light and dark dialogs on desktop and phone', LONG, async () =
     }
   }
   for (const [name] of VIEWPORTS.slice(0, 2)) assert.notEqual(backgrounds['light' + name], backgrounds['dark' + name]);
+});
+
+const CONFIRM = K + ' [data-wp-my-key-confirm]';
+const RESET_NOTE = K + ' [data-wp-my-key-reset-note]';
+const RESET_DONE = K + ' [data-wp-my-key-reset-result="done"]';
+const RESET_FAILED = K + ' [data-wp-my-key-reset-result="failed"]';
+const RESET_SUCCESS_ZH = '钥匙已重置，旧钥匙已作废。你工作伙伴里的钥匙已自动换好（工作伙伴刚重启过，进行中的对话可能已中断）。只有在自己电脑的工具里填过旧钥匙的，请点「显示」查看新钥匙并自己换上。';
+const RESET_SUCCESS_EN = 'The key has been reset and the old one no longer works. The key inside your workspace was replaced automatically (your workspace has just restarted, so a conversation in progress may have been interrupted). Only tools on your own computer that used the old key need it: press Show and give them the new one.';
+const RESET_NOTES = [...NOTES.slice(0, 4), '怀疑泄露，马上点上面的「重置钥匙」换一把新的。', NOTES[5]];
+const CONFIRM_SENTENCES = [
+  '旧钥匙会立刻作废，无法恢复。',
+  '你工作伙伴里的钥匙会自动换成新的；工作伙伴会重启约 1 分钟，进行中的对话会中断。',
+  '只有在自己电脑的工具里填过旧钥匙的，需要自己换成新钥匙。',
+];
+let resetSequence = 0;
+async function resetSession(label, { mode = 'ok', reset = { enabled: true, blocked: [] }, ...options }, body) {
+  const gateway = await suite.harness.startGateway('reset-' + ++resetSequence, { myKey: { ...SETTINGS, reset }, resetBroker: mode });
+  suite.harness.use(gateway);
+  try { return await session(label, options, current => body({ ...current, gateway })); }
+  finally { suite.harness.use(suite.main); await gateway.stop(); }
+}
+async function resetLayout(page) {
+  const facts = await overflow(page, K);
+  assert.ok(facts.pageScrollWidth <= facts.pageClientWidth && facts.dialogScrollWidth <= facts.dialogClientWidth);
+  assert.deepEqual(facts.outside, []); assert.ok(facts.dialogInViewport);
+  assert.equal(await page.locator(CONFIRM).evaluate(panel => {
+    const bounds = panel.closest('dialog').getBoundingClientRect();
+    return [panel, ...panel.querySelectorAll('button')].every(element => {
+      const box = element.getBoundingClientRect();
+      return box.width > 0 && box.left >= bounds.left && box.right <= bounds.right && box.top >= bounds.top && box.bottom <= bounds.bottom;
+    });
+  }), true);
+}
+
+test('reset: confirmation, cancellation, one POST, replacement and masked success with a real gateway', LONG, async () => {
+  await resetSession('reset-success', {}, async ({ page, gateway, log, responses }) => {
+    await openMyKey(page); assert.ok(await page.locator(action('reset')).isEnabled());
+    assert.deepEqual(await page.locator(GUIDE + ' [data-wp-my-key-notes] li').allTextContents(), RESET_NOTES);
+    const colors = await page.locator(K).evaluate(dialog => ['reset', 'toggle'].map(action => {
+      const style = getComputedStyle(dialog.querySelector(`[data-wp-my-key-action="${action}"]`));
+      return { color: style.color, background: style.backgroundColor, border: style.borderColor };
+    }));
+    assert.notDeepEqual(colors[0], colors[1]); assert.equal(colors[0].background, 'rgba(0, 0, 0, 0)'); assert.equal(colors[0].color, colors[0].border);
+    await suite.shot(page, 'reset-button-light-desktop');
+    await page.click(action('reset'));
+    assert.equal(await page.getAttribute(CONFIRM, 'role'), 'alertdialog');
+    assert.equal(await text(page, CONFIRM + ' h3'), '确认重置钥匙？');
+    assert.deepEqual(await page.locator(CONFIRM + ' > p').allTextContents(), [...CONFIRM_SENTENCES, '今天还可以重置 3 次。']);
+    assert.equal(await page.locator(action('reset-cancel')).evaluate(button => document.activeElement === button), true);
+    assert.equal(await page.locator(action('toggle')).isVisible(), false);
+    await page.keyboard.press('Escape'); assert.equal(await page.locator(CONFIRM).isVisible(), false); assert.equal(await page.locator(K).isVisible(), true);
+    await page.click(action('reset')); await page.click(action('reset-cancel'));
+    assert.equal(gateway.broker.claimed.length, 0); assert.equal(log.requests.filter(r => r === 'POST ' + API + '/reset').length, 0);
+    await page.setViewportSize(PHONE); await page.click(action('reset')); await resetLayout(page);
+    await suite.shot(page, 'reset-confirm-light-390x844');
+    await page.locator(action('reset-confirm')).evaluate(button => { button.click(); button.click(); });
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent === '正在重置钥匙，工作伙伴会重启约 1 分钟…', K + ' [data-wp-my-key-status]');
+    await disabledKeyActions(page); assert.ok(await page.locator(action('reset')).isDisabled());
+    await page.waitForSelector(RESET_DONE);
+    assert.equal(await text(page, RESET_DONE), RESET_SUCCESS_ZH);
+    assert.equal(await page.getAttribute(VALUE, 'data-state'), 'masked'); assert.notEqual(await text(page, VALUE), masked('member'));
+    assert.equal(log.requests.filter(r => r === 'POST ' + API + '/reset').length, 1);
+    assert.equal(gateway.broker.claimed.length, 1);
+    assert.deepEqual(gateway.restarts, ['workpartner-next-member']);
+    assert.deepEqual(gateway.readAudit().filter(line => line.action === 'reset').map(line => line.result), ['requested', 'ok']);
+    await suite.shot(page, 'reset-done-light-390x844');
+    await page.click(action('toggle')); await page.waitForFunction(selector => document.querySelector(selector)?.dataset.state === 'shown', VALUE);
+    const replacement = await text(page, VALUE); assert.notEqual(replacement, MODEL_KEYS.member);
+    assert.ok(!gateway.readAuditRaw().includes(replacement));
+    for (const reply of await responses()) if (reply.path === API + '/reset') {
+      assert.ok(!reply.body.includes(MODEL_KEYS.member)); assert.ok(!reply.body.includes(replacement));
+    }
+    await page.click(action('toggle'));
+  });
+});
+
+test('reset: broker rejection and offline rejection preserve the existing key', LONG, async () => {
+  for (const mode of ['rotate-failed', 'offline']) {
+    await resetSession('reset-' + mode, { mode: mode === 'offline' ? 'ok' : mode }, async ({ page, gateway }) => {
+      await openMyKey(page);
+      if (mode === 'offline') gateway.broker.setMode('offline');
+      await page.click(action('reset')); await page.click(action('reset-confirm'));
+      await page.waitForSelector(RESET_FAILED);
+      assert.equal(await text(page, RESET_FAILED), '暂时无法重置，请稍后再试。你现在的钥匙没有变，可以照常使用。');
+      await keyState(page, 'masked');
+      if (mode === 'offline') {
+        assert.ok(await page.locator(action('reset')).isDisabled());
+        assert.equal(await text(page, RESET_NOTE), '暂时无法重置，请稍后再试。');
+      }
+      await page.click(action('toggle')); await keyState(page, 'shown'); await page.click(action('toggle'));
+      assert.deepEqual(gateway.restarts, []);
+    });
+  }
+});
+
+test('reset: blocked notes, daily limit, unavailable and feature off have the expected controls and help', LONG, async () => {
+  for (const state of ['blocked', 'custom', 'limit', 'offline', 'off']) {
+    const reset = { enabled: state !== 'off', blocked: ['blocked', 'custom'].includes(state) ? ['member'] : [],
+      blockedNote: state === 'custom' ? '此测试钥匙暂不支持自助更换，请联系管理员处理。' : '' };
+    await resetSession('reset-policy-' + state, { reset, mode: state === 'offline' ? 'offline' : 'ok', viewport: NARROW }, async ({ page, gateway }) => {
+      if (state === 'limit') await page.route('**/_wp/api/my-key', async route => {
+        // route.fetch() resolves the fixture host outside the browser and cannot reach it; ask the gateway directly.
+        const body = (await gateway.request('GET', API, { who: 'member' })).json;
+        body.reset = { status: 'idle', allowed: false, reason: 'limit', note: '', left: 0, limit: 3 };
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+      });
+      await openMyKey(page);
+      if (state === 'off') assert.equal(await page.locator(action('reset')).count(), 0);
+      else assert.ok(await page.locator(action('reset')).isDisabled());
+      const expected = state === 'blocked' ? '这把钥匙暂不支持自助重置；需要更换请联系管理员。'
+        : state === 'custom' ? reset.blockedNote : state === 'limit' ? '今天的重置次数已用完（每天 3 次），明天再试。'
+          : state === 'offline' ? '暂时无法重置，请稍后再试。' : '';
+      assert.equal(await text(page, RESET_NOTE), expected);
+      const help = ['blocked', 'custom', 'off'].includes(state) ? NOTES : RESET_NOTES;
+      assert.deepEqual(await page.locator(GUIDE + ' [data-wp-my-key-notes] li').allTextContents(), help);
+      const facts = await overflow(page, K); assert.deepEqual(facts.outside, []);
+      assert.ok(facts.pageScrollWidth <= facts.pageClientWidth && facts.dialogScrollWidth <= facts.dialogClientWidth);
+      if (state === 'custom') await suite.shot(page, 'reset-blocked-light-360x740');
+      await page.click(action('close')); await setting(page, 'language', 'en-US'); await openMyKey(page);
+      if (state !== 'off') assert.equal(await text(page, action('reset')), 'Reset key');
+      if (state === 'blocked') assert.equal(await text(page, RESET_NOTE), 'This key cannot be reset here. Ask an administrator to replace it.');
+      if (state === 'custom') assert.equal(await text(page, RESET_NOTE), reset.blockedNote);
+      if (state === 'limit') assert.equal(await text(page, RESET_NOTE), 'No resets left today (3 per day). Try again tomorrow.');
+      if (state === 'offline') assert.equal(await text(page, RESET_NOTE), 'Resetting is unavailable right now. Please try again later.');
+      assert.equal(gateway.broker.claimed.length, 0);
+      assert.deepEqual(gateway.restarts, []);
+    });
+  }
+});
+
+for (const theme of ['light', 'dark']) for (const viewport of [PHONE, NARROW]) {
+  test(`reset: ${theme} confirmation stays inside ${viewport.width}px and English copy survives switching`, LONG, async () => {
+    await resetSession(`reset-layout-${theme}-${viewport.width}`, { viewport, storage: { 'fixture-theme': theme } }, async ({ page }) => {
+      await openMyKey(page); await page.click(action('reset')); await resetLayout(page);
+      assert.deepEqual(await page.locator(CONFIRM + ' > p').allTextContents(), [...CONFIRM_SENTENCES, '今天还可以重置 3 次。']);
+      await suite.shot(page, `reset-confirm-${theme}-${viewport.width}x${viewport.height}`);
+      await page.click(action('reset-cancel')); await page.click(action('close'));
+      await setting(page, 'language', 'en-US'); await openMyKey(page); await page.click(action('reset'));
+      assert.equal(await text(page, CONFIRM + ' h3'), 'Reset this key?');
+      assert.deepEqual(await page.locator(CONFIRM + ' > p').allTextContents(), [
+        'The old key stops working immediately and cannot be restored.',
+        'The key inside your workspace is replaced automatically; your workspace restarts for about a minute and a conversation in progress is interrupted.',
+        'Only tools on your own computer that use the old key must be given the new one by you.', '3 resets left today.',
+      ]);
+      await resetLayout(page);
+      assert.equal(await text(page, action('reset-cancel')), 'Cancel'); assert.equal(await text(page, action('reset-confirm')), 'Reset');
+      await page.click(action('reset-confirm')); await page.waitForSelector(RESET_DONE);
+      assert.equal(await text(page, RESET_DONE), RESET_SUCCESS_EN);
+      const facts = await overflow(page, K); assert.deepEqual(facts.outside, []);
+      assert.ok(facts.pageScrollWidth <= facts.pageClientWidth && facts.dialogScrollWidth <= facts.dialogClientWidth);
+    });
+  });
+}
+
+test('reset: pending polling stops on close, resumes on reopen, and stops after five minutes', LONG, async () => {
+  await resetSession('reset-pending', { mode: 'never-claims' }, async ({ page, gateway, log }) => {
+    await openMyKey(page); await page.click(action('reset')); await page.click(action('reset-confirm'));
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent === '正在重置钥匙…', RESET_NOTE);
+    await page.click(action('close')); await closed(page);
+    const polls = log.requests.filter(r => r === 'GET ' + API + '/reset').length;
+    await page.waitForTimeout(2200); assert.equal(log.requests.filter(r => r === 'GET ' + API + '/reset').length, polls);
+    await openMyKey(page); assert.equal(await text(page, RESET_NOTE), '正在重置钥匙…');
+    await page.evaluate(() => { const now = Date.now; Date.now = () => now() + 301000; });
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent === '还在处理中，请稍后重新打开「我的钥匙」查看。', K + ' [data-wp-my-key-status]');
+    assert.equal(gateway.broker.claimed.length, 0);
+    await page.click(action('close')); await openMyKey(page); gateway.broker.setMode('ok');
+    await page.waitForSelector(RESET_DONE);
+  });
+});
+
+test('reset: POST conflicts, quota and policy changes update the dialog without duplicate attempts', LONG, async () => {
+  for (const reason of ['busy', 'limit', 'blocked']) {
+    await resetSession('reset-post-' + reason, {}, async ({ page, gateway, log }) => {
+      await openMyKey(page);
+      await page.route('**/_wp/api/my-key/reset', async route => {
+        if (route.request().method() !== 'POST') return route.continue();
+        if (reason === 'busy') {
+          const accepted = await gateway.request('POST', API + '/reset', { who: 'member', body: { confirm: 'reset' } });
+          assert.equal(accepted.status, 202);
+        } else if (reason === 'blocked') gateway.setMyKey({ reset: { blocked: ['member'] } });
+        await route.fulfill({ status: reason === 'busy' ? 409 : reason === 'limit' ? 429 : 403,
+          contentType: 'application/json', body: JSON.stringify({ error: 'My key request failed', reason }) });
+      });
+      await page.click(action('reset')); await page.click(action('reset-confirm'));
+      if (reason === 'busy') await page.waitForSelector(RESET_DONE);
+      else {
+        await page.waitForFunction(([selector, message]) => document.querySelector(selector)?.textContent === message,
+          [RESET_NOTE, reason === 'limit' ? '今天的重置次数已用完（每天 3 次），明天再试。' : '这把钥匙暂不支持自助重置；需要更换请联系管理员。']);
+        assert.ok(await page.locator(action('reset')).isDisabled());
+      }
+      assert.equal(log.requests.filter(value => value === 'POST ' + API + '/reset').length, 1);
+      assert.deepEqual(gateway.restarts, reason === 'busy' ? ['workpartner-next-member'] : []);
+    });
+  }
+});
+
+test('reset: a lost POST response recovers an accepted reset through main status and polling', LONG, async () => {
+  await resetSession('reset-lost-response', { mode: 'never-claims' }, async ({ page, gateway, log }) => {
+    await openMyKey(page);
+    const before = log.requests.length;
+    await page.route('**/_wp/api/my-key/reset', async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const accepted = await gateway.request('POST', API + '/reset', { who: 'member', body: { confirm: 'reset' } });
+      assert.equal(accepted.status, 202);
+      await route.abort('failed');
+    });
+    await page.click(action('reset')); await page.click(action('reset-confirm'));
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent === '正在重置钥匙…', RESET_NOTE);
+    assert.equal(await page.locator(RESET_FAILED).count(), 0);
+    await disabledKeyActions(page); assert.ok(await page.locator(action('reset')).isDisabled());
+    const recovery = log.requests.slice(before).filter(request => request.includes(API));
+    assert.deepEqual(recovery.slice(0, 2), ['POST ' + API + '/reset', 'GET ' + API]);
+    gateway.broker.setMode('ok');
+    await page.waitForSelector(RESET_DONE);
+    assert.equal(await text(page, RESET_DONE), RESET_SUCCESS_ZH);
+    assert.equal(await page.getAttribute(VALUE, 'data-state'), 'masked');
+    assert.notEqual(await text(page, VALUE), masked('member'));
+    assert.equal(log.requests.filter(request => request === 'POST ' + API + '/reset').length, 1);
+    assert.equal(gateway.broker.claimed.length, 1);
+    assert.deepEqual(gateway.restarts, ['workpartner-next-member']);
+  });
+});
+
+test('reset: lost requests report failure and session revocation removes admission', LONG, async () => {
+  for (const status of ['network', 401, 404]) {
+    await resetSession('reset-revoked-' + status, {}, async ({ page, gateway, log }) => {
+      await openMyKey(page);
+      const before = log.requests.length;
+      await page.route('**/_wp/api/my-key/reset', route => status === 'network' ? route.abort('failed')
+        : route.fulfill({ status, contentType: 'application/json', body: status === 404 ? '' : '{"error":"My key request failed"}' }));
+      await page.click(action('reset')); await page.click(action('reset-confirm'));
+      if (status === 'network') {
+        await page.waitForSelector(RESET_FAILED); await keyState(page, 'masked');
+        assert.deepEqual(log.requests.slice(before).filter(request => request.includes(API)), ['POST ' + API + '/reset', 'GET ' + API]);
+        assert.equal(gateway.broker.claimed.length, 0);
+      }
+      else { await page.waitForSelector(K, { state: 'hidden' }); await menu(page, false); assert.equal(await page.locator(ENTRY).count(), 0); }
+      assert.deepEqual(gateway.restarts, []);
+    });
+  }
 });
