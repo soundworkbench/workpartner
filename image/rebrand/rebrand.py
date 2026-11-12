@@ -153,11 +153,12 @@ UI_PATCHES = [
     ('zn=()=>{pd.getUserConversations.invoke({limit:1e4}).then(e=>{const t=e?.items;if(t&&Array.isArray(t)){Yn=t.filter(o=>{const a=o.extra;return a?.is_health_check!==!0&&!a?.team_id&&!a?.teamId}),zo=new Set(t.map(o=>o.id)),Kt();return}Yn=[],zo=new Set,Kt()}).catch(e=>{console.error("[WorkspaceGroupedHistory] Failed to load conversations:",e),Yn=[],zo=new Set,Kt()})}',
      'zn=()=>{window.wpArchive.refresh=zn;window.wpArchive.invalidate=()=>{Yn=Yn.slice();Kt()};return window.wpArchive.load(wpVersion=>pd.getUserConversations.invoke({limit:1e4}).then(e=>{const t=e?.items;window.wpArchive.observe(Array.isArray(t)?t:[],wpVersion);if(t&&Array.isArray(t)){Yn=t.filter(o=>{const a=o.extra;return a?.is_health_check!==!0&&!a?.team_id&&!a?.teamId}),zo=new Set(t.map(o=>o.id)),Kt();return}Yn=[],zo=new Set,Kt()}).catch(e=>{console.error("[WorkspaceGroupedHistory] Failed to load conversations:",e),Yn=[],zo=new Set,Kt()}))}'),
     ('UPo=(e,t)=>{const n=e.filter(s=>!FPo(s))',
-     'UPo=(e,t)=>{const n=e.filter(s=>!FPo(s)&&!window.wpArchive.archived(s))'),
+     'UPo=(e,t)=>{const n=e.filter(s=>!FPo(s)&&!window.wpArchive.archived(s)&&(!window.wpProjects||window.wpProjects.shows(s)))'),
+    # Projects only filter the list: a chat's extra.wp_project points into the client-settings project list.
     ('onClickMenuItem:b=>{if(b==="pin")',
-     'onClickMenuItem:b=>{if(b==="wpArchive"){window.wpArchive.toggle(t);return}if(b==="pin")'),
+     'onClickMenuItem:b=>{if(b==="wpArchive"){window.wpArchive.toggle(t);return}if(b==="wpProject"){window.wpProjects.move(t);return}if(b==="pin")'),
     ('e.createElement(J.Item,{key:"pin"}',
-     'e.createElement(J.Item,{key:"wpArchive"},e.createElement("div",{className:"flex items-center gap-8px"},e.createElement("span",{dangerouslySetInnerHTML:{__html:window.wpArchive.icon}}),e.createElement("span",null,window.wpArchive.label("archive")))),e.createElement(J.Item,{key:"pin"}'),
+     'e.createElement(J.Item,{key:"wpArchive"},e.createElement("div",{className:"flex items-center gap-8px"},e.createElement("span",{dangerouslySetInnerHTML:{__html:window.wpArchive.icon}}),e.createElement("span",null,window.wpArchive.label("archive")))),e.createElement(J.Item,{key:"wpProject"},e.createElement("div",{className:"flex items-center gap-8px"},e.createElement("span",{dangerouslySetInnerHTML:{__html:window.wpProjects.icon}}),e.createElement("span",null,window.wpProjects.label("move")))),e.createElement(J.Item,{key:"pin"}'),
     ('onClick:b=>{b.stopPropagation()}},e.createElement(Ne,{droplist:',
      'onClick:b=>{b.stopPropagation()}},!N&&e.createElement("button",{type:"button",className:"wp-archive-button sider-action-btn",title:window.wpArchive.label("archive"),"aria-label":window.wpArchive.label("archive"),"data-conversation":t.id,onClick:b=>{b.stopPropagation();window.wpArchive.toggle(t)},dangerouslySetInnerHTML:{__html:window.wpArchive.icon}}),e.createElement(Ne,{droplist:'),
     ('const Vt=new Eg,lu=', 'const Vt=window.wpChatEvents=new Eg,lu='),
@@ -455,7 +456,7 @@ s = s.replace('<link rel="icon" type="image/png" href="./pwa/icon-192.png" />',
               '<link rel="icon" type="image/svg+xml" href="./favicon.svg" />')
 s = s.replace('<meta name="theme-color" content="#4E5969" />', f'<meta name="theme-color" content="{THEME_COLOR}" />')
 css = open(os.path.join(overlay, 'wp-overlay.css'), encoding='utf8').read().replace('__WP_APPEARANCE_NAME__', copy['appearanceName']).replace('__WP_AVATAR_COLOR__', skin['avatarColor']) + '\n' + pet_css
-js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
+js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-projects.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
 js = js.replace('__WP_CHAT_MODULE__', chat_modules[0]).replace('__WP_CHAT_STYLES__', json.dumps(chat_styles))
 js += '\n' + Path(overlay, 'wp-skills.js').read_text()
 js += '\n' + Path(overlay, 'wp-tools.js').read_text()

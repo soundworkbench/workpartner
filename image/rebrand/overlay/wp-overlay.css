@@ -427,6 +427,16 @@ html body .wp-archive-button:disabled { opacity: .5; cursor: wait; }
 .wp-archive-entry { display: flex; align-items: center; gap: 10px; margin: 8px 10px; padding: 8px 12px; border: 0; border-radius: 20px; background: transparent; color: var(--wp-ink-2); font: inherit; cursor: pointer; flex: none; }
 .wp-archive-entry:hover { background: var(--wp-sidebar-hover); }
 html.wp-sider-collapsed .wp-archive-entry { display: none; }
+.wp-project-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 10px 8px; flex: none; }
+html.wp-sider-collapsed .wp-project-bar { display: none; }
+.wp-project-chip, .wp-project-action { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 10px; border: 1px solid var(--wp-line); border-radius: 14px; background: transparent; color: var(--wp-ink-2); font: inherit; font-size: 13px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wp-project-chip:hover, .wp-project-action:hover { background: var(--wp-sidebar-hover); color: var(--wp-ink); }
+.wp-project-chip[aria-pressed="true"] { background: var(--wp-active); color: var(--wp-ink); border-color: var(--wp-focus-line); }
+.wp-project-action { border-style: dashed; }
+.wp-project-form { display: flex; gap: 8px; }
+.wp-project-form input { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--wp-line); border-radius: 8px; background: var(--wp-card); color: var(--wp-ink); font: inherit; }
+.wp-archive-dialog .wp-project-create { margin-top: 8px; }
+.wp-archive-dialog .wp-archive-name[aria-current="true"] { font-weight: 600; }
 .wp-archive-backdrop { box-sizing: border-box; position: fixed; inset: 0; z-index: 1100; background: #0005; display: grid; place-items: center; padding: 20px; }
 .wp-archive-dialog { box-sizing: border-box; width: min(560px, 100%); max-height: 80dvh; overflow: auto; border: 1px solid var(--wp-line); border-radius: 16px; padding: 20px; background: var(--wp-card); color: var(--wp-ink); box-shadow: 0 8px 40px #0002; }
 .wp-archive-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }

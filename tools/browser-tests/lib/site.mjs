@@ -18,7 +18,7 @@ export function buildSite(repo, out) {
   const copy = skin.copy;
   const css = read(overlay, 'wp-overlay.css').replaceAll('__WP_APPEARANCE_NAME__', copy.appearanceName)
     .replaceAll('__WP_AVATAR_COLOR__', skin.avatarColor) + '\n' + read(brand, 'wp-pet.css').trimEnd() + '\n\n';
-  let js = read(overlay, 'wp-archive.js') + '\n' + read(overlay, 'wp-overlay.js')
+  let js = read(overlay, 'wp-archive.js') + '\n' + read(overlay, 'wp-projects.js') + '\n' + read(overlay, 'wp-overlay.js')
     .replaceAll('__WP_WORKDIR__', '/data/work').replaceAll('__WP_PERMISSION__', 'bypassPermissions')
     .replace('  /* __WP_COPY__ */', read(brand, 'copy.js').trimEnd());
   // Fixture: the real chat module and styles come from the upstream bundle.
