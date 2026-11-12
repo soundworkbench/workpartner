@@ -65,7 +65,10 @@ async function session(label, options, body) {
       const record = { method: response.request().method(), path: url.pathname, status: response.status() };
       replies.push(record);
       // Attach the rejection handler immediately so a failed read cannot escape the test runner.
-      pending.push(response.text().then(body => { record.body = body; }, error => { record.error = String(error); }));
+      pending.push(response.text().then(body => { record.body = body; }, error => {
+        if (response.headers()['content-length'] === '0' || [204, 304].includes(record.status)) record.body = '';
+        else record.error = String(error);
+      }));
     });
     const responses = async () => {
       await Promise.all(pending);
@@ -101,10 +104,13 @@ async function closed(page) {
   await page.waitForFunction(() => document.activeElement?.matches('button.wp-user'));
 }
 async function keyState(page, state, who = 'member', timeout = 5000) {
+  const value = { shown: MODEL_KEYS[who], masked: masked(who), loading: '加载中…',
+    unavailable: '暂时取不到', missing: '还没有分配钥匙' }[state];
+  assert.notEqual(value, undefined, 'known key state');
   await page.waitForFunction(([selector, state, value]) => {
     const node = document.querySelector(selector);
     return node?.dataset.state === state && node.textContent === value;
-  }, [VALUE, state, state === 'shown' ? MODEL_KEYS[who] : masked(who)], { timeout });
+  }, [VALUE, state, value], { timeout });
 }
 async function noPlaintext(page, who = 'member') {
   const seen = await page.evaluate(() => ({ html: document.documentElement.outerHTML,
@@ -124,6 +130,29 @@ async function tab(page, name) {
   const marker = { claude: 'ANTHROPIC_BASE_URL', codex: 'experimental_bearer_token', other: 'Base URL (OpenAI)' }[name];
   await page.waitForFunction(([selector, marker]) => [...document.querySelectorAll(selector)]
     .some(node => node.getClientRects().length && node.textContent.includes(marker)), [K + ' pre[data-wp-my-key-snippet]', marker]);
+}
+async function tabLabels(page, english = false) {
+  // Give the page's DOM-change renamer time to process labels after every guide render.
+  await page.waitForTimeout(350);
+  const tabs = page.locator(GUIDE + ' [data-wp-my-key-tab]');
+  assert.deepEqual(await tabs.allTextContents(), ['Claude Code', 'Codex', english ? 'Other tools' : '其它工具']);
+  assert.equal(await tabs.locator('code').count(), 3);
+}
+
+async function disabledKeyActions(page) {
+  for (const name of ['toggle', 'copy', 'copy-config']) assert.ok(await page.locator(action(name)).isDisabled());
+}
+
+async function emptyUsage(page, state) {
+  assert.equal(await page.getAttribute(USAGE, 'data-state'), state);
+  const message = state === 'loading' ? '加载中…' : '暂时取不到';
+  assert.deepEqual(await page.locator(USAGE + ' > *').allTextContents(), ['用量', message]);
+  for (const name of ['usage', 'limits', 'window', 'estimate', 'top-models']) {
+    assert.equal(await page.locator(`${USAGE} [data-wp-my-key-${name}]`).count(), 0);
+  }
+  const content = await text(page, USAGE);
+  assert.equal(content.split(message).length - 1, 1);
+  assert.ok(!content.includes('暂不限额'));
 }
 async function copyCount(page, count) {
   await page.waitForFunction(count => window.__copied.length === count, count);
@@ -315,6 +344,48 @@ test('key: masks, reveals, hides, copies and audits each action', LONG, async ()
   });
 });
 
+test('key: delayed data loads before masking and failed requests stay unavailable', LONG, async () => {
+  await session('key-loading', {}, async ({ page }) => {
+    await page.route(ORIGIN + API, async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await route.continue();
+    });
+    await page.evaluate(selector => {
+      window.__missingKeySeen = false;
+      const inspect = node => {
+        if ((node.textContent || '').includes('还没有分配钥匙')) window.__missingKeySeen = true;
+      };
+      window.__keyStateObserver = new MutationObserver(records => {
+        const value = document.querySelector(selector);
+        if (value) inspect(value);
+        for (const record of records) {
+          if ((record.oldValue || '').includes('还没有分配钥匙')) window.__missingKeySeen = true;
+          for (const node of [...record.addedNodes, ...record.removedNodes]) inspect(node);
+        }
+      });
+      window.__keyStateObserver.observe(document.body, { childList: true, subtree: true, characterData: true, characterDataOldValue: true });
+    }, VALUE);
+    await menu(page); await page.click(ENTRY);
+    await page.waitForSelector(K + '[open]');
+    await keyState(page, 'loading'); await disabledKeyActions(page); await emptyUsage(page, 'loading');
+    await keyState(page, 'masked');
+    assert.equal(await page.evaluate(() => window.__missingKeySeen), false);
+    await page.click(action('close')); await closed(page);
+    await page.unroute(ORIGIN + API);
+    await page.route(ORIGIN + API, route => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }));
+    await openMyKey(page); await keyState(page, 'unavailable'); await disabledKeyActions(page);
+    await emptyUsage(page, 'unavailable');
+    assert.equal(await page.evaluate(() => window.__missingKeySeen), false);
+  });
+  await session('key-missing', {}, async ({ page }) => {
+    await page.route(ORIGIN + API, route => route.fulfill({ json: {
+      key: null, revealSeconds: SETTINGS.revealSeconds, baseUrl: SETTINGS.publicBaseUrl, defaults: {}, usage: null, models: [],
+    } }));
+    await openMyKey(page); await keyState(page, 'missing'); await disabledKeyActions(page);
+  });
+});
+
 test('usage: totals, UTC windows, model shares and private-field isolation', LONG, async () => {
   suite.harness.model.setMode('ok');
   suite.harness.model.requests.length = 0;
@@ -381,10 +452,24 @@ test('usage: daily and weekly cost limits expose amounts and accessible bars', L
         assert.equal(Number(await page.getAttribute(progress, 'aria-valuemax')), limit.costLimit);
         assert.equal(Number(await page.getAttribute(progress, 'aria-valuenow')), limit.cost);
         const label = await text(page, bar);
+        const reset = new Date(limit.reset);
+        const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric' })
+          .formatToParts(reset).map(part => [part.type, part.value]));
+        assert.ok(label.includes(`${parts.month}月${parts.day}日 08:00（北京时间）恢复`));
+        assert.doesNotMatch(label, /\d{2}:\d{2}:\d{2}/);
+        assert.ok(!label.includes(String(reset.getUTCFullYear())));
         const amounts = (label.match(/\d+(?:\.\d+)?/g) || []).map(Number);
         for (const amount of [limit.costLimit, limit.cost, limit.costLeft]) assert.ok(amounts.includes(amount), 'limit, used and left amounts are shown');
       }
       await suite.shot(page, 'usage-limited-light-desktop');
+      await page.click(action('close')); await closed(page);
+      await setting(page, 'language', 'en-US'); await openMyKey(page);
+      for (const limit of modelFixture('member', 'limited').profile.limits) {
+        const date = new Date(limit.reset).toLocaleDateString('en-US', { timeZone: 'Asia/Shanghai', month: 'short', day: 'numeric' });
+        const label = await text(page, `${limits} [data-wp-my-key-limit="${limit.period}"]`);
+        assert.ok(label.includes(`Resets ${date}, 08:00 Beijing time`));
+        assert.doesNotMatch(label, /\d{2}:\d{2}:\d{2}/);
+      }
     });
   } finally { suite.harness.model.setMode('ok'); }
 });
@@ -396,14 +481,21 @@ for (const mode of ['down', 'foreign']) {
       await session('usage-' + mode, {}, async ({ page, log }) => {
         await openMyKey(page);
         if (mode === 'down') {
-          assert.equal(await page.getAttribute(USAGE, 'data-state'), 'unavailable');
-          assert.match(await text(page, USAGE), /暂时取不到/);
+          await emptyUsage(page, 'unavailable');
+          assert.equal(await text(page, GUIDE + ' [data-wp-my-key-models]'), '模型清单暂时取不到');
+          assert.equal(await page.locator(GUIDE + ' [data-wp-my-key-model]').count(), 0);
+          const filter = page.locator(GUIDE + ' [data-wp-my-key-model-filter]');
+          assert.ok(await filter.evaluate(node => node.hidden));
+          assert.equal(await filter.isVisible(), false);
         } else {
           for (const period of ['today', 'week']) {
             const tile = `${USAGE} [data-wp-my-key-usage="${period}"]`;
             assert.equal(await page.getAttribute(tile, 'data-state'), 'unavailable');
             assert.match(await text(page, tile), /暂时取不到/);
           }
+          assert.equal(await page.getAttribute(USAGE + ' [data-wp-my-key-limits]', 'data-state'), 'none');
+          assert.equal(await text(page, USAGE + ' [data-wp-my-key-limits]'), '暂不限额');
+          assert.equal(await page.locator(USAGE + ' [data-wp-my-key-window]').count(), 0);
         }
         await suite.shot(page, `usage-${mode}-light-desktop`);
         await keyState(page, 'masked');
@@ -431,9 +523,12 @@ test('guide: three safe snippets, copy all, model filtering and six notes', LONG
   await session('guide', {}, async ({ page }) => {
     await openMyKey(page); await watchPlaintext(page);
     assert.equal(await page.locator(GUIDE + ' [role="tab"]').count(), 3);
+    assert.equal(await page.getByRole('heading', { name: `可用模型（${MODEL_MODELS.length}）`, exact: true }).count(), 1);
+    assert.equal(await page.getByRole('heading', { name: '注意事项', exact: true }).count(), 1);
     const copies = [];
     for (const name of ['claude', 'codex', 'other']) {
       await tab(page, name);
+      await tabLabels(page);
       assert.equal(await page.locator(GUIDE + ' [role="tab"][aria-selected="true"]').count(), 1);
       const snippet = await text(page, SNIPPET);
       assert.ok(snippet.includes(SETTINGS.publicBaseUrl)); assert.ok(snippet.includes('<你的钥匙>'));
@@ -458,6 +553,7 @@ test('guide: three safe snippets, copy all, model filtering and six notes', LONG
       return visible.length === 1 && visible[0].textContent === 'claude-sonnet-5-5';
     }, models);
     assert.deepEqual(await page.locator(models + ':visible').allTextContents(), ['claude-sonnet-5-5']);
+    assert.equal(await page.getByRole('heading', { name: `可用模型（${MODEL_MODELS.length}）`, exact: true }).count(), 1);
     await page.fill(GUIDE + ' input[data-wp-my-key-model-filter]', '');
     await page.waitForFunction(([selector, count]) => [...document.querySelectorAll(selector)].filter(node => node.getClientRects().length).length === count, [models, MODEL_MODELS.length]);
     assert.deepEqual(await page.locator(GUIDE + ' [data-wp-my-key-notes] li').allTextContents(), NOTES);
@@ -472,8 +568,11 @@ test('language: English menu, buttons and placeholder', LONG, async () => {
     assert.equal(await text(page, '#wp-my-key-heading'), 'My key');
     assert.equal(await text(page, action('toggle')), 'Show');
     assert.equal(await text(page, action('copy')), 'Copy');
+    assert.equal(await page.getByRole('heading', { name: `Available models (${MODEL_MODELS.length})`, exact: true }).count(), 1);
+    assert.equal(await page.getByRole('heading', { name: 'Notes', exact: true }).count(), 1);
     for (const name of ['claude', 'codex', 'other']) {
       await tab(page, name);
+      await tabLabels(page, true);
       const snippet = await text(page, SNIPPET);
       assert.ok(snippet.includes('<YOUR_KEY>')); assert.ok(!snippet.includes('<你的钥匙>'));
       assert.ok(snippet.includes(SETTINGS.publicBaseUrl));
@@ -547,6 +646,32 @@ for (const [name, viewport] of VIEWPORTS.slice(1)) {
           assert.ok(facts.dialogInViewport, 'dialog inside viewport');
           await suite.shot(page, `layout-${viewport.width}-${name}-key-shown`);
         }
+        await page.locator(K + ' .wp-my-key-content').evaluate(content => { content.scrollTop = content.scrollHeight; });
+        const scrolled = await page.locator(K).evaluate(dialog => {
+          const content = dialog.querySelector('.wp-my-key-content'), box = dialog.getBoundingClientRect();
+          const heading = dialog.querySelector('#wp-my-key-heading'), header = heading.parentElement.getBoundingClientRect();
+          const close = dialog.querySelector('[data-wp-my-key-action="close"]'), closeBox = close.getBoundingClientRect();
+          const inside = rect => rect.width > 0 && rect.height > 0 && rect.left >= box.left && rect.right <= box.right
+            && rect.top >= box.top && rect.bottom <= box.bottom;
+          // Sticky headers occlude cards as they pass underneath. Compare only their visible area below the row.
+          const overlaps = [...dialog.querySelectorAll('[data-wp-my-key-card]')].some(card => {
+            const rect = card.getBoundingClientRect(), visibleTop = Math.max(rect.top, header.bottom), visibleBottom = Math.min(rect.bottom, box.bottom);
+            return visibleBottom > visibleTop && closeBox.bottom > visibleTop && closeBox.top < visibleBottom
+              && closeBox.right > rect.left && closeBox.left < rect.right;
+          });
+          const hit = document.elementFromPoint(closeBox.left + closeBox.width / 2, closeBox.top + closeBox.height / 2);
+          const headingBox = heading.getBoundingClientRect();
+          const headingHit = document.elementFromPoint(headingBox.left + headingBox.width / 2, headingBox.top + headingBox.height / 2);
+          return { atBottom: content.scrollTop > 0 && Math.abs(content.scrollHeight - content.clientHeight - content.scrollTop) <= 1,
+            headingInside: inside(headingBox), closeInside: inside(closeBox), closeInRow: closeBox.top >= header.top && closeBox.bottom <= header.bottom,
+            overlaps, closeOnTop: hit === close || close.contains(hit), headingOnTop: headingHit === heading || heading.contains(headingHit) };
+        });
+        assert.deepEqual(scrolled, { atBottom: true, headingInside: true, closeInside: true, closeInRow: true,
+          overlaps: false, closeOnTop: true, headingOnTop: true });
+        const facts = await overflow(page, K);
+        assert.ok(facts.pageScrollWidth <= facts.pageClientWidth && facts.dialogScrollWidth <= facts.dialogClientWidth);
+        assert.deepEqual(facts.outside, []);
+        await suite.shot(page, `layout-${viewport.width}-scrolled-bottom`);
         await noStoredKey(page);
       });
     } finally { suite.main.setMyKey({ revealSeconds: SETTINGS.revealSeconds }); }

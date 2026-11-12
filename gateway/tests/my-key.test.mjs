@@ -185,14 +185,14 @@ test('upstream period and totals use UTC including hourly points on a single-day
 });
 
 const limit = (period, extra = {}) => ({ period, start: '2026-11-10T00:00:00Z', reset: '2026-11-17T00:00:00Z', calls: 86, costLimit: 15, cost: 3.2, costLeft: 11.8, spent: false, ...extra });
-test('limits map cost and tokens, prefer unrestricted windows and ignore unknown periods', async t => {
+test('limits map cost and tokens, prefer unrestricted windows and ignore unknown periods', () => {
   assert.deepEqual(mapLimits([]), { day: null, week: null });
-  const f = await fixture(t);
-  f.state.profile.limits = [limit('day', { models: ['model-a'], costLimit: 5 }), limit('day'), limit('week', { costLimit: 0, tokenLimit: 1000, tokens: 900, tokensLeft: 100, spent: true, models: ['model-a'] }), limit('month')];
-  const response = await f.request(), limits = response.data.usage.limits;
+  const p = profile();
+  p.limits = [limit('day', { models: ['model-a'], costLimit: 5 }), limit('day'), limit('week', { costLimit: 0, tokenLimit: 1000, tokens: 900, tokensLeft: 100, spent: true, models: ['model-a'] }), limit('month')];
+  const mapped = mapUpstream(p, usage(), usageWindows(NOW)), limits = mapped.usage.limits;
   assert.deepEqual(limits.day, { unit: 'cost', limit: 15, used: 3.2, left: 11.8, start: '2026-11-10T00:00:00.000Z', reset: '2026-11-17T00:00:00.000Z', spent: false, partial: false });
   assert.deepEqual(limits.week, { unit: 'tokens', limit: 1000, used: 900, left: 100, start: limits.day.start, reset: limits.day.reset, spent: true, partial: true });
-  assert.equal(response.data.usage.today.start, limits.day.start); assert.equal(response.data.usage.week.reset, limits.week.reset);
+  assert.equal(mapped.usage.today.start, limits.day.start); assert.equal(mapped.usage.week.reset, limits.week.reset);
   assert.equal(mapLimits([limit('week', { models: ['model-a'] }), limit('week', { models: ['model-b'], costLimit: 25 })]).week.limit, 15);
   for (const extra of [{ cost: -1 }, { cost: Infinity }, { costLeft: NaN }, { costLimit: '15' }, { start: 'bad' }, { spent: 'false' }, { models: [2] }]) assert.equal(mapLimits([limit('day', extra)]).day, null);
 });
@@ -225,13 +225,13 @@ test('usage ownership, time alignment and malformed numbers fail closed', async 
     u => { u.series[0].time = '2026-11-08T16:00:00Z'; }, u => { u.callerKeys.push({ name: 'another' }); },
     u => { u.callerKeys[0].name = 'another'; }, u => { u.by.callerKey.push({ name: 'another' }); },
     u => { u.calls = -1; }, u => { u.cost = '3'; }, u => { u.series = []; }, u => { u.series[1].cost = null; },
-    u => { u.by.model[0].calls = -1; }, u => { delete u.callerKeys; },
+    u => { u.by.model = null; }, u => { delete u.callerKeys; },
   ]) {
     f.state.usage = usage(); change(f.state.usage); const response = await f.request();
     assert.equal(response.status, 200); assert.equal(response.data.usage.today, null); assert.equal(response.data.usage.week, null);
     assert.ok(response.data.key.masked); assert.equal((await f.reveal()).data.key, keys[0]);
   }
-  for (const change of [p => { p.name = 3; }, p => { p.models = null; }, p => { p.limits = null; }, p => { p.models[0].id = 4; }]) {
+  for (const change of [p => { p.name = 3; }, p => { p.models = null; }, p => { p.limits = null; }]) {
     f.state.profile = profile(); change(f.state.profile); assert.equal((await f.request()).data.usage, null);
   }
   const u = usage(); u.cost = Infinity; assert.equal(mapUsage(u, profile().name, usageWindows(NOW), mapLimits([])).week, null);
@@ -282,8 +282,45 @@ test('pure mapping rejects malformed upstream data and maps cost windows indepen
     u.series[0].time = value; assert.equal(mapUpstream(p, u, windows).usage.today, null);
   }
   for (const extra of [{ cost: -1 }, { cost: Infinity }, { costLeft: NaN }, { costLimit: '15' }, { tokens: -1 }, { start: 'bad' }, { spent: 'false' }, { models: [2] }]) assert.equal(mapLimits([limit('day', extra)]).day, null);
-  for (const value of [null, [], {}, { name: 1 }, { ...profile(), models: [null] }]) assert.equal(mapUpstream(value, usage(), windows).usage, null);
+  for (const value of [null, [], {}, { ...profile(), name: 1 }, { ...profile(), models: null }, { ...profile(), limits: null }]) assert.equal(mapUpstream(value, usage(), windows).usage, null);
   const long = profile(); long.models = Array.from({ length: 501 }, () => ({ id: 'x'.repeat(201), label: 'y'.repeat(201), ignored: 'private-account' }));
   const models = mapUpstream(long, usage(), windows).models;
   assert.equal(models.length, 500); assert.deepEqual(models[0], { id: 'x'.repeat(200), label: 'y'.repeat(200) });
+});
+
+test('pure mapping skips invalid advertised models and falls back to IDs for labels', () => {
+  const windows = usageWindows(NOW), baseline = mapUpstream(profile(), usage(), windows);
+  for (const entry of [null, [], 'invalid', 4, {}, { id: 4, label: 'Invalid' }]) {
+    const mapped = mapUpstream({ ...profile(), models: [entry, ...profile().models] }, usage(), windows);
+    assert.deepEqual(mapped, baseline);
+    assert.deepEqual(mapUpstream({ ...profile(), models: [entry] }, usage(), windows), { usage: baseline.usage, models: [] });
+  }
+  const p = profile(); p.models[0].id = 4;
+  assert.deepEqual(mapUpstream(p, usage(), windows), { usage: baseline.usage, models: [] });
+  for (const label of [undefined, null, 4, {}, [], false]) {
+    const id = 'model-' + 'x'.repeat(210);
+    assert.deepEqual(mapUpstream({ ...profile(), models: [{ id, label }] }, usage(), windows).models,
+      [{ id: id.slice(0, 200), label: id.slice(0, 200) }]);
+  }
+  const models = [null, ...Array.from({ length: 501 }, (_, i) => ({ id: 'model-' + i }))];
+  assert.equal(mapUpstream({ ...profile(), models }, usage(), windows).models.at(-1).id, 'model-499');
+  assert.equal(mapUpstream({ ...profile(), models: [{ id: 'model', label: '' }] }, usage(), windows).models[0].label, '');
+});
+
+test('model shares skip malformed entries without discarding valid totals or shares', () => {
+  const windows = usageWindows(NOW), limits = mapLimits([]), baseline = mapUsage(usage(), profile().name, windows, limits);
+  const valid = { id: 'ignored', calls: 1, cost: 1 };
+  for (const invalid of [null, [], 'invalid', {}, { ...valid, id: 4 },
+    ...['calls', 'cost'].flatMap(field => [undefined, null, '1', -1, NaN, Infinity, -Infinity].map(value => ({ ...valid, [field]: value })))]) {
+    const u = usage(); u.by.model.splice(1, 0, invalid);
+    assert.deepEqual(mapUsage(u, profile().name, windows, limits), baseline);
+    u.by.model = [invalid];
+    assert.deepEqual(mapUsage(u, profile().name, windows, limits), { ...baseline, week: { ...baseline.week, models: [] } });
+  }
+  const u = usage(); u.by.model[0].calls = -1;
+  assert.deepEqual(mapUsage(u, profile().name, windows, limits), { ...baseline, week: { ...baseline.week, models: baseline.week.models.slice(1) } });
+  for (const value of [undefined, null, {}, 'invalid']) {
+    u.by.model = value;
+    assert.deepEqual(mapUsage(u, profile().name, windows, limits), { today: null, week: null });
+  }
 });

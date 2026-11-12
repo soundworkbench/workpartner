@@ -84,37 +84,42 @@ function installMyKey() {
 .wp-my-key-dialog { position:fixed; inset:0; margin:auto; box-sizing:border-box; width:min(720px, calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:hidden; padding:0; border:1px solid var(--wp-line, #ddd); border-radius:18px; background:var(--wp-card, #FDFDF8); color:var(--wp-ink, #222); font:14px/1.65 var(--wp-font, system-ui); overflow-wrap:anywhere; color-scheme:light; }
 html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
 .wp-my-key-dialog::backdrop { background:rgba(0,0,0,.35); }
-.wp-my-key-content { max-height:calc(100dvh - 26px); overflow:auto; overflow-x:hidden; padding:24px; }
+.wp-my-key-content { --wp-my-key-padding:24px; max-height:calc(100dvh - 26px); overflow:auto; overflow-x:hidden; padding:0 var(--wp-my-key-padding) var(--wp-my-key-padding); }
+.wp-my-key-header { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 calc(-1 * var(--wp-my-key-padding)); padding:12px var(--wp-my-key-padding); background:var(--wp-card, #FDFDF8); border-bottom:1px solid var(--wp-line, #ddd); }
 .wp-my-key-dialog * { box-sizing:border-box; min-width:0; }
 .wp-my-key-dialog [hidden] { display:none!important; }
-.wp-my-key-dialog h2 { margin:0 32px 12px 0; font-size:18px; }
+.wp-my-key-dialog h2 { margin:0; font-size:18px; }
 .wp-my-key-dialog h3 { margin:8px 0; font-size:16px; }
+.wp-my-key-dialog h4 { margin:16px 0 8px; font-size:14px; }
 .wp-my-key-dialog section { border-top:1px solid var(--wp-line, #ddd); padding-top:16px; margin-top:16px; }
 .wp-my-key-dialog button { cursor:pointer; max-width:100%; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:6px 12px; background:var(--wp-send, #3C3F43); color:var(--wp-send-ink, #FCFCFC); font:inherit; font-size:13px; overflow-wrap:anywhere; }
 .wp-my-key-dialog button:hover { background:var(--wp-send-hover, #2E3237); }
 .wp-my-key-dialog button:disabled { opacity:.5; cursor:not-allowed; }
 .wp-my-key-dialog [role=tab][aria-selected=false] { background:var(--wp-hover, #eee); color:var(--wp-ink, #222); }
+.wp-my-key-dialog [role=tab] code, .wp-my-key-models code { font:inherit; color:inherit; background:none; padding:0; }
 .wp-my-key-dialog :focus-visible { outline:2px solid var(--wp-focus-line, #888); outline-offset:2px; }
-.wp-my-key-dialog .wp-my-key-close { position:absolute; right:12px; top:10px; z-index:1; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-2, #666); }
+.wp-my-key-dialog .wp-my-key-close { flex:none; padding:4px 8px; font-size:22px; background:transparent; border:0; color:var(--wp-ink-2, #666); }
 .wp-my-key-dialog .wp-my-key-close:hover { background:var(--wp-hover, #eee); }
 .wp-my-key-row { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
 .wp-my-key-muted { color:var(--wp-ink-2, #666); }
 .wp-my-key-value { display:block; overflow-wrap:anywhere; margin:12px 0; }
 .wp-my-key-tiles { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 .wp-my-key-tile { padding:12px; border:1px solid var(--wp-line, #ddd); border-radius:8px; }
+.wp-my-key-tile[data-state=ready] [data-wp-my-key-cost] { font-size:20px; font-weight:600; }
 .wp-my-key-dialog pre { max-width:100%; overflow:auto; padding:12px; background:var(--wp-main, #F2F2ED); border:1px solid var(--wp-line, #ddd); border-radius:8px; font-size:12px; }
 .wp-my-key-models { max-height:160px; overflow:auto; overflow-wrap:anywhere; }
 .wp-my-key-dialog input { width:100%; max-width:100%; display:block; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:8px 10px; background:var(--wp-main, #F2F2ED); color:var(--wp-ink, #222); font:inherit; margin:12px 0; }
 .wp-my-key-track { height:8px; background:var(--wp-hover, #eee); border-radius:8px; overflow:hidden; }
 .wp-my-key-fill { height:100%; background:var(--wp-send, #3C3F43); }
-@media(max-width:400px) { .wp-my-key-content { padding:16px; } }
+@media(max-width:400px) { .wp-my-key-content { --wp-my-key-padding:16px; } }
 `; document.head.append(style);
     }
     function mount() {
       if (dialog) return;
       styles(); dialog = node('dialog', undefined, 'wp-my-key-dialog'); dialog.setAttribute('aria-labelledby', 'wp-my-key-heading');
       ui.close = button('close', () => { hide(); dialog.close(); }); ui.close.textContent = '×'; ui.close.className = 'wp-my-key-close';
-      const content = node('div', undefined, 'wp-my-key-content'); ui.heading = node('h2'); ui.heading.id = 'wp-my-key-heading'; content.append(ui.heading);
+      const content = node('div', undefined, 'wp-my-key-content'); ui.heading = node('h2'); ui.heading.id = 'wp-my-key-heading';
+      const header = node('div', undefined, 'wp-my-key-header'); header.append(ui.heading, ui.close); content.append(header);
       for (const name of ['key', 'usage', 'guide']) { ui[name] = mark(node('section'), 'card', name); content.append(ui[name]); }
       ui.keyTitle = node('h3'); ui.value = mark(node('code', '', 'wp-my-key-value'), 'value');
       ui.toggle = button('toggle', () => ui.value.dataset.state === 'shown' ? hide() : reveal('show'));
@@ -124,13 +129,15 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
       ui.guideTitle = node('h3'); const tabs = node('div', undefined, 'wp-my-key-row'); tabs.setAttribute('role', 'tablist'); ui.tabs = {};
       for (const name of ['claude', 'codex', 'other']) {
         const b = node('button'); b.type = 'button'; mark(b, 'tab', name); b.setAttribute('role', 'tab');
+        b.append(node('code'));
         b.addEventListener('click', safe(() => { tab = name; renderGuide(); })); ui.tabs[name] = b; tabs.append(b);
       }
       ui.caption = node('p', '', 'wp-my-key-muted'); ui.snippet = mark(node('pre'), 'snippet'); ui.copyConfig = button('copy-config', () => reveal('copy-config'));
       ui.filter = mark(node('input'), 'model-filter'); ui.filter.type = 'text'; ui.filter.addEventListener('input', safe(renderModels));
       ui.models = mark(node('div', undefined, 'wp-my-key-models'), 'models'); ui.notes = mark(node('ul'), 'notes');
-      ui.guide.append(ui.guideTitle, tabs, ui.caption, ui.snippet, ui.copyConfig, ui.filter, ui.models, ui.notes);
-      dialog.append(ui.close, content); document.body.append(dialog);
+      ui.modelsTitle = node('h4'); ui.notesTitle = node('h4');
+      ui.guide.append(ui.guideTitle, tabs, ui.caption, ui.snippet, ui.copyConfig, ui.modelsTitle, ui.filter, ui.models, ui.notesTitle, ui.notes);
+      dialog.append(content); document.body.append(dialog);
       dialog.addEventListener('cancel', safe(hide));
       dialog.addEventListener('close', safe(() => { ++version; busy = false; hide(); document.querySelector('button.wp-user')?.focus(); }));
       dialog.addEventListener('click', safe(event => {
@@ -146,7 +153,11 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
     }
     function renderKey() {
       const shown = ui.value.dataset.state === 'shown';
-      if (!shown) { ui.value.dataset.state = data?.key ? 'masked' : 'missing'; ui.value.textContent = data?.key?.masked || t('还没有分配钥匙', 'No key assigned yet'); }
+      if (!shown) {
+        ui.value.dataset.state = loading ? 'loading' : !data ? 'unavailable' : data.key === null ? 'missing' : data.key ? 'masked' : 'unavailable';
+        ui.value.textContent = loading ? t('加载中…', 'Loading…') : ui.value.dataset.state === 'missing' ? t('还没有分配钥匙', 'No key assigned yet')
+          : data?.key?.masked || t('暂时取不到', 'Unavailable right now');
+      }
       ui.toggle.textContent = shown ? t('隐藏', 'Hide') : t('显示', 'Show'); ui.copy.textContent = t('复制', 'Copy');
       ui.copyConfig.textContent = t('复制整段', 'Copy all');
       for (const control of [ui.toggle, ui.copy, ui.copyConfig]) control.disabled = !data?.key || busy || loading;
@@ -185,16 +196,21 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
     }
     const money = value => '$' + value.toFixed(2);
     const beijingTime = value => new Date(value).toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const beijingReset = value => new Date(value).toLocaleDateString(locale(), { timeZone: 'Asia/Shanghai', month: locale() === 'en-US' ? 'short' : 'numeric', day: 'numeric' })
+      + t(' ', ', ') + beijingTime(value);
     function renderUsage() {
       const usage = data?.usage; ui.usage.replaceChildren(); ui.usage.dataset.state = loading ? 'loading' : usage ? 'ready' : 'unavailable';
       ui.usage.append(node('h3', t('用量', 'Usage')));
-      if (loading || !usage) ui.usage.append(node('p', loading ? t('加载中…', 'Loading…') : t('暂时取不到', 'Unavailable right now')));
+      if (loading || !usage) {
+        ui.usage.append(node('p', loading ? t('加载中…', 'Loading…') : t('暂时取不到', 'Unavailable right now')));
+        return;
+      }
       const tiles = node('div', undefined, 'wp-my-key-tiles');
       for (const name of ['today', 'week']) {
         const item = usage?.[name], tile = mark(node('div', undefined, 'wp-my-key-tile'), 'usage', name);
         tile.dataset.state = item ? 'ready' : 'unavailable'; tile.append(node('strong', name === 'today' ? t('今天', 'Today') : t('本周', 'This week')));
         tile.append(mark(node('div', item ? money(item.cost) : t('暂时取不到', 'Unavailable right now')), 'cost'),
-          mark(node('div', item ? t(`${item.calls} 次`, `${item.calls} requests`) : ''), 'calls')); tiles.append(tile);
+          mark(node('div', item ? t(`${item.calls} 次`, `${item.calls} requests`) : '', 'wp-my-key-muted'), 'calls')); tiles.append(tile);
       }
       ui.usage.append(tiles);
       const window = mark(node('p', '', 'wp-my-key-muted'), 'window');
@@ -204,13 +220,14 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
         const zhWeekday = weekday.replace('星期', '周');
         window.textContent = t(`今天从北京时间 ${day} 起算；本周从${zhWeekday} ${week}（北京时间）起算，与限额窗口一致。`,
           `Today starts at ${day} Beijing time; the week starts on ${weekday} at ${week} Beijing time, the same windows the limits use.`);
+        ui.usage.append(window);
       }
       const limits = mark(node('div'), 'limits'), entries = Object.entries(usage?.limits || {}).filter(([, limit]) => limit);
       limits.dataset.state = entries.length ? 'limited' : 'none';
       if (!entries.length) limits.textContent = t('暂不限额', 'No limit for now');
       for (const [period, limit] of entries) {
         const row = mark(node('div'), 'limit', period), format = limit.unit === 'cost' ? money : String;
-        const reset = new Date(limit.reset).toLocaleString(locale(), { timeZone: 'Asia/Shanghai', hour12: false });
+        const reset = beijingReset(limit.reset);
         row.append(node('p', t(`${period === 'day' ? '每天' : '每周'}上限 ${format(limit.limit)} · 已用 ${format(limit.used)} · 剩余 ${format(limit.left)} · ${reset}（北京时间）恢复${limit.partial ? ' · 仅部分模型' : ''}`,
           `${period === 'day' ? 'Daily' : 'Weekly'} limit ${format(limit.limit)} · Used ${format(limit.used)} · Left ${format(limit.left)} · Resets ${reset} Beijing time${limit.partial ? ' · Selected models only' : ''}`)));
         const track = node('div', undefined, 'wp-my-key-track'); track.setAttribute('role', 'progressbar'); track.setAttribute('aria-label', period === 'day' ? t('今天', 'Today') : t('本周', 'This week'));
@@ -219,12 +236,12 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
       }
       const models = mark(node('p'), 'top-models'); models.hidden = !usage?.week?.models?.length;
       if (!models.hidden) models.textContent = t('本周常用：', 'Top models this week: ') + usage.week.models.map(m => `${m.name} ${Number((m.share * 100).toFixed(2))}%`).join(' · ');
-      ui.usage.append(window, mark(node('p', t('金额为估算，仅供参考，不是账单。', 'Amounts are estimates for reference, not a bill.'), 'wp-my-key-muted'), 'estimate'), limits, models);
+      ui.usage.append(mark(node('p', t('金额为估算，仅供参考，不是账单。', 'Amounts are estimates for reference, not a bill.'), 'wp-my-key-muted'), 'estimate'), limits, models);
     }
     const keyPlaceholder = () => t('<你的钥匙>', '<YOUR_KEY>');
     function renderGuide() {
       const base = data?.baseUrl || t('<入口地址>', '<GATEWAY_URL>'), key = keyPlaceholder(), defaults = data?.defaults || {};
-      for (const [name, b] of Object.entries(ui.tabs)) { b.setAttribute('aria-selected', String(tab === name)); b.textContent = name === 'claude' ? 'Claude Code' : name === 'codex' ? 'Codex' : t('其它工具', 'Other tools'); }
+      for (const [name, b] of Object.entries(ui.tabs)) { b.setAttribute('aria-selected', String(tab === name)); b.firstElementChild.textContent = name === 'claude' ? 'Claude Code' : name === 'codex' ? 'Codex' : t('其它工具', 'Other tools'); }
       if (tab === 'claude') {
         ui.caption.textContent = '~/.claude/settings.json';
         const env = { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: key };
@@ -240,6 +257,9 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
           + `\ncurl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '${payload.replaceAll("'", "'\\''")}'`;
       }
       ui.filter.placeholder = t('筛选模型', 'Filter models'); ui.filter.setAttribute('aria-label', ui.filter.placeholder); renderModels();
+      const count = data?.models?.length || 0;
+      ui.modelsTitle.textContent = t(`可用模型（${count}）`, `Available models (${count})`); ui.filter.hidden = !count;
+      ui.notesTitle.textContent = t('注意事项', 'Notes');
       ui.notes.replaceChildren(...[
         ['这把钥匙只限你本人工作使用，不要给别人用。', 'This key is for your own work only. Do not let anyone else use it.'],
         ['不要外传，不要发到群里或贴到网页上。', 'Do not share it, post it in chats or paste it into web pages.'],
@@ -251,7 +271,11 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
     }
     function renderModels() {
       const filter = ui.filter.value.toLowerCase();
-      ui.models.replaceChildren(...(data?.models || []).filter(m => m.id.toLowerCase().includes(filter)).map(m => mark(node('div', m.id), 'model')));
+      if (!data?.models?.length) { ui.models.textContent = t('模型清单暂时取不到', 'The model list is unavailable right now'); return; }
+      // Model IDs can also equal a tool name; protect their exact advertised spelling.
+      ui.models.replaceChildren(...data.models.filter(m => m.id.toLowerCase().includes(filter)).map(m => {
+        const row = mark(node('div'), 'model'); row.append(node('code', m.id)); return row;
+      }));
     }
     function render() {
       ui.heading.textContent = t('我的钥匙', 'My key'); ui.close.setAttribute('aria-label', t('关闭', 'Close'));
@@ -259,7 +283,7 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
     }
     async function show() {
       if (revoked) return;
-      closeMenus(); mount(); hide(); data = null; tab = 'claude'; loading = true; busy = false; ui.filter.value = ''; const current = ++version;
+      closeMenus(); mount(); data = null; loading = true; hide(); tab = 'claude'; busy = false; ui.filter.value = ''; const current = ++version;
       render(); if (!dialog.open) dialog.showModal();
       try { const result = await api(); if (current === version && dialog.open && !revoked) data = result; }
       catch { if (current === version && !revoked) failure(); }

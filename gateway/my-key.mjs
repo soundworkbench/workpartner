@@ -64,7 +64,7 @@ export function mapUsage(data, profileName, windows, limits) {
   if (!number(calls) || !number(cost)) return unavailable;
   const merged = new Map();
   for (const model of data.by.model) {
-    if (!object(model) || typeof model.id !== 'string' || !number(model.calls) || !number(model.cost)) return unavailable;
+    if (!object(model) || typeof model.id !== 'string' || !number(model.calls) || !number(model.cost)) continue;
     const name = model.id.split('/').at(-1).slice(0, 200);
     const value = (merged.get(name) || 0) + (data.cost > 0 ? model.cost : model.calls);
     if (!number(value)) return unavailable;
@@ -80,11 +80,11 @@ export function mapUsage(data, profileName, windows, limits) {
 }
 
 export function mapUpstream(profile, usage, windows) {
-  if (!object(profile) || typeof profile.name !== 'string' || !Array.isArray(profile.limits) || !Array.isArray(profile.models)
-    || profile.models.some(m => !object(m) || typeof m.id !== 'string' || typeof m.label !== 'string')) return { usage: null, models: [] };
+  if (!object(profile) || typeof profile.name !== 'string' || !Array.isArray(profile.limits) || !Array.isArray(profile.models)) return { usage: null, models: [] };
   const limits = mapLimits(profile.limits);
   return { usage: { ...mapUsage(usage, profile.name, windows, limits), limits },
-    models: profile.models.slice(0, 500).map(m => ({ id: m.id.slice(0, 200), label: m.label.slice(0, 200) })) };
+    models: profile.models.filter(m => object(m) && typeof m.id === 'string').slice(0, 500)
+      .map(m => ({ id: m.id.slice(0, 200), label: (typeof m.label === 'string' ? m.label : m.id).slice(0, 200) })) };
 }
 
 export function publicBaseUrl(value) {
