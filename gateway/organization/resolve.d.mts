@@ -21,7 +21,10 @@ export interface Organization {
       /** Same-named claims in system/user namespaces must expose the same shared filesystem. */
       sharedSkillsClaim?: string;
       memoryRequest?: string; cpuRequest?: string; userPriorityClass?: string;
-      userResources?: Record<string, { memory?: string | number; cpu?: string | number }>;
+      /** Main container only: memory/cpu override limits; memoryRequest/cpuRequest override requests.
+       * Nonempty strings or finite numbers are stringified; invalid or omitted keys use global values on the next create. */
+      userResources?: Record<string, { memory?: string | number; cpu?: string | number;
+        memoryRequest?: string | number; cpuRequest?: string | number }>;
       userImages?: Record<string, string>;
       gatewayResources?: { cpu?: string; memory?: string };
       imageConfigMap?: string; governingService?: string; requiredPolicies?: string[];

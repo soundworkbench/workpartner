@@ -197,8 +197,12 @@ export function createK8sRuntime(o = {}) {
       const oldwork = await c.get(`${core}/persistentvolumeclaims/${n.oldwork}`);
       const spec = podSpec(image, n, pvc, systemNamespace(c), oldwork);
       const overrides = o.userResources?.[slug] ?? {};
-      const limits = spec.containers[0].resources.limits;
-      for (const resource of ['memory', 'cpu']) limits[resource] = String(overrides[resource] ?? limits[resource]);
+      for (const resource of ['memory', 'cpu']) for (const kind of ['limits', 'requests']) {
+        const value = overrides[kind === 'limits' ? resource : `${resource}Request`];
+        if ((typeof value === 'string' && value.length) || Number.isFinite(value)) {
+          spec.containers[0].resources[kind][resource] = String(value);
+        }
+      }
       spec.containers[0].env = [
         { name: o.modelBaseEnvironment ?? 'MODEL_BASE_URL', value: String(o.modelBaseUrl) },
         { name: 'PARTNER_USER_NAME', value: user.name || '' },
