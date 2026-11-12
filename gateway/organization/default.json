@@ -173,7 +173,8 @@
   "myKey": {
     "allow": [],
     "publicBaseUrl": "",
-    "revealSeconds": 30
+    "revealSeconds": 30,
+    "reference": { "weekly": 0, "accounts": {} }
   },
   "feedback": {
     "allow": [],

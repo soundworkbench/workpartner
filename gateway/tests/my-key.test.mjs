@@ -178,10 +178,11 @@ test('upstream period and totals use UTC including hourly points on a single-day
   for (const clock of [NOW, Date.parse('2026-11-09T00:00:00Z')]) {
     const f = await fixture(t, { clock });
     if (clock !== NOW) f.state.usage.series = [{ time: '2026-11-09T00:00:00Z', calls: 2, cost: 0.3 }, { time: '2026-11-09T01:00:00Z', calls: 3, cost: 0.4 }];
+    f.organization.myKey.reference = { weekly: 40 }; f.save();
     const response = await f.request();
     assert.equal(f.hits[1].url, '/v1/magpie/usage/requests?period=' + usageWindows(clock).period + '&limit=1&offset=0');
-    assert.equal(response.data.usage.today.calls, clock === NOW ? 86 : 5); assert.equal(response.data.usage.today.cost, clock === NOW ? 3.2 : 0.7);
-    assert.equal(response.data.usage.week.calls, 512); assert.equal(response.data.usage.week.cost, 18.4);
+    assert.equal(response.data.usage.today.calls, clock === NOW ? 86 : 5); assert.equal(response.data.usage.today.percent, clock === NOW ? 40 : 9);
+    assert.equal(response.data.usage.week.calls, 512); assert.equal(response.data.usage.week.percent, 46);
   }
 });
 
@@ -190,10 +191,11 @@ test('limits map cost and tokens, prefer unrestricted windows and ignore unknown
   assert.deepEqual(mapLimits([]), { day: null, week: null });
   const p = profile();
   p.limits = [limit('day', { models: ['model-a'], costLimit: 5 }), limit('day'), limit('week', { costLimit: 0, tokenLimit: 1000, tokens: 900, tokensLeft: 100, spent: true, models: ['model-a'] }), limit('month')];
-  const mapped = mapUpstream(p, usage(), usageWindows(NOW)), limits = mapped.usage.limits;
+  const mapped = mapUpstream(p, usage(), usageWindows(NOW)), limits = mapLimits(p.limits);
   assert.deepEqual(limits.day, { unit: 'cost', limit: 15, used: 3.2, left: 11.8, start: '2026-11-10T00:00:00.000Z', reset: '2026-11-17T00:00:00.000Z', spent: false, partial: false });
   assert.deepEqual(limits.week, { unit: 'tokens', limit: 1000, used: 900, left: 100, start: limits.day.start, reset: limits.day.reset, spent: true, partial: true });
-  assert.equal(mapped.usage.today.start, limits.day.start); assert.equal(mapped.usage.week.reset, limits.week.reset);
+  assert.equal(mapped.usage.enforced, true);
+  assert.equal(mapped.usage.today.start, usageWindows(NOW).today.start); assert.equal(mapped.usage.week.reset, usageWindows(NOW).week.reset);
   assert.equal(mapLimits([limit('week', { models: ['model-a'] }), limit('week', { models: ['model-b'], costLimit: 25 })]).week.limit, 15);
   for (const extra of [{ cost: -1 }, { cost: Infinity }, { costLeft: NaN }, { costLimit: '15' }, { start: 'bad' }, { spent: 'false' }, { models: [2] }]) assert.equal(mapLimits([limit('day', extra)]).day, null);
 });
@@ -201,7 +203,7 @@ test('limits map cost and tokens, prefer unrestricted windows and ignore unknown
 test('model shares merge final names, select top three, round and fall back to calls', () => {
   const u = usage(); u.cost = 100; u.calls = 100;
   u.by.model = [ ['a/one', 30], ['b/one', 20], ['two', 25], ['three', 24.5], ['four', 0.5] ].map(([id, cost]) => ({ id, cost, calls: cost }));
-  const mapped = () => mapUsage(u, profile().name, usageWindows(NOW), mapLimits([]));
+  const mapped = () => mapUsage(u, profile().name, usageWindows(NOW));
   assert.deepEqual(mapped().week.models, [{ name: 'one', share: 0.5 }, { name: 'two', share: 0.25 }, { name: 'three', share: 0.245 }]);
   u.cost = 0; assert.equal(mapped().week.models[0].share, 0.5);
   u.by.model = [{ id: 'model', calls: 1, cost: 0 }]; u.calls = 3; assert.equal(mapped().week.models[0].share, 0.3333);
@@ -212,7 +214,7 @@ test('upstream transport and malformed replies degrade to 200 while reveal remai
   for (const mode of ['hang', 403, 500, 302, 'json', 'oversize', 'usage-fail']) {
     f.state.mode = mode; const start = Date.now(), response = await f.request();
     assert.equal(response.status, 200); assert.ok(response.data.key.masked); assert.ok(Date.now() - start < 1500);
-    if (mode === 'usage-fail') { assert.equal(response.data.usage.today, null); assert.equal(response.data.usage.week, null); assert.deepEqual(response.data.usage.limits, { day: null, week: null }); }
+    if (mode === 'usage-fail') { assert.equal(response.data.usage.today, null); assert.equal(response.data.usage.week, null); assert.equal(response.data.usage.enforced, false); }
     else { assert.equal(response.data.usage, null); assert.deepEqual(response.data.models, []); }
     assert.equal((await f.reveal()).data.key, keys[0]);
   }
@@ -235,8 +237,8 @@ test('usage ownership, time alignment and malformed numbers fail closed', async 
   for (const change of [p => { p.name = 3; }, p => { p.models = null; }, p => { p.limits = null; }]) {
     f.state.profile = profile(); change(f.state.profile); assert.equal((await f.request()).data.usage, null);
   }
-  const u = usage(); u.cost = Infinity; assert.equal(mapUsage(u, profile().name, usageWindows(NOW), mapLimits([])).week, null);
-  u.cost = 1; u.series[0].calls = NaN; assert.equal(mapUsage(u, profile().name, usageWindows(NOW), mapLimits([])).today, null);
+  const u = usage(); u.cost = Infinity; assert.equal(mapUsage(u, profile().name, usageWindows(NOW)).week, null);
+  u.cost = 1; u.series[0].calls = NaN; assert.equal(mapUsage(u, profile().name, usageWindows(NOW)).today, null);
 });
 
 test('browser replies exclude private rows and identities and cap advertised strings', async t => {
@@ -269,16 +271,15 @@ test('dialog installer is valid JavaScript with the required notice and no seria
   assert.ok(!script.includes('innerHTML'));
 });
 
-test('pure mapping rejects malformed upstream data and maps cost windows independently', () => {
+test('pure mapping rejects malformed upstream data and preserves computed windows', () => {
   const windows = usageWindows(NOW), p = profile(), u = usage();
   p.limits = [limit('day'), limit('week', { costLimit: 80, cost: 18.4, costLeft: 61.6 }), limit('month')];
   const mapped = mapUpstream(p, u, windows);
-  assert.equal(mapped.usage.limits.day.unit, 'cost'); assert.equal(mapped.usage.limits.week.limit, 80);
-  assert.equal(mapped.usage.limits.week.used, 18.4); assert.equal(mapped.usage.limits.week.left, 61.6);
-  assert.equal(mapped.usage.today.start, mapped.usage.limits.day.start); assert.equal(mapped.usage.week.reset, mapped.usage.limits.week.reset);
-  assert.equal(mapped.usage.today.calls, 86); assert.equal(mapped.usage.today.cost, 3.2);
+  assert.equal(mapped.usage.enforced, true);
+  assert.equal(mapped.usage.today.start, windows.today.start); assert.equal(mapped.usage.week.reset, windows.week.reset);
+  assert.equal(mapped.usage.today.calls, 86); assert.equal(mapped.usage.today.percent, null);
   assert.deepEqual(mapUpstream(null, u, windows), { usage: null, models: [] });
-  assert.deepEqual(mapUpstream(p, null, windows).usage, { today: null, week: null, limits: mapped.usage.limits });
+  assert.deepEqual(mapUpstream(p, null, windows).usage, { today: null, week: null, enforced: true });
   for (const value of [null, {}, { toString: 'invalid' }, 123, 'invalid', '2026-11-08T16:00:00Z']) {
     u.series[0].time = value; assert.equal(mapUpstream(p, u, windows).usage.today, null);
   }
@@ -309,19 +310,119 @@ test('pure mapping skips invalid advertised models and falls back to IDs for lab
 });
 
 test('model shares skip malformed entries without discarding valid totals or shares', () => {
-  const windows = usageWindows(NOW), limits = mapLimits([]), baseline = mapUsage(usage(), profile().name, windows, limits);
+  const windows = usageWindows(NOW), baseline = mapUsage(usage(), profile().name, windows);
   const valid = { id: 'ignored', calls: 1, cost: 1 };
   for (const invalid of [null, [], 'invalid', {}, { ...valid, id: 4 },
     ...['calls', 'cost'].flatMap(field => [undefined, null, '1', -1, NaN, Infinity, -Infinity].map(value => ({ ...valid, [field]: value })))]) {
     const u = usage(); u.by.model.splice(1, 0, invalid);
-    assert.deepEqual(mapUsage(u, profile().name, windows, limits), baseline);
+    assert.deepEqual(mapUsage(u, profile().name, windows), baseline);
     u.by.model = [invalid];
-    assert.deepEqual(mapUsage(u, profile().name, windows, limits), { ...baseline, week: { ...baseline.week, models: [] } });
+    assert.deepEqual(mapUsage(u, profile().name, windows), { ...baseline, week: { ...baseline.week, models: [] } });
   }
   const u = usage(); u.by.model[0].calls = -1;
-  assert.deepEqual(mapUsage(u, profile().name, windows, limits), { ...baseline, week: { ...baseline.week, models: baseline.week.models.slice(1) } });
+  assert.deepEqual(mapUsage(u, profile().name, windows), { ...baseline, week: { ...baseline.week, models: baseline.week.models.slice(1) } });
   for (const value of [undefined, null, {}, 'invalid']) {
     u.by.model = value;
-    assert.deepEqual(mapUsage(u, profile().name, windows, limits), { today: null, week: null });
+    assert.deepEqual(mapUsage(u, profile().name, windows), { today: null, week: null });
   }
+});
+
+
+test('percentages use weekly and working-day references with rounding and saturation', () => {
+  const windows = usageWindows(NOW);
+  for (const [reference, today, week] of [[40, 40, 46], [20, 80, 92], [10, 160, 184], [0.001, 999, 999], [Number.MIN_VALUE, 999, 999]]) {
+    const mapped = mapUsage(usage(), profile().name, windows, reference);
+    for (const [name, percent] of [['today', today], ['week', week]]) {
+      assert.equal(mapped[name].percent, percent); assert.equal(mapped[name].over, percent >= 100);
+    }
+  }
+  for (const [cost, percent] of [[0, 0], [0.00001, 1]]) {
+    const u = usage(); u.cost = cost; u.series.forEach(point => { point.cost = cost; });
+    const mapped = mapUsage(u, profile().name, windows, 40);
+    assert.equal(mapped.today.percent, percent); assert.equal(mapped.week.percent, percent);
+    assert.equal(mapped.today.over, false); assert.equal(mapped.week.over, false);
+  }
+  for (const reference of [undefined, null, 0, -1, '40', NaN, Infinity, {}, []]) {
+    const mapped = mapUsage(usage(), profile().name, windows, reference);
+    assert.deepEqual(mapped.today, { ...windows.today, calls: 86, percent: null, over: false });
+    assert.equal(mapped.week.percent, null); assert.equal(mapped.week.over, false); assert.equal(mapped.week.calls, 512);
+  }
+});
+
+test('reference settings are live, account overrides prefer slugs and invalid entries fall back', async t => {
+  const f = await fixture(t);
+  for (const [reference, expected] of [
+    [{ weekly: 40 }, 46], [{ weekly: 20 }, 92],
+    [{ weekly: 40, accounts: { member: 10, 'union-member': 20 } }, 184],
+    [{ weekly: 40, accounts: { 'union-member': 20 } }, 92],
+    [{ weekly: 40, accounts: { member: 0, 'union-member': 20 } }, 92],
+    [{ accounts: { member: 20 } }, 92],
+    ...[0, -1, '10', null, NaN, Infinity, {}, []].flatMap(value => ['member', 'union-member'].map(key => [{ weekly: 40, accounts: { [key]: value } }, 46])),
+    ...[null, [], 'invalid', 4].map(accounts => [{ weekly: 40, accounts }, 46]),
+    ...[undefined, null, {}, { weekly: 0 }, { weekly: -1 }, { weekly: '40' }, { weekly: NaN }].map(reference => [reference, null]),
+  ]) {
+    f.organization.myKey.reference = reference; f.save();
+    const first = (await f.request()).data.usage;
+    assert.equal(first.week.percent, expected); assert.equal(first.week.over, expected !== null && expected >= 100);
+    assert.equal(first.today.calls, 86); assert.equal(first.week.calls, 512);
+    if (expected === null) { assert.equal(first.today.percent, null); assert.equal(first.today.over, false); }
+    const second = (await f.request(API, { member: people[1].slug })).data.usage;
+    assert.equal(second.week.percent, reference?.weekly === 40 ? 46 : reference?.weekly === 20 ? 92 : null);
+  }
+});
+
+test('upstream limits only set enforcement and never replace computed windows', () => {
+  const windows = usageWindows(NOW);
+  for (const [limits, enforced] of [[[], false], [[limit('month')], false], [[limit('day', { cost: -1 })], false],
+    [[limit('day')], true], [[limit('week')], true]]) {
+    const mapped = mapUpstream({ ...profile(), limits }, usage(), windows, 40).usage;
+    assert.equal(mapped.enforced, enforced);
+    assert.deepEqual(Object.keys(mapped).sort(), ['enforced', 'today', 'week']);
+    for (const name of ['today', 'week']) {
+      assert.equal(mapped[name].start, windows[name].start); assert.equal(mapped[name].reset, windows[name].reset);
+    }
+  }
+});
+
+test('usage ownership rejects unowned totals and foreign breakdowns but accepts empty weeks', () => {
+  const windows = usageWindows(NOW), name = profile().name;
+  for (const [callerKeys, callerKey] of [
+    [[], [{ name: 'No gateway key' }]], [[], [{ name: 'Another fixture key' }]], [[], []],
+    [[{ name }], [{ name: 'Another fixture key' }]],
+  ]) {
+    const u = usage(); u.callerKeys = callerKeys; u.by.callerKey = callerKey;
+    assert.deepEqual(mapUsage(u, name, windows, 40), { today: null, week: null });
+  }
+  const u = usage(); u.callerKeys = []; u.by.callerKey = []; u.by.model = [];
+  u.calls = 0; u.cost = 0; u.series.forEach(point => { point.calls = 0; point.cost = 0; });
+  const mapped = mapUsage(u, name, windows, 40);
+  assert.deepEqual(mapped.today, { ...windows.today, calls: 0, percent: 0, over: false });
+  assert.deepEqual(mapped.week, { ...windows.week, calls: 0, percent: 0, over: false, models: [] });
+  const owned = usage(); owned.by.callerKey = [];
+  assert.equal(mapUsage(owned, name, windows, 40).week.calls, 512);
+});
+
+test('GET replies contain no amounts or reference settings with or without upstream limits', async t => {
+  const f = await fixture(t);
+  const forbidden = new Set(['cost', 'costLimit', 'costLeft', 'limit', 'limits', 'used', 'left', 'reference', 'weekly', 'accounts']);
+  const inspect = value => {
+    if (!value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) { assert.ok(!forbidden.has(key), key); inspect(child); }
+  };
+  for (const reference of [undefined, { weekly: 37.5 }]) {
+    for (const limits of [[], [limit('day'), limit('week')]]) {
+      f.organization.myKey.reference = reference; f.save(); f.state.profile.limits = limits;
+      const response = await f.request(); assert.equal(response.status, 200);
+      for (const value of ['$', '18.4', '3.2', '15.2', '37.5']) assert.ok(!response.body.includes(value), value);
+      inspect(response.data);
+      assert.deepEqual(Object.keys(response.data.usage).sort(), ['enforced', 'today', 'week']);
+      assert.deepEqual(Object.keys(response.data.usage.today).sort(), ['calls', 'over', 'percent', 'reset', 'start']);
+      assert.deepEqual(Object.keys(response.data.usage.week).sort(), ['calls', 'models', 'over', 'percent', 'reset', 'start']);
+    }
+  }
+});
+
+test('served script has no amount formatting or estimate copy', () => {
+  const script = myKeyClient();
+  for (const value of ["'$'", '估算', '金额', '暂不限额', 'estimate', 'data-wp-my-key-cost', 'data-wp-my-key-limits']) assert.ok(!script.includes(value), value);
 });

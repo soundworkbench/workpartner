@@ -142,9 +142,9 @@ test('bridge upgrade keys name template keys other than the managed agent keys',
 test('my key defaults are disabled and organization overrides preserve the section', t => {
   const defaults = resolveOrganization(fixture(t));
   assert.equal(defaults.features.myKey, false);
-  assert.deepEqual(defaults.myKey, { allow: [], publicBaseUrl: '', revealSeconds: 30 });
+  assert.deepEqual(defaults.myKey, { allow: [], publicBaseUrl: '', revealSeconds: 30, reference: { weekly: 0, accounts: {} } });
   const myKey = { allow: ['union-member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 15 };
   const org = resolveOrganization(fixture(t, { features: { myKey: true }, myKey }));
   assert.equal(org.features.myKey, true);
-  assert.deepEqual(org.myKey, myKey);
+  assert.deepEqual(org.myKey, { ...myKey, reference: { weekly: 0, accounts: {} } });
 });
