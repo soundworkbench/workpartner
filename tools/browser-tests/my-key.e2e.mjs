@@ -84,6 +84,8 @@ async function session(label, options, body) {
       await waitAvatar(page);
       return await body({ ...current, responses });
     } finally {
+      // Remove routes and drain handlers before the suite closes this page, including on failure.
+      await page.unrouteAll({ behavior: 'wait' });
       await responses();
       if (await page.locator(K).count()) {
         const content = await page.locator(K).evaluate(dialog => {
@@ -870,6 +872,7 @@ test('reset: confirmation, cancellation, one POST, replacement and masked succes
     assert.equal(await page.getAttribute(VALUE, 'data-state'), 'masked'); assert.notEqual(await text(page, VALUE), masked('member'));
     assert.equal(log.requests.filter(r => r === 'POST ' + API + '/reset').length, 1);
     assert.equal(gateway.broker.claimed.length, 1);
+    assert.deepEqual(gateway.restarts, ['workpartner-next-member']);
     assert.deepEqual(gateway.readAudit().filter(line => line.action === 'reset').map(line => line.result), ['requested', 'ok']);
     await suite.shot(page, 'reset-done-light-390x844');
     await page.click(action('toggle')); await page.waitForFunction(selector => document.querySelector(selector)?.dataset.state === 'shown', VALUE);
@@ -896,6 +899,7 @@ test('reset: broker rejection and offline rejection preserve the existing key', 
         assert.equal(await text(page, RESET_NOTE), '暂时无法重置，请稍后再试。');
       }
       await page.click(action('toggle')); await keyState(page, 'shown'); await page.click(action('toggle'));
+      assert.deepEqual(gateway.restarts, []);
     });
   }
 });
@@ -906,9 +910,10 @@ test('reset: blocked notes, daily limit, unavailable and feature off have the ex
       blockedNote: state === 'custom' ? '此测试钥匙暂不支持自助更换，请联系管理员处理。' : '' };
     await resetSession('reset-policy-' + state, { reset, mode: state === 'offline' ? 'offline' : 'ok', viewport: NARROW }, async ({ page, gateway }) => {
       if (state === 'limit') await page.route('**/_wp/api/my-key', async route => {
-        const response = await route.fetch(), body = await response.json();
+        // route.fetch() resolves the fixture host outside the browser and cannot reach it; ask the gateway directly.
+        const body = (await gateway.request('GET', API, { who: 'member' })).json;
         body.reset = { status: 'idle', allowed: false, reason: 'limit', note: '', left: 0, limit: 3 };
-        await route.fulfill({ response, json: body });
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
       });
       await openMyKey(page);
       if (state === 'off') assert.equal(await page.locator(action('reset')).count(), 0);
@@ -929,6 +934,7 @@ test('reset: blocked notes, daily limit, unavailable and feature off have the ex
       if (state === 'limit') assert.equal(await text(page, RESET_NOTE), 'No resets left today (3 per day). Try again tomorrow.');
       if (state === 'offline') assert.equal(await text(page, RESET_NOTE), 'Resetting is unavailable right now. Please try again later.');
       assert.equal(gateway.broker.claimed.length, 0);
+      assert.deepEqual(gateway.restarts, []);
     });
   }
 });
@@ -990,19 +996,21 @@ test('reset: POST conflicts, quota and policy changes update the dialog without 
         assert.ok(await page.locator(action('reset')).isDisabled());
       }
       assert.equal(log.requests.filter(value => value === 'POST ' + API + '/reset').length, 1);
+      assert.deepEqual(gateway.restarts, reason === 'busy' ? ['workpartner-next-member'] : []);
     });
   }
 });
 
 test('reset: lost requests report failure and session revocation removes admission', LONG, async () => {
   for (const status of ['network', 401, 404]) {
-    await resetSession('reset-revoked-' + status, {}, async ({ page }) => {
+    await resetSession('reset-revoked-' + status, {}, async ({ page, gateway }) => {
       await openMyKey(page);
       await page.route('**/_wp/api/my-key/reset', route => status === 'network' ? route.abort('failed')
         : route.fulfill({ status, contentType: 'application/json', body: status === 404 ? '' : '{"error":"My key request failed"}' }));
       await page.click(action('reset')); await page.click(action('reset-confirm'));
       if (status === 'network') { await page.waitForSelector(RESET_FAILED); await keyState(page, 'masked'); }
       else { await page.waitForSelector(K, { state: 'hidden' }); await menu(page, false); assert.equal(await page.locator(ENTRY).count(), 0); }
+      assert.deepEqual(gateway.restarts, []);
     });
   }
 });

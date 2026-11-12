@@ -240,6 +240,7 @@ export async function createHarness(group) {
 
     // Fixture container API: every workspace container exists, runs the expected image and is reachable on loopback.
     const networks = Object.fromEntries(USERS.map(u => [`workpartner-next-${u.slug}-net`, { IPAddress: '127.0.0.1' }]));
+    const restarts = [];
     const docker = http.createServer(async (req, res) => {
       for await (const _ of req);
       res.setHeader('content-type', 'application/json');
@@ -250,6 +251,7 @@ export async function createHarness(group) {
         header[0] = 1; header.writeUInt32BE(bytes.length, 4);
         return res.end(Buffer.concat([header, bytes]));
       }
+      if (req.method === 'POST' && /^\/containers\/[^/]+\/restart(?:\?|$)/.test(req.url)) { restarts.push(req.url.split('/')[2]); res.writeHead(204); return res.end(); }
       if (req.url.startsWith('/containers/')) return res.end(JSON.stringify({ Config: { Image: 'fixture-image', Env: [
         'WORKPARTNER_MODEL_CONFIG=' + JSON.stringify(nextModelConfig(org)), 'WORKPARTNER_SHARED_SKILLS=' + org.market.containerDirectory,
         'WORKPARTNER_MARKET_PREINSTALLED=' + JSON.stringify(org.market.preinstalled)] },
@@ -301,9 +303,11 @@ globalThis.fetch = async url => { throw new Error('fixture: external fetch block
     });
 
     let stopped = false;
+    // Reset fixtures represent an existing My key audit directory; reads do not create it.
+    if (resetBroker) fs.mkdirSync(path.join(org.runtime.stateDirectory, 'my-key'), { recursive: true, mode: 0o700 });
     const broker = resetBroker ? standInResetBroker(org, organizationFile, runModel, resetBroker) : null;
     const gateway = {
-      name, port, preview, feedback, botToken, broker, model: runModel,
+      name, port, preview, feedback, botToken, broker, restarts, model: runModel,
       setMyKey(settings) {
         const data = JSON.parse(fs.readFileSync(organizationFile, 'utf8'));
         data.myKey = { ...data.myKey, ...settings, reset: { ...data.myKey.reset, ...settings.reset } };

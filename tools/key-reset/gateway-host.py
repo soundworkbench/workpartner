@@ -81,7 +81,7 @@ def policy(args, slug):
         config = organization["myKey"]
         allow = config.get("allow", [])
         reset = config.get("reset", {})
-        blocked = reset.get("blocked", [])
+        blocked = reset.get("blocked")
         if not isinstance(users, list) or not all(isinstance(u, dict) for u in users):
             return False
         if not all(isinstance(v, list) and all(isinstance(s, str) for s in v) for v in (allow, blocked)):

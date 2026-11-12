@@ -15,7 +15,7 @@ async function until(check) {
   for (let i = 0; i < 150; i++) { if (await check()) return; await sleep(5); }
   assert.fail('Condition did not become true');
 }
-function fixture(t, extra = {}) {
+function fixture(t, { empty = false, ...extra } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'my-key-reset-'));
   const calls = [], logs = [], handlers = [], replies = [];
   let clock = NOW, stored = OLD, advisory = true;
@@ -29,6 +29,9 @@ function fixture(t, extra = {}) {
   const policyFile = path.join(directory, 'organization.json');
   const save = () => fs.writeFileSync(policyFile, JSON.stringify(organization)); save();
   const root = path.join(organization.runtime.stateDirectory, 'my-key/reset');
+  // Existing tests use pre-existing reset state; construction must not prepare it.
+  if (!empty) for (const name of ['tmp', 'active', 'requests', 'claimed', 'results', 'last', 'days', 'progress', 'locks'])
+    fs.mkdirSync(path.join(root, name), { recursive: true, mode: 0o700 });
   const route = (name, id) => path.join(root, name, id + '.json');
   const put = (name, id, value) => {
     fs.mkdirSync(path.join(root, name), { recursive: true, mode: 0o700 });
@@ -94,6 +97,33 @@ function fixture(t, extra = {}) {
   return { organization, save, policyFile, root, route, put, keyFile, runtime, handler, make, heartbeat, request, post, active, claim, result, audit, settled,
     calls, logs, replies, setClock(value) { clock = value; }, advisory(value) { advisory = value; }, store() { return stored; } };
 }
+
+test('construction, recovery, reads and unavailable resets never create the my-key tree', async t => {
+  const f = fixture(t, { empty: true, timing: { cleanupIntervalMs: 2 } });
+  const untouched = () => assert.equal(fs.existsSync(path.dirname(f.root)), false);
+  untouched();
+  for (const suffix of ['', '/reset']) {
+    const response = await f.request({ suffix });
+    assert.equal(response.status, 200);
+    const state = suffix ? response.data : response.data.reset;
+    assert.equal(state.status, 'idle'); assert.equal(state.allowed, false); assert.equal(state.reason, 'unavailable');
+    untouched();
+  }
+  assert.ok(f.handler.clientFor(person)); untouched();
+  assert.equal((await f.post()).status, 503); untouched();
+  // Exercise periodic recovery as well as construction.
+  await sleep(20); untouched(); assert.deepEqual(f.logs, []);
+  // An existing audit directory or partial broker tree must not be filled in by recovery either.
+  for (const directory of [path.dirname(f.root), path.join(f.root, 'results')]) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const before = fs.readdirSync(path.dirname(f.root), { recursive: true });
+    const handler = f.make();
+    assert.equal((await f.request({ handler })).data.reason, 'unavailable');
+    await sleep(20);
+    assert.deepEqual(fs.readdirSync(path.dirname(f.root), { recursive: true }), before);
+    assert.deepEqual(f.logs, []);
+  }
+});
 
 test('reset gates validate session, live admission, methods, origin and JSON before accepting', async t => {
   const f = fixture(t);

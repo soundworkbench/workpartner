@@ -13,6 +13,10 @@ const read = file => {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 };
 const unlink = file => { try { fs.unlinkSync(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
+const entries = directory => {
+  try { return fs.readdirSync(directory); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+};
 
 export function createMyKeyReset({ organization, policy, runtime, restarted, keyFile, now, verify, timers = {}, timing = {} }) {
   const root = path.join(organization.runtime.stateDirectory, 'my-key'), reset = path.join(root, 'reset');
@@ -135,11 +139,11 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
   }
   function cleanup() {
     const referenced = new Set();
-    for (const name of fs.readdirSync(path.join(reset, 'active'))) {
+    for (const name of entries(path.join(reset, 'active'))) {
       try { const value = read(path.join(reset, 'active', name)); if (validId(value?.id)) referenced.add(value.id); }
       catch { /* The recovery driver handles invalid active files. */ }
     }
-    for (const name of ['results', 'tmp']) for (const entry of fs.readdirSync(path.join(reset, name))) {
+    for (const name of ['results', 'tmp']) for (const entry of entries(path.join(reset, name))) {
       const target = path.join(reset, name, entry);
       if (referenced.has(entry.replace(/\.json$/, ''))) continue;
       try {
@@ -190,7 +194,7 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
   }
   function done(slug, id) {
     if (read(file('last', slug))?.id === id && read(file('last', slug))?.status === 'done') return true;
-    return fs.readdirSync(path.join(reset, 'days')).filter(name => name.startsWith(slug + '-') && /^\d{4}-\d{2}-\d{2}\.json$/.test(name.slice(slug.length + 1)))
+    return entries(path.join(reset, 'days')).filter(name => name.startsWith(slug + '-') && /^\d{4}-\d{2}-\d{2}\.json$/.test(name.slice(slug.length + 1)))
       .some(name => read(path.join(reset, 'days', name))?.completed?.includes(id));
   }
   function removeActive(slug, id) {
@@ -319,16 +323,16 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
   }
   if (runtime) {
     try {
-      init(); cleanup();
-      for (const name of fs.readdirSync(path.join(reset, 'active'))) if (name.endsWith('.json')) drive(name.slice(0, -5));
+      cleanup();
+      for (const name of entries(path.join(reset, 'active'))) if (name.endsWith('.json')) drive(name.slice(0, -5));
     } catch { console.error('[my-key] UNAVAILABLE'); }
     void (async () => {
       while (!closed) {
         await pause(options.cleanupIntervalMs);
         if (closed) return;
         try {
-          init(); cleanup();
-          for (const name of fs.readdirSync(path.join(reset, 'active'))) if (name.endsWith('.json')) drive(name.slice(0, -5));
+          cleanup();
+          for (const name of entries(path.join(reset, 'active'))) if (name.endsWith('.json')) drive(name.slice(0, -5));
         } catch { console.error('[my-key] UNAVAILABLE'); }
       }
     })();

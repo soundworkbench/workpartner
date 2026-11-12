@@ -2,6 +2,8 @@
 
 The gateway accepts a signed-in person's **Reset key** request and later installs the result. It has no credential that can change a key in the upstream store. The broker runs on a separate operator machine, checks the request independently, stages a new value on the gateway host, and runs the existing upstream rotation command on the key-store host. The two services exchange files; neither exposes a reset network API.
 
+Gateway construction, recovery scans, GET requests and client-script delivery do not create reset directories. The gateway creates directories when accepting a reset POST or writing an existing My key audit entry. The broker still waits for `S/my-key` to exist before publishing its heartbeat; a fresh installation without that directory reports reset unavailable until an audited key action has created it.
+
 Run the broker with Node 22 or Node 24. Both remote hosts need Python 3.11 or later. There are no package dependencies. Keep `tools/key-reset-broker.mjs` and its adjacent `tools/key-reset/` directory together. Each helper's source travels over standard input on every call; there is nothing to install on either remote host.
 
 ## Configuration and operation
@@ -83,7 +85,7 @@ Both services read `myKey` on every decision. To disable new resets without rest
 }
 ```
 
-`allow` and `blocked` match `*`, a slug, or the person's union ID. Matching the current gateway's `admitted()` also requires a catalog person with both a slug and a nonempty union ID, even for `*`. A missing or malformed policy or users file denies everyone. `enabled` must be the JSON boolean `true`; the string `"true"` does not enable resets. A missing `blocked` list means no exclusions; a malformed list denies everyone. The broker never returns union IDs to the calling process.
+`allow` and `blocked` match `*`, a slug, or the person's union ID. Matching the current gateway's `admitted()` also requires a catalog person with both a slug and a nonempty union ID, even for `*`. A missing or malformed policy or users file denies everyone. `enabled` must be the JSON boolean `true`; the string `"true"` does not enable resets. A missing or malformed `blocked` list denies everyone on both sides; use `[]` for no exclusions. The broker never returns union IDs to the calling process.
 
 The gateway owns the exact UI copy. These are the result meanings it must communicate:
 
