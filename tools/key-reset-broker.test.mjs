@@ -180,6 +180,7 @@ test('policy denies invalid settings and uses the same admission requirement as 
     f => { f.organization.myKey.reset.blocked = ['made-up-union-a']; },
     f => { f.organization.myKey.reset.blocked = ['*']; },
     f => { f.organization.myKey.reset.blocked = '*'; },
+    f => { delete f.organization.myKey.reset.blocked; },
     f => { write(f.usersFile, [{ slug: 'alpha' }]); },
     f => { fs.unlinkSync(f.usersFile); },
     f => { write(f.usersFile, {}); },
@@ -193,7 +194,10 @@ test('policy denies invalid settings and uses the same admission requirement as 
   for (const malformed of [true, false]) {
     const f = fixture(t), row = await f.request();
     if (malformed) fs.writeFileSync(f.organizationFile, '{'); else fs.unlinkSync(f.organizationFile);
-    const service = f.broker(); await service.cycle(); service.close();
+    const service = f.broker(); await service.cycle();
+    assert.equal(fs.existsSync(path.join(f.R, 'results', row.id + '.json')), false);
+    assert.deepEqual(read(f.store), f.original);
+    write(f.organizationFile, f.organization); await service.cycle(); service.close();
     assert.equal(f.result(row).code, 'denied'); assert.deepEqual(read(f.store), f.original);
   }
 });
@@ -328,7 +332,9 @@ test('two people rotate sequentially and another process refuses the same local 
   service.close();
   const other = spawn('python3', ['-I', '-c', 'import sys;sys.stdin.read()'], { stdio: ['pipe', 'ignore', 'ignore'] });
   t.after(() => other.kill());
-  write(path.join(f.local, 'broker.pid'), other.pid);
+  const lock = path.join(f.local, 'broker.lock'); fs.mkdirSync(lock, { mode: 0o700 });
+  const started = fs.readFileSync(`/proc/${other.pid}/stat`, 'utf8').split(') ').at(-1).split(' ')[19];
+  fs.writeFileSync(path.join(lock, `${other.pid}-${started}-${identifier(99)}`), '', { mode: 0o600 });
   assert.throws(() => f.broker().start(), /broker-running/);
   other.stdin.end();
   await new Promise(resolve => other.on('close', resolve));
@@ -384,6 +390,10 @@ test('restart after staging but before rotation returns interrupted and removes 
   service = f.broker(); await service.cycle();
   assert.equal(f.result(row).code, 'interrupted'); assert.equal(fs.existsSync(f.next(row)), false);
   assert.deepEqual(read(f.store), f.original);
+  assert.equal(fs.existsSync(path.join(f.local, 'seen', row.id)), true);
+  fs.unlinkSync(path.join(f.R, 'results', row.id + '.json'));
+  await f.request(); await service.cycle();
+  assert.equal(f.result(row).code, 'replay'); assert.deepEqual(read(f.store), f.original);
 });
 
 test('restart after rotation finishes forward and counts once even after a lost finish response', async t => {
@@ -398,7 +408,9 @@ test('restart after rotation finishes forward and counts once even after a lost 
     } });
     await service.cycle(); service.close();
     const inflight = read(path.join(f.local, 'inflight', row.id + '.json'));
-    assert.deepEqual(Object.keys(inflight).sort(), ['at', 'current', 'id', 'next', 'slug']);
+    assert.deepEqual(Object.keys(inflight).sort(), ['at', 'current', 'decision', 'id', 'next', 'rotationStarted', 'slug']);
+    assert.equal(inflight.decision.ok, true); assert.equal(inflight.decision.code, 'ok');
+    assert.ok(Number.isFinite(Date.parse(inflight.rotationStarted)));
     assert.equal(inflight.current, hash(f.original[0].secret));
     assert.equal(inflight.next, hash(fs.readFileSync(f.next(row), 'utf8').trim()));
     if (delivered) f.install(row);
@@ -428,7 +440,7 @@ test('success and failure delivery retry twice without changing the decision', a
   }
 });
 
-test('unresolved attempts stay open, throttle stuck audit lines and recover without another rotation', async t => {
+test('unresolved attempts stay open, audit only state changes and recover without another rotation', async t => {
   const f = fixture(t), row = await f.request(); fs.writeFileSync(f.modeFile, 'unknown');
   let time = Date.now(), rotates = 0;
   const service = f.broker({ now: () => time, run: async request => {
@@ -442,7 +454,8 @@ test('unresolved attempts stay open, throttle stuck audit lines and recover with
   assert.equal(audit[0].step, 'rotate');
   time += 600000; await service.cycle();
   audit = fs.readFileSync(path.join(f.local, 'audit.log'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(audit.filter(line => line.result === 'stuck').length, 2);
+  assert.equal(audit.filter(line => line.result === 'stuck').length, 1);
+  assert.equal(audit[0].code, 'rotate-unknown');
   const rows = read(f.store); rows[0].secret = fs.readFileSync(f.next(row), 'utf8').trim(); write(f.store, rows);
   await service.cycle(); assert.equal(f.result(row).ok, true); assert.equal(rotates, 1);
 });
@@ -458,8 +471,8 @@ test('recovery with inflight hashes can fail safely, wait for the store, or fini
     if (state === 'neither' || state === 'unrecorded-success') {
       const rows = read(f.store); rows[0].secret = state === 'neither' ? 'fixture-third-key' : value; write(f.store, rows);
     }
-    let blocked = state === 'unreachable';
-    const service = f.broker({ run: request => {
+    let blocked = state === 'unreachable', time = Date.now();
+    const service = f.broker({ now: () => time, run: request => {
       if (blocked && request.op === 'which') throw new Error('fixture unavailable');
       return runHelper(request);
     } });
@@ -469,7 +482,13 @@ test('recovery with inflight hashes can fail safely, wait for the store, or fini
       assert.equal(JSON.parse(fs.readFileSync(path.join(f.local, 'audit.log'), 'utf8').trim()).step, 'resume');
       blocked = false; write(f.store, f.original); await service.cycle();
     }
-    assert.equal(f.result(row).code, state === 'unrecorded-success' ? 'ok' : 'interrupted');
+    if (state !== 'unrecorded-success') {
+      assert.equal(fs.existsSync(path.join(f.R, 'results', row.id + '.json')), false);
+      assert.equal(fs.existsSync(f.next(row)), true);
+      time += 600000;
+      for (let check = 0; check < 3; check++) await service.cycle();
+    }
+    assert.equal(f.result(row).code, state === 'unrecorded-success' ? 'ok' : 'rotate-failed');
     assert.equal(fs.existsSync(f.next(row)), state === 'unrecorded-success');
   }
 });
@@ -503,13 +522,17 @@ test('direct store calls reject collisions and reserved values, and recognize an
     next: f.original[0].secret, rotate: f.config.keyStore.rotate }), { ok: true, already: true });
 });
 
-test('claim and finish are idempotent, protect positive results and survive policy-file loss after staging', async t => {
+test('claim and finish are idempotent and wait for the exact prefix after policy-file loss', async t => {
   const f = fixture(t), row = await f.request();
   f.organization.model.keyPrefix = 'custom-'; write(f.organizationFile, f.organization);
   fs.renameSync(path.join(f.K, 'model-alpha.key'), path.join(f.K, 'custom-alpha.key'));
   await f.helper('gateway-host', 'claim', { ...row, stage: true, next: 'fixture-staged-new-key' });
   fs.unlinkSync(f.organizationFile);
   const next = path.join(f.K, `custom-alpha.key.${row.id}.next`);
+  assert.equal((await f.helper('gateway-host', 'inspect', row)).next, null);
+  assert.deepEqual(await f.helper('gateway-host', 'finish', { ...row, ok: false, code: 'interrupted' }), { error: 'gateway-failed' });
+  assert.equal(fs.existsSync(next), true);
+  write(f.organizationFile, f.organization);
   assert.equal((await f.helper('gateway-host', 'inspect', row)).next, hash('fixture-staged-new-key'));
   assert.deepEqual(await f.helper('gateway-host', 'claim', { ...row, stage: false }), { claimed: false });
   assert.deepEqual(await f.helper('gateway-host', 'finish', { ...row, ok: false, code: 'interrupted' }), { done: true });
@@ -564,5 +587,169 @@ test('stopping during a rotation finishes that attempt and leaves the next perso
   await service.cycle(); service.close();
   assert.equal(f.result(first).ok, true);
   assert.ok(fs.existsSync(path.join(f.R, 'requests', second.id + '.json')));
-  assert.equal(fs.existsSync(path.join(f.local, 'broker.pid')), false);
+  assert.equal(fs.existsSync(path.join(f.local, 'broker.lock')), false);
+});
+
+test('uncertain rotations wait through the quiet period, resume after restart and finish forward when they land', async t => {
+  for (const lands of [true, false]) {
+    const f = fixture(t), row = await f.request();
+    let time = Date.now(), rotations = 0;
+    const run = request => {
+      if (request.op === 'rotate') { rotations++; throw new Error('fixture timeout'); }
+      return runHelper(request);
+    };
+    let service = f.broker({ now: () => time, run });
+    await service.cycle();
+    const waiting = () => {
+      assert.equal(fs.existsSync(path.join(f.R, 'results', row.id + '.json')), false);
+      assert.equal(fs.existsSync(f.next(row)), true);
+      assert.equal(fs.existsSync(path.join(f.R, 'claimed', row.id + '.json')), true);
+    };
+    waiting();
+    const second = await f.request(2);
+    await service.cycle(); waiting();
+    assert.equal(fs.existsSync(path.join(f.R, 'requests', second.id + '.json')), true);
+    fs.unlinkSync(path.join(f.R, 'requests', second.id + '.json'));
+    time += 599999; await service.cycle(); waiting();
+    service.close(); service = f.broker({ now: () => time, run });
+    await service.cycle(); waiting();
+    if (lands) {
+      const rows = read(f.store); rows[0].secret = fs.readFileSync(f.next(row), 'utf8').trim(); write(f.store, rows);
+      await service.cycle(); assert.equal(f.result(row).ok, true);
+    } else {
+      time++; await service.cycle(); waiting();
+      service.close(); service = f.broker({ now: () => time, run });
+      await service.cycle(); waiting();
+      await service.cycle(); assert.equal(f.result(row).code, 'rotate-failed');
+      assert.equal(fs.existsSync(f.next(row)), false);
+    }
+    assert.equal(rotations, 1);
+    const audit = fs.readFileSync(path.join(f.local, 'audit.log'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(audit.filter(line => line.code === 'rotate-unknown').length, 1);
+  }
+});
+
+test('store helper returns unknown on timeout, OS error or zero exit without a change, and rejects option identifiers', async t => {
+  const f = fixture(t), current = hash(f.original[0].secret);
+  for (const behavior of ['timeout', 'os-error', 'zero']) {
+    const patch = `import subprocess\ndef fixture_run(*args, **kwargs):\n    ${behavior === 'timeout' ? 'raise subprocess.TimeoutExpired("fixture", 60)' : behavior === 'os-error' ? 'raise OSError("fixture")' : 'return subprocess.CompletedProcess([], 0)'}\nsubprocess.run = fixture_run\n`;
+    assert.deepEqual(await runHelper({ command: ['sh', '-c'], source: patch + sources['key-store'], op: 'rotate',
+      args: { file: f.store, current, next: 'fixture-next-key', rotate: f.config.keyStore.rotate } }), { ok: false, code: 'unknown' });
+  }
+  write(f.store, [{ ...f.original[0], id: '--fixture-option' }]);
+  assert.deepEqual(await f.helper('key-store', 'rotate', { current, next: 'fixture-next-key', rotate: f.config.keyStore.rotate }),
+    { ok: false, code: 'rotate-failed' });
+  assert.equal(fs.existsSync(f.argvFile), false);
+});
+
+test('malformed inflight records are audited once and do not block other requests', async t => {
+  const f = fixture(t), service = f.broker(); service.start();
+  const bad = identifier(9);
+  const claimed = await f.request(9);
+  await f.helper('gateway-host', 'claim', { ...claimed, stage: false });
+  fs.writeFileSync(path.join(f.local, 'inflight', bad + '.json'), '{"secret":"fixture-sensitive"');
+  const row = await f.request(1, 'beta'); await service.cycle(); await service.cycle();
+  assert.equal(f.result(row).ok, true);
+  const audit = fs.readFileSync(path.join(f.local, 'audit.log'), 'utf8');
+  assert.equal(audit.includes('fixture-sensitive'), false);
+  const entries = audit.trim().split('\n').map(JSON.parse).filter(line => line.id === bad);
+  assert.equal(entries.length, 1); assert.equal(entries[0].result, 'stuck');
+});
+
+test('a claim transport failure before rename leaves no replay marker and can retry', async t => {
+  const f = fixture(t), row = await f.request(); let fail = true;
+  const service = f.broker({ run: request => {
+    if (request.op === 'claim' && fail) { fail = false; throw new Error('fixture transport'); }
+    return runHelper(request);
+  } });
+  await service.cycle();
+  assert.equal(fs.existsSync(path.join(f.local, 'seen', row.id)), false);
+  assert.equal(fs.existsSync(path.join(f.R, 'requests', row.id + '.json')), true);
+  await service.cycle(); assert.equal(f.result(row).ok, true);
+  assert.equal(fs.existsSync(path.join(f.local, 'seen', row.id)), true);
+});
+
+test('successful delivery precedes local counting and a failed count keeps the slug busy until retried', async t => {
+  const f = fixture(t), row = await f.request(); let denyCount = true, delivered = false;
+  const originalRename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (source, destination) => {
+    if (destination.startsWith(path.join(f.local, 'days') + path.sep) && delivered && denyCount)
+      throw Object.assign(new Error('fixture full'), { code: 'ENOSPC' });
+    return originalRename(source, destination);
+  });
+  const service = f.broker({ run: async request => {
+    if (request.op === 'finish' && request.args.ok) {
+      const days = read(path.join(f.local, 'days', new Date().toISOString().slice(0, 10) + '.json'));
+      if (!delivered) assert.deepEqual(days.alpha.done, []);
+      delivered = true;
+    }
+    return runHelper(request);
+  } });
+  await service.cycle(); assert.equal(f.result(row).ok, true); f.install(row);
+  const second = await f.request(2); await service.cycle();
+  assert.equal(fs.existsSync(path.join(f.R, 'requests', second.id + '.json')), true);
+  assert.equal(fs.existsSync(path.join(f.local, 'inflight', row.id + '.json')), true);
+  // A restart also preserves the obligation to count, even though delivery removed the claim.
+  service.close(); const replacement = f.broker();
+  await replacement.cycle();
+  assert.equal(fs.existsSync(path.join(f.R, 'requests', second.id + '.json')), true);
+  denyCount = false; await replacement.cycle();
+  assert.equal(f.result(second).ok, true);
+  const days = read(path.join(f.local, 'days', new Date().toISOString().slice(0, 10) + '.json'));
+  assert.deepEqual(days.alpha.done, [row.id, second.id]);
+});
+
+test('staged lookup uses the exact configured prefix and slug even when one slug ends with another', async t => {
+  const f = fixture(t), row = await f.request(1, 'bob');
+  const other = path.join(f.K, `model-a-bob.key.${row.id}.next`);
+  fs.writeFileSync(other, 'fixture-other-key');
+  assert.equal((await f.helper('gateway-host', 'inspect', row)).next, null);
+  await f.helper('gateway-host', 'claim', { ...row, stage: false });
+  await f.helper('gateway-host', 'finish', { ...row, ok: false, code: 'no-key' });
+  assert.equal(fs.readFileSync(other, 'utf8'), 'fixture-other-key');
+});
+
+test('broker lock reclaims a reused PID with a different start time and a stale self PID', async t => {
+  const f = fixture(t), service = f.broker(); service.start(); service.close();
+  const other = spawn('python3', ['-I', '-c', 'import sys;sys.stdin.read()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  t.after(() => other.kill());
+  const started = fs.readFileSync(`/proc/${other.pid}/stat`, 'utf8').split(') ').at(-1).split(' ')[19];
+  for (const [pid, start] of [[other.pid, BigInt(started) + 1n], [process.pid, fs.readFileSync('/proc/self/stat', 'utf8').split(') ').at(-1).split(' ')[19]]]) {
+    const lock = path.join(f.local, 'broker.lock'); fs.mkdirSync(lock, { mode: 0o700 });
+    fs.writeFileSync(path.join(lock, `${pid}-${start}-${identifier(99)}`), '', { mode: 0o600 });
+    const replacement = f.broker(); replacement.start();
+    assert.equal(fs.readdirSync(lock).length, 1);
+    assert.ok(fs.readdirSync(lock)[0].startsWith(process.pid + '-'));
+    assert.throws(() => f.broker().start(), /broker-running/);
+    replacement.close(); assert.equal(fs.existsSync(lock), false);
+  }
+  const exited = new Promise(resolve => other.on('close', resolve)); other.stdin.end(); await exited;
+});
+
+test('broker prunes day files older than seven days while retaining recent counters', async t => {
+  const f = fixture(t), time = Date.parse('2030-01-10T12:00:00Z');
+  const service = f.broker({ now: () => time }); service.start();
+  for (const date of ['2030-01-02', '2030-01-03', '2030-01-04', '2030-01-10'])
+    write(path.join(f.local, 'days', date + '.json'), { alpha: { started: 1, done: [identifier(1)] } });
+  await service.cycle();
+  assert.deepEqual(fs.readdirSync(path.join(f.local, 'days')).sort(), ['2030-01-03.json', '2030-01-04.json', '2030-01-10.json']);
+});
+
+test('recovered success without local inflight state retains a failed count across restart', async t => {
+  const f = fixture(t), row = await f.request(), value = 'fixture-next-key';
+  await f.helper('gateway-host', 'claim', { ...row, stage: true, next: value });
+  write(f.store, [{ ...f.original[0], secret: value }, f.original[1]]);
+  let fail = true;
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (source, target) => {
+    if (fail && target.startsWith(path.join(f.local, 'days') + path.sep)) throw new Error('fixture count failed');
+    return rename(source, target);
+  });
+  let service = f.broker(); await service.cycle();
+  assert.equal(f.result(row).ok, true);
+  assert.equal(fs.existsSync(path.join(f.local, 'inflight', row.id + '.json')), true);
+  f.install(row); service.close(); fail = false;
+  service = f.broker(); await service.cycle();
+  const date = new Date().toISOString().slice(0, 10);
+  assert.deepEqual(read(path.join(f.local, 'days', date + '.json')).alpha.done, [row.id]);
 });

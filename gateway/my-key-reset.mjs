@@ -12,6 +12,11 @@ const read = file => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 };
+const readKey = file => {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try { return fs.readFileSync(fd, 'utf8'); }
+  finally { fs.closeSync(fd); }
+};
 const unlink = file => { try { fs.unlinkSync(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
 const entries = directory => {
   try { return fs.readdirSync(directory); }
@@ -72,7 +77,8 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
     const blocked = config.reset.blocked.some(v => v === '*' || v === user.slug || v === user.unionId);
     let heartbeat;
     try { heartbeat = read(path.join(reset, 'broker.json')); } catch { /* Unreadable means unavailable. */ }
-    const fresh = Number.isFinite(Date.parse(heartbeat?.at)) && now() - Date.parse(heartbeat.at) <= options.heartbeatAgeMs;
+    const age = now() - Date.parse(heartbeat?.at);
+    const fresh = Number.isFinite(age) && age >= -30000 && age <= options.heartbeatAgeMs;
     const reason = blocked ? 'blocked' : !fs.existsSync(keyFile(user)) ? 'no-key' : !left ? 'limit' : !fresh ? 'unavailable' : null;
     return { status, allowed: !reason && status === 'idle', reason, note: blocked ? config.reset.blockedNote : '', left, limit: 3 };
   }
@@ -138,6 +144,11 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
     });
   }
   function cleanup() {
+    const cutoff = Date.parse(at().slice(0, 10)) - 7 * 86400000;
+    for (const name of entries(path.join(reset, 'days'))) {
+      const match = /^[a-z0-9][a-z0-9-]{0,62}-(\d{4}-\d{2}-\d{2})\.json$/.exec(name);
+      if (match && Date.parse(match[1]) < cutoff) unlink(path.join(reset, 'days', name));
+    }
     const referenced = new Set();
     for (const name of entries(path.join(reset, 'active'))) {
       try { const value = read(path.join(reset, 'active', name)); if (validId(value?.id)) referenced.add(value.id); }
@@ -163,11 +174,19 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
     const target = path.join(reset, 'locks', slug);
     try {
       const names = fs.readdirSync(target);
+      let cleared = false;
       for (const name of names) {
         const match = /^(\d+)-(\d+|unknown)-[0-9a-f]{32}$/.exec(name);
-        if (!match) return null;
-        const pid = Number(match[1]);
-        if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+        const pid = Number(match?.[1]);
+        if (!match || !Number.isSafeInteger(pid) || pid <= 0) {
+          const entry = path.join(target, name);
+          try {
+            if (now() - fs.lstatSync(entry).mtimeMs <= Math.max(options.claimTimeoutMs, 600000)) return null;
+            fs.rmSync(entry, { recursive: true });
+            if (!cleared) { audit(slug, '', 'lock-cleared'); cleared = true; }
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          continue;
+        }
         let alive = true;
         try { process.kill(pid, 0); }
         catch (error) { if (error.code === 'ESRCH') alive = false; }
@@ -193,9 +212,8 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
     finally { fs.rmSync(temp, { recursive: true, force: true }); }
   }
   function done(slug, id) {
-    if (read(file('last', slug))?.id === id && read(file('last', slug))?.status === 'done') return true;
-    return entries(path.join(reset, 'days')).filter(name => name.startsWith(slug + '-') && /^\d{4}-\d{2}-\d{2}\.json$/.test(name.slice(slug.length + 1)))
-      .some(name => read(path.join(reset, 'days', name))?.completed?.includes(id));
+    const last = read(file('last', slug));
+    return (last?.id === id && last.status === 'done') || day(slug).completed.includes(id);
   }
   function removeActive(slug, id) {
     if (read(activeFile(slug))?.id === id) unlink(activeFile(slug));
@@ -217,7 +235,7 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
         }
         progress ||= read(file('progress', id)) || {};
         let key;
-        try { key = fs.readFileSync(stagedFile(slug, id), 'utf8').trim(); }
+        try { key = readKey(stagedFile(slug, id)).trim(); }
         catch (error) { if (error.code !== 'ENOENT') throw error; report('stuck', 'staged-missing'); await pause(delay); delay = Math.min(delay * 2, options.maxRetryDelayMs); continue; }
         if (!key) throw new Error('Empty staged key');
         if (typeof progress.verified !== 'boolean') {
@@ -229,15 +247,15 @@ export function createMyKeyReset({ organization, policy, runtime, restarted, key
           if (closed) return;
           write(file('progress', id), progress);
         }
-        // Preserve the bind-mounted inode, its owner and permissions.
-        if (!progress.installed || fs.readFileSync(keyFile({ slug }), 'utf8') !== key) {
-          const fd = fs.openSync(keyFile({ slug }), 'r+');
+        // Preserve the inode for read-only bind mounts; the container is restarted right after installation.
+        if (!progress.installed || readKey(keyFile({ slug })) !== key) {
+          const fd = fs.openSync(keyFile({ slug }), fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
           try {
             const bytes = Buffer.from(key); let offset = 0;
             while (offset < bytes.length) offset += fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
             fs.ftruncateSync(fd, bytes.length); fs.fsyncSync(fd);
           } finally { fs.closeSync(fd); }
-          if (fs.readFileSync(keyFile({ slug }), 'utf8') !== key) throw new Error('Key verification failed');
+          if (readKey(keyFile({ slug })) !== key) throw new Error('Key verification failed');
           progress.installed = true; write(file('progress', id), progress);
         }
         key = undefined;

@@ -62,10 +62,13 @@ def main(request):
     identifier = entry.get("id")
     if not isinstance(identifier, str) or not identifier or "\0" in identifier or identifier in (value, entry["secret"]):
         return {"ok": False, "code": "no-key"}
+    if identifier.startswith("-"):
+        return {"ok": False, "code": "rotate-failed"}
     before = {k: v for k, v in entry.items() if k not in ("secret", "masked")}
+    completed = None
     try:
         # The command prints the key. Discard both streams without buffering or a file.
-        subprocess.run([v.replace("{id}", identifier) for v in command], input=(value + "\n").encode(),
+        completed = subprocess.run([v.replace("{id}", identifier) for v in command], input=(value + "\n").encode(),
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -80,7 +83,7 @@ def main(request):
             drift = sorted(k for k in before.keys() | fields.keys()
                            if (k not in before or k not in fields or before[k] != fields[k]))
             return {"ok": True, "drift": drift, "entries": len(after) == len(rows)}
-        if isinstance(entry.get("secret"), str) and digest(entry["secret"]) == current:
+        if completed is not None and completed.returncode != 0 and isinstance(entry.get("secret"), str) and digest(entry["secret"]) == current:
             return {"ok": False, "code": "rotate-failed"}
     except Exception:
         pass

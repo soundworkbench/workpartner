@@ -206,7 +206,7 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       ui.resetResult.hidden = !resetResult;
       if (resetResult) mark(ui.resetResult, 'reset-result', resetResult); else ui.resetResult.removeAttribute('data-wp-my-key-reset-result');
       ui.resetResult.textContent = resetResult === 'done'
-        ? t('钥匙已重置，旧钥匙已作废。在自己电脑的工具里填过旧钥匙的，请点「显示」查看新钥匙并自己换上。', 'The key has been reset and the old one no longer works. If tools on your own computer used the old key, press Show and give them the new one.')
+        ? t('钥匙已重置，旧钥匙已作废。你工作伙伴里的钥匙已自动换好（工作伙伴刚重启过，进行中的对话可能已中断）。只有在自己电脑的工具里填过旧钥匙的，请点「显示」查看新钥匙并自己换上。', 'The key has been reset and the old one no longer works. The key inside your workspace was replaced automatically (your workspace has just restarted, so a conversation in progress may have been interrupted). Only tools on your own computer that used the old key need it: press Show and give them the new one.')
         : resetResult === 'failed' ? t('暂时无法重置，请稍后再试。你现在的钥匙没有变，可以照常使用。', 'Resetting is unavailable right now. Please try again later. Your current key is unchanged and still works.') : '';
       if (!confirming) ui.confirm.replaceChildren();
       if (confirming) {
@@ -216,8 +216,8 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
         const actions = node('div', undefined, 'wp-my-key-row'); actions.append(ui.resetCancel, confirm);
         ui.confirm.replaceChildren(title,
           node('p', t('旧钥匙会立刻作废，无法恢复。', 'The old key stops working immediately and cannot be restored.')),
-          node('p', t('你的工作伙伴会重启约 1 分钟，进行中的对话会中断。', 'Your workspace restarts for about a minute; a conversation in progress is interrupted.')),
-          node('p', t('在自己电脑的工具里填过旧钥匙的，需要自己换成新钥匙。', 'Tools on your own computer that use the old key must be given the new one by you.')),
+          node('p', t('你工作伙伴里的钥匙会自动换成新的；工作伙伴会重启约 1 分钟，进行中的对话会中断。', 'The key inside your workspace is replaced automatically; your workspace restarts for about a minute and a conversation in progress is interrupted.')),
+          node('p', t('只有在自己电脑的工具里填过旧钥匙的，需要自己换成新钥匙。', 'Only tools on your own computer that use the old key must be given the new one by you.')),
           node('p', t(`今天还可以重置 ${reset.left} 次。`, `${reset.left} resets left today.`), 'wp-my-key-muted'), actions);
       }
     }
@@ -247,6 +247,14 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
         } else if (response.status === 403 && response.body.reason === 'blocked') await reloadReset(current);
         else await reloadReset(current, 'failed');
       } catch {
+        if (!currentReset(current)) return;
+        // The server may have accepted the reset before its response was lost.
+        try {
+          const fresh = await api();
+          if (!currentReset(current)) return;
+          data = fresh;
+          if (data?.reset?.status === 'pending') { startPolling(); return; }
+        } catch { /* Fall back to failure only after checking the current reset state. */ }
         if (currentReset(current)) { resetBusy = false; status = ''; resetResult = 'failed'; renderKey(); }
       }
     }

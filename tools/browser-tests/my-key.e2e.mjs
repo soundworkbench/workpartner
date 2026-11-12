@@ -818,14 +818,16 @@ const CONFIRM = K + ' [data-wp-my-key-confirm]';
 const RESET_NOTE = K + ' [data-wp-my-key-reset-note]';
 const RESET_DONE = K + ' [data-wp-my-key-reset-result="done"]';
 const RESET_FAILED = K + ' [data-wp-my-key-reset-result="failed"]';
+const RESET_SUCCESS_ZH = '钥匙已重置，旧钥匙已作废。你工作伙伴里的钥匙已自动换好（工作伙伴刚重启过，进行中的对话可能已中断）。只有在自己电脑的工具里填过旧钥匙的，请点「显示」查看新钥匙并自己换上。';
+const RESET_SUCCESS_EN = 'The key has been reset and the old one no longer works. The key inside your workspace was replaced automatically (your workspace has just restarted, so a conversation in progress may have been interrupted). Only tools on your own computer that used the old key need it: press Show and give them the new one.';
 const RESET_NOTES = [...NOTES.slice(0, 4), '怀疑泄露，马上点上面的「重置钥匙」换一把新的。', NOTES[5]];
 const CONFIRM_SENTENCES = [
   '旧钥匙会立刻作废，无法恢复。',
-  '你的工作伙伴会重启约 1 分钟，进行中的对话会中断。',
-  '在自己电脑的工具里填过旧钥匙的，需要自己换成新钥匙。',
+  '你工作伙伴里的钥匙会自动换成新的；工作伙伴会重启约 1 分钟，进行中的对话会中断。',
+  '只有在自己电脑的工具里填过旧钥匙的，需要自己换成新钥匙。',
 ];
 let resetSequence = 0;
-async function resetSession(label, { mode = 'ok', reset = { enabled: true }, ...options }, body) {
+async function resetSession(label, { mode = 'ok', reset = { enabled: true, blocked: [] }, ...options }, body) {
   const gateway = await suite.harness.startGateway('reset-' + ++resetSequence, { myKey: { ...SETTINGS, reset }, resetBroker: mode });
   suite.harness.use(gateway);
   try { return await session(label, options, current => body({ ...current, gateway })); }
@@ -869,6 +871,7 @@ test('reset: confirmation, cancellation, one POST, replacement and masked succes
     await page.waitForFunction(selector => document.querySelector(selector)?.textContent === '正在重置钥匙，工作伙伴会重启约 1 分钟…', K + ' [data-wp-my-key-status]');
     await disabledKeyActions(page); assert.ok(await page.locator(action('reset')).isDisabled());
     await page.waitForSelector(RESET_DONE);
+    assert.equal(await text(page, RESET_DONE), RESET_SUCCESS_ZH);
     assert.equal(await page.getAttribute(VALUE, 'data-state'), 'masked'); assert.notEqual(await text(page, VALUE), masked('member'));
     assert.equal(log.requests.filter(r => r === 'POST ' + API + '/reset').length, 1);
     assert.equal(gateway.broker.claimed.length, 1);
@@ -939,22 +942,26 @@ test('reset: blocked notes, daily limit, unavailable and feature off have the ex
   }
 });
 
-for (const viewport of [PHONE, NARROW]) {
-  test(`reset: dark confirmation stays inside ${viewport.width}px and English copy survives switching`, LONG, async () => {
-    await resetSession('reset-layout-' + viewport.width, { viewport, storage: { 'fixture-theme': 'dark' } }, async ({ page }) => {
+for (const theme of ['light', 'dark']) for (const viewport of [PHONE, NARROW]) {
+  test(`reset: ${theme} confirmation stays inside ${viewport.width}px and English copy survives switching`, LONG, async () => {
+    await resetSession(`reset-layout-${theme}-${viewport.width}`, { viewport, storage: { 'fixture-theme': theme } }, async ({ page }) => {
       await openMyKey(page); await page.click(action('reset')); await resetLayout(page);
-      if (viewport.width === 390) await suite.shot(page, 'reset-confirm-dark-390x844');
+      assert.deepEqual(await page.locator(CONFIRM + ' > p').allTextContents(), [...CONFIRM_SENTENCES, '今天还可以重置 3 次。']);
+      await suite.shot(page, `reset-confirm-${theme}-${viewport.width}x${viewport.height}`);
       await page.click(action('reset-cancel')); await page.click(action('close'));
       await setting(page, 'language', 'en-US'); await openMyKey(page); await page.click(action('reset'));
       assert.equal(await text(page, CONFIRM + ' h3'), 'Reset this key?');
       assert.deepEqual(await page.locator(CONFIRM + ' > p').allTextContents(), [
         'The old key stops working immediately and cannot be restored.',
-        'Your workspace restarts for about a minute; a conversation in progress is interrupted.',
-        'Tools on your own computer that use the old key must be given the new one by you.', '3 resets left today.',
+        'The key inside your workspace is replaced automatically; your workspace restarts for about a minute and a conversation in progress is interrupted.',
+        'Only tools on your own computer that use the old key must be given the new one by you.', '3 resets left today.',
       ]);
+      await resetLayout(page);
+      assert.equal(await text(page, action('reset-cancel')), 'Cancel'); assert.equal(await text(page, action('reset-confirm')), 'Reset');
+      await page.click(action('reset-confirm')); await page.waitForSelector(RESET_DONE);
+      assert.equal(await text(page, RESET_DONE), RESET_SUCCESS_EN);
       const facts = await overflow(page, K); assert.deepEqual(facts.outside, []);
       assert.ok(facts.pageScrollWidth <= facts.pageClientWidth && facts.dialogScrollWidth <= facts.dialogClientWidth);
-      assert.equal(await text(page, action('reset-cancel')), 'Cancel'); assert.equal(await text(page, action('reset-confirm')), 'Reset');
     });
   });
 }
@@ -1001,14 +1008,46 @@ test('reset: POST conflicts, quota and policy changes update the dialog without 
   }
 });
 
+test('reset: a lost POST response recovers an accepted reset through main status and polling', LONG, async () => {
+  await resetSession('reset-lost-response', { mode: 'never-claims' }, async ({ page, gateway, log }) => {
+    await openMyKey(page);
+    const before = log.requests.length;
+    await page.route('**/_wp/api/my-key/reset', async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const accepted = await gateway.request('POST', API + '/reset', { who: 'member', body: { confirm: 'reset' } });
+      assert.equal(accepted.status, 202);
+      await route.abort('failed');
+    });
+    await page.click(action('reset')); await page.click(action('reset-confirm'));
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent === '正在重置钥匙…', RESET_NOTE);
+    assert.equal(await page.locator(RESET_FAILED).count(), 0);
+    await disabledKeyActions(page); assert.ok(await page.locator(action('reset')).isDisabled());
+    const recovery = log.requests.slice(before).filter(request => request.includes(API));
+    assert.deepEqual(recovery.slice(0, 2), ['POST ' + API + '/reset', 'GET ' + API]);
+    gateway.broker.setMode('ok');
+    await page.waitForSelector(RESET_DONE);
+    assert.equal(await text(page, RESET_DONE), RESET_SUCCESS_ZH);
+    assert.equal(await page.getAttribute(VALUE, 'data-state'), 'masked');
+    assert.notEqual(await text(page, VALUE), masked('member'));
+    assert.equal(log.requests.filter(request => request === 'POST ' + API + '/reset').length, 1);
+    assert.equal(gateway.broker.claimed.length, 1);
+    assert.deepEqual(gateway.restarts, ['workpartner-next-member']);
+  });
+});
+
 test('reset: lost requests report failure and session revocation removes admission', LONG, async () => {
   for (const status of ['network', 401, 404]) {
-    await resetSession('reset-revoked-' + status, {}, async ({ page, gateway }) => {
+    await resetSession('reset-revoked-' + status, {}, async ({ page, gateway, log }) => {
       await openMyKey(page);
+      const before = log.requests.length;
       await page.route('**/_wp/api/my-key/reset', route => status === 'network' ? route.abort('failed')
         : route.fulfill({ status, contentType: 'application/json', body: status === 404 ? '' : '{"error":"My key request failed"}' }));
       await page.click(action('reset')); await page.click(action('reset-confirm'));
-      if (status === 'network') { await page.waitForSelector(RESET_FAILED); await keyState(page, 'masked'); }
+      if (status === 'network') {
+        await page.waitForSelector(RESET_FAILED); await keyState(page, 'masked');
+        assert.deepEqual(log.requests.slice(before).filter(request => request.includes(API)), ['POST ' + API + '/reset', 'GET ' + API]);
+        assert.equal(gateway.broker.claimed.length, 0);
+      }
       else { await page.waitForSelector(K, { state: 'hidden' }); await menu(page, false); assert.equal(await page.locator(ENTRY).count(), 0); }
       assert.deepEqual(gateway.restarts, []);
     });

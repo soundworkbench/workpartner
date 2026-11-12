@@ -128,20 +128,9 @@ class Paths:
             raise ValueError("kind")
         if self.secure is None:
             self.secure = directory(self.args["secureDirectory"])
-        # A staged value must remain discoverable if policy becomes unreadable or its prefix changes.
-        if kind == "next":
-            suffix = slug + ".key." + attempt + ".next"
-            staged = [name for name in os.listdir(self.secure) if name.endswith(suffix)
-                      and re.fullmatch(r"[a-zA-Z0-9_-]{0,128}", name[:-len(suffix)])]
-            if len(staged) > 1:
-                raise ValueError("next")
-            if staged:
-                return self.secure, staged[0]
-        try:
-            organization = external_json(self.args["organizationFile"])
-            prefix = organization.get("model", {}).get("keyPrefix", "model-")
-        except Exception:
-            prefix = "model-"
+        # Exact names prevent one person's slug from matching another's suffix.
+        organization = external_json(self.args["organizationFile"])
+        prefix = organization.get("model", {}).get("keyPrefix", "model-")
         if not isinstance(prefix, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{0,128}", prefix):
             raise ValueError("prefix")
         name = prefix + slug + ".key"
@@ -284,8 +273,8 @@ def main(request):
             os.fsync(claimed_dir)
             return {"done": True, "already": True}
         if not args["ok"]:
+            parent, name = paths.path("next", slug, attempt)
             try:
-                parent, name = paths.path("next", slug, attempt)
                 os.unlink(name, dir_fd=parent)
                 os.fsync(parent)
             except FileNotFoundError:

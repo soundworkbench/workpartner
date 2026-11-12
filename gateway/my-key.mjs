@@ -214,7 +214,10 @@ export function createMyKey({ organization, organizationData, authenticate, sess
           const reference = [accounts[user.slug], accounts[user.unionId], config.reference?.weekly].find(positive);
           mapped = mapUpstream(profile, usage, windows, reference);
         }
-        reply(res, 200, { key: key ? { masked: maskKey(key) } : null, revealSeconds: config.revealSeconds, baseUrl: config.baseUrl, defaults, ...mapped, reset: reset.summary(user, config) });
+        let resetSummary;
+        try { resetSummary = reset.summary(user, config); }
+        catch { resetSummary = { status: 'idle', allowed: false, reason: 'unavailable', note: '', left: 0, limit: 3 }; }
+        reply(res, 200, { key: key ? { masked: maskKey(key) } : null, revealSeconds: config.revealSeconds, baseUrl: config.baseUrl, defaults, ...mapped, reset: resetSummary });
       }
     } catch (error) {
       // Only known system codes may be logged; never error messages, bodies or upstream data.

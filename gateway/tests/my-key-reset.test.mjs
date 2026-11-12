@@ -7,6 +7,7 @@ import http from 'node:http';
 import { PassThrough, Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createMyKey, maskKey } from '../my-key.mjs';
+import { organizationData } from '../organization/resolve.mjs';
 
 const API = '/_wp/api/my-key', OLD = 'sk-test-old-1111', NEW = 'sk-test-new-2222';
 const person = { slug: 'member', unionId: 'union-fixture' };
@@ -15,7 +16,7 @@ async function until(check) {
   for (let i = 0; i < 150; i++) { if (await check()) return; await sleep(5); }
   assert.fail('Condition did not become true');
 }
-function fixture(t, { empty = false, ...extra } = {}) {
+function fixture(t, { empty = false, usage = {}, ...extra } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'my-key-reset-'));
   const calls = [], logs = [], handlers = [], replies = [];
   let clock = NOW, stored = OLD, advisory = true;
@@ -46,7 +47,7 @@ function fixture(t, { empty = false, ...extra } = {}) {
       res.statusCode = advisory && options.headers.authorization === 'Bearer ' + stored ? 200 : 401;
       callback(res);
       const profile = { name: 'fixture-caller', limits: [], models: [{ id: 'fixture-model' }] };
-      res.end(JSON.stringify(url.pathname.endsWith('/me') ? profile : {}));
+      res.end(JSON.stringify(url.pathname.endsWith('/me') ? profile : usage));
     });
     return req;
   });
@@ -57,7 +58,8 @@ function fixture(t, { empty = false, ...extra } = {}) {
     const handler = createMyKey({ organization, organizationData: () => JSON.parse(fs.readFileSync(policyFile, 'utf8')),
       authenticate: req => req.headers.cookie === 'session=member' ? person : null,
       keyFor: user => fs.readFileSync(keyFile(user), 'utf8'), keyFile, runtime, restarted: () => { calls.push('restarted'); },
-      now: () => clock, timeoutMs: 20, timing: { pollIntervalMs: 2, retryDelayMs: 2, maxRetryDelayMs: 8, verifyDelayMs: 2, ...extra.timing }, ...options });
+      now: () => clock, timeoutMs: 20, ...options,
+      timing: { pollIntervalMs: 2, retryDelayMs: 2, maxRetryDelayMs: 8, verifyDelayMs: 2, ...extra.timing, ...options.timing } });
     handlers.push(handler); return handler;
   }
   const handler = make(extra);
@@ -169,6 +171,119 @@ test('blocked policy fails closed, is live, and sanitizes the optional note', as
   }
   f.organization.myKey.reset.blocked = []; f.save(); assert.equal((await f.request()).data.allowed, true);
   fs.writeFileSync(f.policyFile, '{'); assert.equal((await f.post()).status, 404);
+});
+
+test('real organization defaults keep an omitted reset block list fail closed', async t => {
+  const f = fixture(t);
+  f.organization.myKey.reset = { enabled: true }; f.save();
+  const handler = f.make({ organizationData: () => organizationData({ WORKPARTNER_ORG_DIR: path.dirname(f.policyFile) }) });
+  const view = await f.request({ handler, suffix: '' });
+  assert.equal(view.status, 200); assert.equal(view.data.reset.reason, 'blocked'); assert.equal(view.data.reset.allowed, false);
+  const response = await f.post({ handler });
+  assert.equal(response.status, 403); assert.equal(response.data.reason, 'blocked');
+  assert.deepEqual(fs.readdirSync(path.join(f.root, 'requests')), []);
+  assert.deepEqual(f.audit(), []);
+});
+
+test('reset summary read failures preserve the masked key, usage and guide', async t => {
+  const f = fixture(t, { usage: { calls: 2, cost: 1, callerKeys: [{ name: 'fixture-caller' }],
+    by: { callerKey: [{ name: 'fixture-caller' }], model: [] },
+    series: [{ time: '2026-11-09T00:00:00Z', calls: 0, cost: 0 }, { time: '2026-11-12T00:00:00Z', calls: 2, cost: 1 }] } });
+  const readFile = fs.readFileSync;
+  f.organization.myKey.publicBaseUrl = 'https://models.example.test';
+  f.organization.model.defaults = { codex: 'fixture-model' }; f.save();
+  const { reset: _, ...expected } = (await f.request({ suffix: '' })).data;
+  const day = f.route('days', 'member-2026-11-12');
+  for (const failure of ['corrupt', 'denied']) {
+    fs.writeFileSync(day, '{');
+    const mock = failure === 'denied' ? t.mock.method(fs, 'readFileSync', (file, ...args) => {
+      if (file === day) throw Object.assign(new Error('Fixture access failure'), { code: 'EACCES' });
+      return readFile(file, ...args);
+    }) : null;
+    const response = await f.request({ suffix: '' });
+    assert.equal(response.status, 200);
+    const { reset, ...actual } = response.data;
+    assert.deepEqual(actual, expected); assert.equal(actual.key.masked, maskKey(OLD));
+    assert.equal(actual.defaults.codex, 'fixture-model'); assert.equal(actual.usage.today.calls, 2); assert.equal(actual.usage.week.calls, 2);
+    assert.equal(reset.allowed, false); assert.equal(reset.reason, 'unavailable');
+    assert.equal((await f.post()).status, 503);
+    mock?.mock.restore();
+  }
+  assert.deepEqual(fs.readdirSync(path.join(f.root, 'requests')), []);
+});
+
+test('heartbeats tolerate thirty seconds of future skew but refuse anything later', async t => {
+  const f = fixture(t);
+  f.setClock(NOW + 30000); f.heartbeat(); f.setClock(NOW);
+  assert.equal((await f.request()).data.allowed, true);
+  f.setClock(NOW + 30001); f.heartbeat(); f.setClock(NOW);
+  assert.equal((await f.request()).data.reason, 'unavailable');
+  assert.equal((await f.post()).status, 503);
+  assert.deepEqual(fs.readdirSync(path.join(f.root, 'requests')), []);
+  assert.deepEqual(f.audit(), []);
+});
+
+test('unrecognized driver locks remain busy until the larger of ten minutes and the claim timeout', async t => {
+  for (const claimTimeoutMs of [30000, 1200000]) {
+    const f = fixture(t, { timing: { claimTimeoutMs } });
+    const directory = path.join(f.root, 'locks/member'), entry = path.join(directory, 'fixture-unrecognized');
+    fs.mkdirSync(directory); fs.writeFileSync(entry, '');
+    const threshold = Math.max(claimTimeoutMs, 600000);
+    fs.utimesSync(entry, new Date(NOW - threshold), new Date(NOW - threshold));
+    const busy = await f.post(); assert.equal(busy.status, 409); assert.equal(busy.data.reason, 'busy');
+    assert.equal(fs.existsSync(entry), true); assert.deepEqual(f.audit(), []);
+    f.setClock(NOW + 1);
+    assert.equal((await f.post()).status, 202);
+    assert.equal(fs.existsSync(entry), false);
+    f.result(f.claim()); await f.settled('done');
+    const cleared = f.audit().filter(line => line.result === 'lock-cleared');
+    assert.equal(cleared.length, 1); assert.equal(cleared[0].slug, 'member');
+    assert.equal(JSON.stringify(cleared).includes('fixture-unrecognized'), false);
+  }
+});
+
+test('installation refuses staged and installed key symlinks and resumes after repair', async t => {
+  for (const kind of ['staged', 'installed']) {
+    const f = fixture(t);
+    await f.post(); const id = f.claim(); f.result(id);
+    const target = kind === 'staged' ? f.keyFile(person) + '.' + id + '.next' : f.keyFile(person);
+    const outside = path.join(path.dirname(f.keyFile(person)), 'fixture-outside');
+    const bytes = fs.readFileSync(target);
+    fs.writeFileSync(outside, bytes); fs.unlinkSync(target); fs.symlinkSync(outside, target);
+    await until(() => f.audit().some(line => line.result === 'retry' && line.step === 'install'));
+    assert.equal((await f.request()).data.status, 'pending'); assert.deepEqual(f.calls, []);
+    assert.deepEqual(fs.readFileSync(outside), bytes); assert.equal(fs.existsSync(f.route('results', id)), true);
+    fs.unlinkSync(target); fs.writeFileSync(target, bytes);
+    await f.settled('done');
+    assert.deepEqual(f.calls, ['rekey', 'inspect', 'restart', 'restarted']);
+    assert.deepEqual(fs.readFileSync(outside), bytes);
+  }
+});
+
+test('stale unrecognized lock subdirectories are cleared without following symlinks', async t => {
+  const f = fixture(t), lock = path.join(f.root, 'locks/member'), entry = path.join(lock, 'fixture-directory');
+  const outside = path.join(path.dirname(f.root), 'fixture-preserved');
+  fs.writeFileSync(outside, 'preserved'); fs.mkdirSync(entry, { recursive: true });
+  fs.symlinkSync(outside, path.join(entry, 'fixture-link'));
+  fs.utimesSync(entry, new Date(NOW - 600001), new Date(NOW - 600001));
+  assert.equal((await f.post()).status, 202);
+  assert.equal(fs.existsSync(entry), false); assert.equal(fs.readFileSync(outside, 'utf8'), 'preserved');
+  assert.equal(f.audit().filter(line => line.result === 'lock-cleared').length, 1);
+});
+
+test('daily retention removes records older than seven days and recovery reads only today', async t => {
+  const f = fixture(t); f.handler.close(); await sleep(5);
+  const id = 'f'.repeat(32), at = new Date(NOW).toISOString();
+  for (const date of ['2026-11-04', '2026-11-05', '2026-11-11', '2026-11-12'])
+    f.put('days', 'member-' + date, { attempts: [], completed: [] });
+  fs.writeFileSync(f.route('days', 'member-2026-11-11'), '{');
+  f.put('active', 'member', { id, at }); f.result(id);
+  f.make();
+  assert.equal(fs.existsSync(f.route('days', 'member-2026-11-04')), false);
+  for (const date of ['2026-11-05', '2026-11-11', '2026-11-12']) assert.equal(fs.existsSync(f.route('days', 'member-' + date)), true);
+  await f.settled('done');
+  assert.equal((await f.request()).data.left, 2);
+  assert.deepEqual(f.calls, ['rekey', 'inspect', 'restart', 'restarted']);
 });
 
 test('success replaces the same inode, synchronizes runtime once, masks the new key and keeps protocol records secret', async t => {
@@ -322,7 +437,7 @@ test('installation and recording errors retry without discarding staging or rest
   const f = fixture(t), open = fs.openSync, rename = fs.renameSync;
   let installFailures = 0, recordFailures = 0;
   t.mock.method(fs, 'openSync', (file, flags, ...args) => {
-    if (file === f.keyFile(person) && flags === 'r+' && installFailures++ < 2) throw Object.assign(new Error(NEW), { code: 'EIO' });
+    if (file === f.keyFile(person) && typeof flags === 'number' && (flags & fs.constants.O_RDWR) && installFailures++ < 2) throw Object.assign(new Error(NEW), { code: 'EIO' });
     return open(file, flags, ...args);
   });
   t.mock.method(fs, 'renameSync', (source, target) => {

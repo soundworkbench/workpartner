@@ -9,6 +9,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { PassThrough, Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createMyKey, maskKey } from '../gateway/my-key.mjs';
+import { organizationData } from '../gateway/organization/resolve.mjs';
 import { createBroker, runHelper } from './key-reset-broker.mjs';
 
 const hasPython = await new Promise((resolve, reject) => {
@@ -32,7 +33,7 @@ function files(directory) {
     }));
 }
 
-function fixture(t) {
+function fixture(t, { realOrganization = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'key-reset-integration-'));
   const S = path.join(root, 'state'), K = path.join(root, 'secure'), local = path.join(root, 'broker');
   const R = path.join(S, 'my-key/reset'), keyFile = path.join(K, 'fixture-member.key');
@@ -82,7 +83,8 @@ print(value)
   }]));
   let handler;
   function makeHandler() {
-    handler = createMyKey({ organization, organizationData: () => read(organizationFile),
+    handler = createMyKey({ organization, organizationData: () => realOrganization
+      ? organizationData({ WORKPARTNER_ORG_DIR: root }) : read(organizationFile),
       authenticate: req => req.headers.cookie === 'session=member' ? person : null,
       keyFor: () => fs.readFileSync(keyFile, 'utf8'), runtime,
       restarted: slug => calls.push(['restarted', slug]), timeoutMs: 1000,
@@ -202,6 +204,20 @@ test('integration: both sides deny blocked people, including forged requests', o
     assert.equal(read(f.route('results', id)).code, 'denied'); assert.equal(fs.existsSync(f.next(id)), false);
     assert.equal(fs.readFileSync(f.keyFile, 'utf8'), OLD + '\n'); assert.deepEqual(read(f.store), f.original);
   }
+  assert.deepEqual(f.calls, []); assert.equal(f.events.some(event => event.op === 'rotate'), false); f.secretFree(OLD);
+});
+
+test('integration: real organization defaults and the broker deny an omitted block list', options, async t => {
+  const f = fixture(t, { realOrganization: true }), service = await f.startBroker();
+  f.organization.myKey.reset = { enabled: true }; f.save();
+  const view = await f.request('GET', '');
+  assert.equal(view.status, 200); assert.equal(view.data.reset.reason, 'blocked'); assert.equal(view.data.reset.allowed, false);
+  const response = await f.request('POST');
+  assert.equal(response.status, 403); assert.equal(response.data.reason, 'blocked');
+  assert.deepEqual(fs.readdirSync(path.join(f.R, 'requests')), []);
+  const id = f.forge(); await service.cycle();
+  assert.equal(read(f.route('results', id)).code, 'denied'); assert.equal(fs.existsSync(f.next(id)), false);
+  assert.equal(fs.readFileSync(f.keyFile, 'utf8'), OLD + '\n'); assert.deepEqual(read(f.store), f.original);
   assert.deepEqual(f.calls, []); assert.equal(f.events.some(event => event.op === 'rotate'), false); f.secretFree(OLD);
 });
 

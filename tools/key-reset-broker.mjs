@@ -11,6 +11,11 @@ const ID = /^[0-9a-f]{32}$/;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const DAY = 86400000;
+const activeLocks = new Set();
+function processStart(pid) {
+  try { return fs.readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1).split(' ')[19]; }
+  catch { return null; }
+}
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const valid = (pattern, value) => typeof value === 'string' && value === value.trim() && pattern.test(value);
 const error = code => Object.assign(new Error(code), { code });
@@ -155,7 +160,7 @@ function saveState(filename, data) {
 export function createBroker(input, { now = Date.now, randomBytes = crypto.randomBytes, run = runHelper,
   log = line => process.stderr.write(line + '\n') } = {}) {
   const config = validateConfig(input), root = config.stateDirectory;
-  const pending = new Map(), stuck = new Map(), unresolved = new Map();
+  const pending = new Map(), stuck = new Map(), unresolved = new Map(), malformed = new Set();
   let lock, running = false, stopping = false, lastPing = -Infinity, lastAnswer = -Infinity;
   const local = (kind, name) => path.join(root, kind, name);
   const say = code => log(`[key-reset] ${code}`);
@@ -176,33 +181,43 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
     try {
       privateDirectory(root);
       for (const name of ['seen', 'days', 'inflight']) privateDirectory(path.join(root, name));
-      const filename = path.join(root, 'broker.pid');
+      const filename = path.join(root, 'broker.lock');
+      if (activeLocks.has(root)) throw error('broker-running');
       try {
-        const info = fs.lstatSync(filename);
-        const pid = readState(filename);
-        if (!Number.isInteger(pid) || pid < 1) throw error('broker-running');
-        try { process.kill(pid, 0); throw error('broker-running'); }
-        catch (failure) { if (failure.code !== 'ESRCH') throw error('broker-running'); }
-        const current = fs.lstatSync(filename);
-        if (current.ino !== info.ino || current.dev !== info.dev) throw error('broker-running');
-        fs.unlinkSync(filename);
+        if (!fs.lstatSync(filename).isDirectory()) throw error('broker-running');
+        for (const name of fs.readdirSync(filename)) {
+          const match = /^(\d+)-(\d+|unknown)-[0-9a-f]{32}$/.exec(name);
+          if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) < 1) throw error('broker-running');
+          const pid = Number(match[1]), started = processStart(pid);
+          let alive = true;
+          try { process.kill(pid, 0); } catch (failure) { if (failure.code === 'ESRCH') alive = false; }
+          // A reused PID is not the lock owner; this process has no active lock here.
+          if (pid !== process.pid && alive && (!started || match[2] === 'unknown' || started === match[2])) throw error('broker-running');
+          try { fs.unlinkSync(path.join(filename, name)); } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
+        }
+        try { fs.rmdirSync(filename); } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
       } catch (failure) { if (failure.code !== 'ENOENT') throw failure; }
-      const fd = fs.openSync(filename, 'wx', 0o600);
+      const token = crypto.randomBytes(16).toString('hex'), temporary = path.join(root, `.broker-lock-${token}`);
+      const owner = `${process.pid}-${processStart(process.pid) || 'unknown'}-${token}`;
+      fs.mkdirSync(temporary, { mode: 0o700 });
       try {
-        fs.writeFileSync(fd, `${process.pid}\n`); fs.fsyncSync(fd);
-        lock = fs.fstatSync(fd);
-      } finally { fs.closeSync(fd); }
+        fs.writeFileSync(path.join(temporary, owner), '', { flag: 'wx', mode: 0o600, flush: true });
+        fs.renameSync(temporary, filename);
+        lock = owner; activeLocks.add(root);
+      } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
       syncDirectory(root);
-    } catch (failure) { throw error(failure.code === 'broker-running' || failure.code === 'EEXIST' ? 'broker-running' : 'state-failed'); }
+    } catch (failure) { throw error(['broker-running', 'EEXIST', 'ENOTEMPTY'].includes(failure.code) ? 'broker-running' : 'state-failed'); }
   }
   function close() {
     if (running) throw error('broker-busy');
     if (!lock) return;
     try {
-      const filename = path.join(root, 'broker.pid'), info = fs.lstatSync(filename);
-      if (info.ino === lock.ino && info.dev === lock.dev) { fs.unlinkSync(filename); syncDirectory(root); }
+      const filename = path.join(root, 'broker.lock');
+      fs.unlinkSync(path.join(filename, lock));
+      try { fs.rmdirSync(filename); } catch (failure) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(failure.code)) throw failure; }
+      syncDirectory(root);
     } catch (failure) { if (failure.code !== 'ENOENT') throw error('state-failed'); }
-    finally { lock = undefined; }
+    finally { lock = undefined; activeLocks.delete(root); }
   }
   function day(date) {
     const value = readState(local('days', `${date}.json`)) ?? {};
@@ -234,30 +249,40 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
     }
   }
   async function deliver(attempt) {
+    if (attempt.delivered) return true;
     const { row, ok, code } = attempt;
     try {
       const response = await call('gateway-host', 'finish', { id: row.id, slug: row.slug, ok, code });
       if (response.done !== true) throw error('finish-failed');
-      fs.rmSync(local('inflight', `${row.id}.json`), { force: true });
-      syncDirectory(path.join(root, 'inflight'));
-      pending.delete(row.id); stuck.delete(row.id);
-    } catch { say('finish-failed'); }
+      attempt.delivered = true;
+      return true;
+    } catch { say('finish-failed'); return false; }
   }
   async function complete(row, ok, code, result = ok ? 'ok' : 'failed', extra = {}) {
     // Keep the decision even if a local write fails; never turn a known success into failure.
     const attempt = { row, ok, code, result, extra, recorded: false };
+    row.decision = { ok, code, result, extra };
     unresolved.delete(row.id);
     pending.set(row.id, attempt);
     await recordAndDeliver(attempt);
   }
   async function recordAndDeliver(attempt) {
-    if (!attempt.recorded) {
-      if (attempt.ok) count(attempt.row, 'done');
-      audit(attempt.row, attempt.result, attempt.code, attempt.extra);
-      attempt.recorded = true;
-      say(`rotate ${attempt.ok ? 'ok' : attempt.code}`);
-    }
-    await deliver(attempt);
+    // A retained inflight decision also survives delivery followed by a count-write failure.
+    try {
+      if (attempt.row.current) saveState(local('inflight', `${attempt.row.id}.json`), attempt.row);
+    } catch { say('state-inflight'); }
+    if (!await deliver(attempt)) return;
+    try {
+      if (!attempt.recorded) {
+        if (attempt.ok) count(attempt.row, 'done');
+        audit(attempt.row, attempt.result, attempt.code, attempt.extra);
+        attempt.recorded = true;
+        say(`rotate ${attempt.ok ? 'ok' : attempt.code}`);
+      }
+      fs.rmSync(local('inflight', `${attempt.row.id}.json`), { force: true });
+      syncDirectory(path.join(root, 'inflight'));
+      pending.delete(attempt.row.id); stuck.delete(attempt.row.id);
+    } catch { say('record-failed'); }
   }
   async function which(hashes) {
     const response = await call('key-store', 'which', { hashes });
@@ -266,21 +291,51 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
     return response.present;
   }
   async function decide(row, step) {
-    let present;
+    if (row.decision) return complete(row, row.decision.ok, row.decision.code, row.decision.result, row.decision.extra);
+    // Every persisted rotation may have reached the far side, including across a restart.
+    unresolved.set(row.id, row);
+    let present, state;
     try { present = await which([row.current, row.next]); }
-    catch { markStuck(row, step); return; }
-    if (present[1]) await complete(row, true, 'ok', step === 'resume' ? 'resumed' : 'ok');
-    else if (present[0]) await complete(row, false, step === 'resume' ? 'interrupted' : 'rotate-failed');
-    else markStuck(row, step);
+    catch { state = 'unavailable'; }
+    if (present?.[1]) return complete(row, true, 'ok', step === 'resume' ? 'resumed' : 'ok');
+    state ||= present[0] ? 'old' : 'missing';
+    const quiet = now() - Date.parse(row.rotationStarted || row.at) >= 600000;
+    row.oldChecks = state === 'old' && quiet ? (row.oldChecks || 0) + 1 : 0;
+    if (row.waitState !== state) {
+      audit(row, 'stuck', 'rotate-unknown', { step, state });
+      row.waitState = state;
+    }
+    // Check counts and transitions survive restart; checks are made once per cycle.
+    saveState(local('inflight', `${row.id}.json`), row);
+    if (row.oldChecks >= 3) await complete(row, false, 'rotate-failed');
   }
   function inflight(id) {
     const row = readState(local('inflight', `${id}.json`));
     if (row !== null && (!object(row) || row.id !== id || !valid(SLUG, row.slug) || !valid(HASH, row.current)
-      || !valid(HASH, row.next) || typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at)))) throw error('state-inflight');
+      || !valid(HASH, row.next) || typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at))
+      || (row.rotationStarted !== undefined && (typeof row.rotationStarted !== 'string' || !Number.isFinite(Date.parse(row.rotationStarted))))
+      || (row.oldChecks !== undefined && (!Number.isSafeInteger(row.oldChecks) || row.oldChecks < 0))
+      || (row.waitState !== undefined && !['old', 'missing', 'unavailable'].includes(row.waitState))
+      || (row.decision !== undefined && (!object(row.decision) || typeof row.decision.ok !== 'boolean'
+        || (row.decision.ok ? row.decision.code !== 'ok' : !['no-key', 'rotate-failed', 'interrupted'].includes(row.decision.code))
+        || !['ok', 'failed', 'resumed'].includes(row.decision.result) || !object(row.decision.extra))))) throw error('state-inflight');
     return row;
   }
+  function readInflight(id) {
+    try { const row = inflight(id); malformed.delete(id); return row; }
+    catch {
+      if (!malformed.has(id)) {
+        audit({ id }, 'stuck', 'unknown', { step: 'inflight' });
+        malformed.add(id);
+      }
+      return null;
+    }
+  }
   async function resume(claimed) {
-    const row = inflight(claimed.id);
+    // Observing the remote claim proves rename succeeded even if its reply was lost.
+    markSeen(claimed.id);
+    const row = readInflight(claimed.id);
+    if (malformed.has(claimed.id)) return;
     if (row) {
       if (row.slug !== claimed.slug) throw error('state-inflight');
       await decide(row, 'resume');
@@ -295,23 +350,27 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
       }
     } catch { markStuck(claimed, 'resume'); return; }
     const recovered = { id: claimed.id, slug: claimed.slug, at: iso(now()) };
+    if (present) {
+      recovered.current = valid(HASH, inspected.current) ? inspected.current : inspected.next;
+      recovered.next = inspected.next;
+    }
     await complete(recovered, present, present ? 'ok' : 'interrupted', present ? 'resumed' : 'failed');
+  }
+  function markSeen(id) {
+    try {
+      fs.writeFileSync(local('seen', id), '', { flag: 'wx', mode: 0o600, flush: true });
+      fs.utimesSync(local('seen', id), new Date(now()), new Date(now()));
+      syncDirectory(path.join(root, 'seen'));
+    } catch (failure) { if (failure.code !== 'EEXIST') throw error('state-seen'); }
   }
   async function refuse(row, code) {
     const claimed = await call('gateway-host', 'claim', { id: row.id, slug: row.slug, stage: false });
-    if (claimed.claimed === true) await complete(row, false, code, 'refused');
+    if (claimed.claimed === true) { markSeen(row.id); await complete(row, false, code, 'refused'); }
   }
   async function handle(request, hostNow) {
     // Unavailable stores leave requests entirely untouched, including the replay guard.
     if (!healthy()) return;
-    try {
-      fs.writeFileSync(local('seen', request.id), '', { flag: 'wx', mode: 0o600, flush: true });
-      fs.utimesSync(local('seen', request.id), new Date(now()), new Date(now()));
-      syncDirectory(path.join(root, 'seen'));
-    } catch (failure) {
-      if (failure.code === 'EEXIST') { await refuse(request, 'replay'); return; }
-      throw error('state-seen');
-    }
+    if (fs.existsSync(local('seen', request.id))) return refuse(request, 'replay');
     if (typeof request.at !== 'string' || !Number.isFinite(Date.parse(request.at))
       || Math.abs(Date.parse(request.at) - hostNow) > config.windowSeconds * 1000) return refuse(request, 'stale');
     if (request.allowed !== true) return refuse(request, 'denied');
@@ -322,15 +381,18 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
     try { claim = await call('gateway-host', 'claim', { id: request.id, slug: request.slug, stage: true, next: value }); }
     catch { value = undefined; say('claim-failed'); return; }
     if (claim.claimed !== true) { value = undefined; return; }
+    markSeen(request.id);
     if (claim.allowed !== true) { value = undefined; return complete(request, false, 'denied', 'refused'); }
     if (claim.key !== true || !valid(HASH, claim.current)) { value = undefined; return complete(request, false, 'no-key'); }
     const row = { id: request.id, slug: request.slug, at: iso(now()), current: claim.current, next: digest(value) };
     let rotated;
     try {
-      // This exclusive file is flushed before any rotation; hashes never enter temporary files.
+      // Flush recovery hashes before rotation; plaintext stays out of local state.
       fs.writeFileSync(local('inflight', `${row.id}.json`), JSON.stringify(row) + '\n', { flag: 'wx', mode: 0o600, flush: true });
       syncDirectory(path.join(root, 'inflight'));
       count(row, 'started');
+      row.rotationStarted = iso(now());
+      saveState(local('inflight', `${row.id}.json`), row);
       try { rotated = await call('key-store', 'rotate', { current: row.current, next: value, rotate: config.keyStore.rotate }); }
       catch { rotated = { ok: false, code: 'unknown' }; }
     } finally { value = undefined; }
@@ -355,7 +417,7 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
         && !pending.has(name) && !fs.existsSync(local('inflight', `${name}.json`))) fs.unlinkSync(filename);
     }
     for (const name of fs.readdirSync(path.join(root, 'days'))) {
-      if (/^\d{4}-\d{2}-\d{2}\.json$/.test(name) && Date.parse(name.slice(0, 10)) <= Date.parse(dateOf(now())) - 7 * DAY)
+      if (/^\d{4}-\d{2}-\d{2}\.json$/.test(name) && Date.parse(name.slice(0, 10)) < Date.parse(dateOf(now())) - 7 * DAY)
         fs.unlinkSync(local('days', name));
     }
   }
@@ -396,12 +458,15 @@ export function createBroker(input, { now = Date.now, randomBytes = crypto.rando
         const id = name.slice(0, -5);
         if (!name.endsWith('.json') || !valid(ID, id) || handled.has(id)) continue;
         handled.add(id);
-        try { await resume(inflight(id)); } catch { say('resume-failed'); }
+        try { const row = readInflight(id); if (row) await resume(row); } catch { say('resume-failed'); }
       }
       const busySlugs = new Set([...pending.values()].map(attempt => attempt.row.slug));
-      for (const row of rows(poll.claimed)) if (stuck.has(row.id)) busySlugs.add(row.slug);
+      for (const row of rows(poll.claimed)) if (stuck.has(row.id) || malformed.has(row.id)) busySlugs.add(row.slug);
       for (const name of fs.readdirSync(path.join(root, 'inflight'))) {
-        if (/^[0-9a-f]{32}\.json$/.test(name)) busySlugs.add(inflight(name.slice(0, -5)).slug);
+        if (/^[0-9a-f]{32}\.json$/.test(name)) {
+          const row = readInflight(name.slice(0, -5));
+          if (row) busySlugs.add(row.slug);
+        }
       }
       for (const row of rows(poll.requests).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
         if (stopping) break;
