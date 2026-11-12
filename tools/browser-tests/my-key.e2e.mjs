@@ -482,6 +482,8 @@ for (const mode of ['down', 'foreign']) {
         await openMyKey(page);
         if (mode === 'down') {
           await emptyUsage(page, 'unavailable');
+          assert.equal(await page.getByRole('heading', { name: '可用模型', exact: true }).count(), 1);
+          assert.equal(await page.getByRole('heading', { name: /（0）/ }).count(), 0);
           assert.equal(await text(page, GUIDE + ' [data-wp-my-key-models]'), '模型清单暂时取不到');
           assert.equal(await page.locator(GUIDE + ' [data-wp-my-key-model]').count(), 0);
           const filter = page.locator(GUIDE + ' [data-wp-my-key-model-filter]');
@@ -522,6 +524,7 @@ for (const mode of ['down', 'foreign']) {
 test('guide: three safe snippets, copy all, model filtering and six notes', LONG, async () => {
   await session('guide', {}, async ({ page }) => {
     await openMyKey(page); await watchPlaintext(page);
+    assert.equal(await page.getByRole('heading', { name: '使用说明', exact: true }).count(), 1);
     assert.equal(await page.locator(GUIDE + ' [role="tab"]').count(), 3);
     assert.equal(await page.getByRole('heading', { name: `可用模型（${MODEL_MODELS.length}）`, exact: true }).count(), 1);
     assert.equal(await page.getByRole('heading', { name: '注意事项', exact: true }).count(), 1);
@@ -568,6 +571,7 @@ test('language: English menu, buttons and placeholder', LONG, async () => {
     assert.equal(await text(page, '#wp-my-key-heading'), 'My key');
     assert.equal(await text(page, action('toggle')), 'Show');
     assert.equal(await text(page, action('copy')), 'Copy');
+    assert.equal(await page.getByRole('heading', { name: 'Setup guide', exact: true }).count(), 1);
     assert.equal(await page.getByRole('heading', { name: `Available models (${MODEL_MODELS.length})`, exact: true }).count(), 1);
     assert.equal(await page.getByRole('heading', { name: 'Notes', exact: true }).count(), 1);
     for (const name of ['claude', 'codex', 'other']) {
@@ -635,6 +639,8 @@ for (const [name, viewport] of VIEWPORTS.slice(1)) {
     try {
       await session('layout-' + name, { viewport }, async ({ page }) => {
         await openMyKey(page);
+        assert.equal(await page.locator(K + ' [data-wp-my-key-card="key"]').evaluate(card => getComputedStyle(card).borderTopWidth), '0px');
+        assert.notEqual(await page.locator(USAGE).evaluate(card => getComputedStyle(card).borderTopWidth), '0px');
         await page.click(action('toggle')); await keyState(page, 'shown');
         for (const name of ['claude', 'codex', 'other']) {
           await tab(page, name);

@@ -92,6 +92,8 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
 .wp-my-key-dialog h3 { margin:8px 0; font-size:16px; }
 .wp-my-key-dialog h4 { margin:16px 0 8px; font-size:14px; }
 .wp-my-key-dialog section { border-top:1px solid var(--wp-line, #ddd); padding-top:16px; margin-top:16px; }
+.wp-my-key-dialog section[data-wp-my-key-card="key"] { border-top:0; margin-top:0; }
+.wp-my-key-dialog section[data-wp-my-key-card="key"] > h3 { margin-top:0; }
 .wp-my-key-dialog button { cursor:pointer; max-width:100%; border:1px solid var(--wp-line, #ddd); border-radius:8px; padding:6px 12px; background:var(--wp-send, #3C3F43); color:var(--wp-send-ink, #FCFCFC); font:inherit; font-size:13px; overflow-wrap:anywhere; }
 .wp-my-key-dialog button:hover { background:var(--wp-send-hover, #2E3237); }
 .wp-my-key-dialog button:disabled { opacity:.5; cursor:not-allowed; }
@@ -196,7 +198,7 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
     }
     const money = value => '$' + value.toFixed(2);
     const beijingTime = value => new Date(value).toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-    const beijingReset = value => new Date(value).toLocaleDateString(locale(), { timeZone: 'Asia/Shanghai', month: locale() === 'en-US' ? 'short' : 'numeric', day: 'numeric' })
+    const beijingReset = value => new Date(value).toLocaleDateString(locale(), { timeZone: 'Asia/Shanghai', month: 'short', day: 'numeric' })
       + t(' ', ', ') + beijingTime(value);
     function renderUsage() {
       const usage = data?.usage; ui.usage.replaceChildren(); ui.usage.dataset.state = loading ? 'loading' : usage ? 'ready' : 'unavailable';
@@ -258,7 +260,7 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
       }
       ui.filter.placeholder = t('筛选模型', 'Filter models'); ui.filter.setAttribute('aria-label', ui.filter.placeholder); renderModels();
       const count = data?.models?.length || 0;
-      ui.modelsTitle.textContent = t(`可用模型（${count}）`, `Available models (${count})`); ui.filter.hidden = !count;
+      ui.modelsTitle.textContent = count ? t(`可用模型（${count}）`, `Available models (${count})`) : t('可用模型', 'Available models'); ui.filter.hidden = !count;
       ui.notesTitle.textContent = t('注意事项', 'Notes');
       ui.notes.replaceChildren(...[
         ['这把钥匙只限你本人工作使用，不要给别人用。', 'This key is for your own work only. Do not let anyone else use it.'],
@@ -279,7 +281,7 @@ html[data-theme="dark"] .wp-my-key-dialog { color-scheme:dark; }
     }
     function render() {
       ui.heading.textContent = t('我的钥匙', 'My key'); ui.close.setAttribute('aria-label', t('关闭', 'Close'));
-      ui.keyTitle.textContent = t('钥匙', 'Key'); ui.guideTitle.textContent = t('使用指南', 'Usage guide'); renderKey(); renderUsage(); renderGuide();
+      ui.keyTitle.textContent = t('钥匙', 'Key'); ui.guideTitle.textContent = t('使用说明', 'Setup guide'); renderKey(); renderUsage(); renderGuide();
     }
     async function show() {
       if (revoked) return;

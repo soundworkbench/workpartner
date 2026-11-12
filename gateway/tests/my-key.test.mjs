@@ -136,7 +136,8 @@ test('access precedes body, key and upstream reads and live admission fails clos
     f.organization.myKey.allow = allow; f.save();
     const admitted = allow?.some(v => ['member', 'union-member', '*'].includes(v));
     const response = await f.request(); assert.equal(response.status, admitted ? 200 : 404);
-    assert.equal(Boolean(f.handler.clientFor(people[0])), Boolean(admitted)); if (!admitted) assert.equal(response.body, '');
+    assert.equal(Boolean(f.handler.clientFor(people[0])), Boolean(admitted));
+    if (!admitted) { assert.equal(response.headers['content-length'], '0'); assert.equal(response.body, ''); }
   }
   const before = f.reads.length;
   for (const corrupt of [true, false]) {

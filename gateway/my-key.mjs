@@ -154,7 +154,8 @@ export function createMyKey({ organization, organizationData, authenticate, sess
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
   const reply = (res, status, data) => {
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+      ...(data === undefined ? { 'content-length': 0 } : {}) });
     res.end(data === undefined ? '' : JSON.stringify(data));
   };
   const handle = async (req, res, url) => {
