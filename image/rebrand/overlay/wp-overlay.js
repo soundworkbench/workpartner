@@ -842,6 +842,7 @@
     sidebar(aside);
     messageFade(document.querySelector('[data-testid="message-list-scroller"]'));
     window.wpArchive.render();
+    if (window.wpProjects) window.wpProjects.render();
     modelPicker();
     ghostHandoff();
     pets();
