@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { organizationData, nextModelConfig } from '../gateway/organization/resolve.mjs';
 import crypto from 'node:crypto';
 import { installPreviewClient } from '../preview/client.mjs';
+import { feedbackClient } from '../gateway/feedback-client.mjs';
 import { issueToken, tokenUser } from '../gateway/market-auth.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 
@@ -90,7 +91,7 @@ assert.equal(typeof context.personalRuntime.inspect, 'function');
   assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
 });
 
-async function fixture(t, { disabled = false, extension = false, userImages, feedback } = {}) {
+async function fixture(t, { disabled = false, extension = false, userImages, feedback, myKey } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-services-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = fixtureOrganization(t);
@@ -115,6 +116,10 @@ async function fixture(t, { disabled = false, extension = false, userImages, fee
       fs.mkdirSync(path.join(org.runtime.stateDirectory, 'feedback'), { recursive: true });
       fs.writeFileSync(path.join(org.runtime.stateDirectory, 'feedback/store.json'), feedback.store);
     }
+  }
+  if (myKey) {
+    org.features.myKey = myKey.enabled;
+    org.myKey = { ...org.myKey, allow: myKey.allow || [], publicBaseUrl: 'https://models.example.test' };
   }
   org.identity.appId = 'fixture-app'; org.identity.appSecretFile = path.join(dir, 'identity.secret');
   fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
@@ -178,6 +183,7 @@ export function createGatewayExtension({ docker, runtime, personalRuntime, SESSI
     t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   }
   org.runtime.nextPort = upstream.address().port;
+  if (myKey) org.model.baseUrl = `http://127.0.0.1:${upstream.address().port}/v1`;
   fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
   fs.writeFileSync(path.join(dir, 'transport.mjs'), `
 import http from 'node:http';
@@ -842,5 +848,90 @@ else assert.equal(handler.body, baselines[1]);
       encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir },
     });
     assert.equal(result.status, 0, `preview=${preview} feedback=${enabled}: ` + result.stdout + result.stderr + (result.error?.message || ''));
+  }
+});
+
+test('my key disabled preserves default routes and preview bytes without creating state', async t => {
+  const baseline = await fixture(t, { disabled: true });
+  const f = await fixture(t, { disabled: true, myKey: { enabled: false, allow: ['*'] } });
+  const cookie = await f.login(), baselineCookie = await baseline.login();
+  const client = await f.request('/_wp/preview/client.js', { headers: { cookie } });
+  assert.equal(client.body, (await baseline.request('/_wp/preview/client.js', { headers: { cookie: baselineCookie } })).body);
+  assert.ok(!client.body.includes('my-key'));
+  for (const route of ['/_wp/api/my-key', '/_wp/api/my-key/reveal']) {
+    assert.equal((await f.request(route, { headers: { cookie } })).status, 404);
+    assert.equal((await f.request(route)).status, 302);
+    assert.equal((await f.request(route, { method: 'POST' })).status, 401);
+  }
+  assert.equal(fs.existsSync(path.join(f.dir, 'state/my-key')), false);
+});
+
+test('my key gateway appends after feedback, follows live admission and never logs revealed keys', async t => {
+  const f = await fixture(t, { disabled: true, feedback: { enabled: true, allow: ['*'] }, myKey: { enabled: true, allow: ['*'] } });
+  const cookie = await f.login(), headers = { cookie }, key = 'sk-fixture-gateway-4a6e';
+  fs.writeFileSync(path.join(f.org.runtime.secureDirectory, f.org.model.keyPrefix + f.user.slug + '.key'), key);
+  const client = await f.request('/_wp/preview/client.js', { headers });
+  assert.ok(client.body.indexOf('installMyKey') > client.body.indexOf('installFeedback'));
+  const get = await f.request('/_wp/api/my-key?slug=second-member', { headers });
+  assert.equal(get.status, 200); assert.equal(JSON.parse(get.body).key.masked, 'sk-••••••••4a6e'); assert.ok(!get.body.includes(key));
+  for (const action of ['show', 'copy', 'copy-config']) {
+    const reply = await f.request('/_wp/api/my-key/reveal', { method: 'POST', headers: { ...headers, origin: 'https://workspace.example.test', 'content-type': 'application/json' }, body: JSON.stringify({ action }) });
+    assert.equal(reply.status, 200); assert.deepEqual(JSON.parse(reply.body), { key });
+  }
+  assert.ok(!f.output().includes(key)); assert.ok(!client.body.includes(key));
+  f.org.myKey.allow = []; fs.writeFileSync(path.join(f.dir, 'organization.json'), JSON.stringify(f.org));
+  assert.ok(!(await f.request('/_wp/preview/client.js', { headers })).body.includes('installMyKey'));
+  const denied = await f.request('/_wp/api/my-key', { headers }); assert.equal(denied.status, 404); assert.equal(denied.body, '');
+  f.org.myKey.allow = ['*']; fs.writeFileSync(path.join(f.dir, 'organization.json'), JSON.stringify(f.org));
+  fs.writeFileSync(f.org.runtime.usersFile, '[]');
+  const pending = await f.request('/_wp/api/my-key', { headers }); assert.equal(pending.status, 404); assert.equal(pending.body, '');
+  assert.equal((await f.request('/_wp/api/my-key')).status, 401);
+  assert.ok(!f.output().includes(key));
+});
+
+test('my key preview on and off preserve original serializer bytes unless admitted', t => {
+  for (const preview of [false, true]) for (const enabled of [false, true]) for (const feedbackEnabled of [false, true]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-my-key-client-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const org = fixtureOrganization(t);
+    for (const key of Object.keys(org.features)) org.features[key] = false;
+    org.features.preview = preview; org.features.myKey = enabled; org.features.feedback = feedbackEnabled;
+    org.feedback = { ...org.feedback, allow: ['member'], handlers: [] };
+    org.publicHost = 'workspace.example.test'; org.previewHost = 'preview.example.test';
+    org.model.baseUrl = 'http://127.0.0.1:1/v1'; org.extensions.gatewayModule = '';
+    org.myKey = { allow: ['member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 30 };
+    Object.assign(org.runtime, { gatewayPort: 0, sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'),
+      stateDirectory: path.join(dir, 'state'), secureDirectory: path.join(dir, 'secure'), nextDirectory: path.join(dir, 'workspaces') });
+    const people = [{ slug: 'member', unionId: 'union-member', backend: 'legacy' }, { slug: 'outsider', unionId: 'union-outsider', backend: 'legacy' }];
+    fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key'); fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
+    fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+    const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');
+    const script = `
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import http from 'node:http';
+let server;
+http.Server.prototype.listen = function () { server = this; return this; };
+await import(${JSON.stringify(pathToFileURL(path.join(root, 'gateway/gateway.mjs')).href)});
+const handle = server.listeners('request')[0], people = ${JSON.stringify(people)}, baselines = ${JSON.stringify(people.map(baseline))};
+for (const [index, person] of people.entries()) {
+  const data = Buffer.from(JSON.stringify({ u: person.unionId, n: 'Fixture', e: Math.floor(Date.now() / 1000) + 600 })).toString('base64url');
+  const mac = crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
+  let status, body;
+  await handle({ method: 'GET', url: '/_wp/preview/client.js', headers: { host: 'workspace.example.test', cookie: 'wp_sid=' + data + '.' + mac } },
+    { writeHead(code) { status = code; }, end(value) { body = value ?? ''; } });
+  assert.equal(status, 200);
+  if (${enabled} && index === 0) { assert.ok(body.startsWith(baselines[index] + '\\n;')); assert.ok(body.includes('installMyKey'));
+    if (${feedbackEnabled}) assert.ok(body.indexOf('installMyKey') > body.indexOf('installFeedback')); }
+  else assert.equal(body, baselines[index]);
+  assert.ok(!body.includes(person.unionId));
+}
+assert.ok(!fs.existsSync(${JSON.stringify(path.join(dir, 'state/my-key'))}));
+`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
   }
 });

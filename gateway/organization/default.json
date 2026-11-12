@@ -163,11 +163,17 @@
   },
   "features": {
     "feedback": false,
+    "myKey": false,
     "feishuAuthorization": false,
     "feishuOnboarding": true,
     "marketSkills": true,
     "autoTitle": true,
     "preview": true
+  },
+  "myKey": {
+    "allow": [],
+    "publicBaseUrl": "",
+    "revealSeconds": 30
   },
   "feedback": {
     "allow": [],
