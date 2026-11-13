@@ -132,7 +132,7 @@ function installFeishuBot() {
   const invalidName = '名字只能用汉字、字母、数字、空格和 _ - ·，最多 16 个字';
   function normalizedName(value) {
     const name = value.normalize('NFC').trim();
-    return name && Array.from(name).length <= 16 && !/^(主助手|main)$/i.test(name)
+    return name && Array.from(name).length <= 16 && !/^(主助手|main|s[0-9a-f]{8})$/i.test(name)
       && /^[㐀-䶿一-鿿豈-﫿A-Za-z0-9_·-]+(?: [㐀-䶿一-鿿豈-﫿A-Za-z0-9_·-]+)*$/.test(name) ? name : null;
   }
   const errorText = error => ({ invalid_name: invalidName, name_taken: '这个名字已经有了',
@@ -205,6 +205,16 @@ function installFeishuBot() {
     const retry = button('重试', () => poll(true)); retry.hidden = true;
     view.body.append(status, qr, retry);
     let busy = false, finished = false, stopped = false, interval = 2000, shouldStart = start;
+    function showStatus(data) {
+      qr.hidden = data.status !== 'waiting' || !data.qr;
+      if (!qr.hidden) qr.src = data.qr;
+      status.textContent = { none: '二维码没有准备好，请重试', preparing: '正在准备二维码…', waiting: '等待扫码',
+        connected: '已连接，可以在飞书里找「' + agent.name + '」了', expired: '二维码已过期，请重试',
+        failed: '创建没有成功，请重试', needs_identity: '请给新机器人发 /whoami，保留返回的本人 ID，再请管理员完成连接。' }[data.status] || '操作没有成功，请稍后重试';
+      stopped = ['none', 'expired', 'failed'].includes(data.status);
+      retry.hidden = !stopped;
+      interval = data.status === 'needs_identity' ? 10000 : 2000;
+    }
     async function poll(restart = false) {
       clearTimeout(setupTimer);
       if (modal !== view.element || document.hidden || busy || finished || stopped && !restart) return;
@@ -214,22 +224,20 @@ function installFeishuBot() {
         const data = await request('/agents/' + agent.id + '/setup', restart || shouldStart);
         shouldStart = false;
         if (modal !== view.element) return;
-        qr.hidden = data.status !== 'waiting' || !data.qr;
-        if (!qr.hidden) qr.src = data.qr;
-        status.textContent = { none: '还没连接飞书', preparing: '正在准备二维码…', waiting: '等待扫码',
-          connected: '已连接，可以在飞书里找「' + agent.name + '」了', expired: '二维码已过期，请重试',
-          failed: '创建没有成功，请重试', needs_identity: '请给新机器人发 /whoami，保留返回的本人 ID，再请管理员完成连接。' }[data.status] || '操作没有成功，请稍后重试';
-        retry.hidden = !['none', 'expired', 'failed'].includes(data.status);
-        stopped = ['expired', 'failed'].includes(data.status);
-        interval = data.status === 'needs_identity' ? 10000 : 2000;
+        showStatus(data);
         if (data.status === 'connected') { finished = true; await refresh(false, true); }
       } catch (error) {
-        if (modal === view.element) { status.textContent = errorText(error); retry.hidden = false; }
+        if (modal === view.element) {
+          stopped = error.message === 'not_found';
+          if (stopped) qr.hidden = true;
+          status.textContent = errorText(error); retry.hidden = false;
+        }
       } finally {
         busy = false; retry.disabled = false;
         if (modal === view.element && !document.hidden && !finished && !stopped) setupTimer = setTimeout(safe(() => poll()), interval);
       }
     }
+    if (!start && agent.setup === 'none') showStatus({ status: 'none' });
     pollSetup = () => poll(); poll();
   }
   function confirmDelete(card, trigger, agent) {
@@ -297,7 +305,9 @@ function installFeishuBot() {
       const setupText = bot ? '' : { waiting: '等待扫码', needs_identity: '待管理员完成连接' }[agent.setup] || '还没连接飞书';
       const identity = node('div', undefined, 'wp-feishu-bot-identity'); identity.append(title);
       if (subAgents.enabled) identity.append(node('small', agent ? '子助手' : '主助手', 'wp-feishu-bot-tag'));
-      identity.append(bot ? state(bot) : node('span', setupText, 'wp-feishu-bot-state'));
+      const cardState = bot ? state(bot) : node('span', setupText, 'wp-feishu-bot-state');
+      if (!bot) cardState.setAttribute('aria-hidden', 'true');
+      identity.append(cardState);
       heading.append(avatar(bot || agent), identity);
       const footer = node('div', undefined, 'wp-feishu-bot-footer');
       if (!bot) footer.className += ' wp-feishu-bot-unconnected';

@@ -278,6 +278,11 @@ test('sub-agent cards follow main, label kinds and expose only appropriate actio
   assert.equal(cards[2].querySelector('.wp-feishu-bot-avatar').textContent, '助');
   assert.deepEqual(cards.slice(2).map(c => c.querySelector('.wp-feishu-bot-state').textContent), ['等待扫码', '待管理员完成连接', '还没连接飞书']);
   assert.deepEqual(cards.slice(2).map(c => c.querySelector('.wp-feishu-bot-summary').textContent), ['等待扫码', '待管理员完成连接', '还没连接飞书']);
+  for (const card of cards.slice(2)) {
+    assert.equal(card.querySelector('.wp-feishu-bot-state').attributes['aria-hidden'], 'true');
+    assert.equal(card.querySelector('.wp-feishu-bot-summary').attributes['aria-hidden'], undefined);
+  }
+  for (const card of cards.slice(0, 2)) assert.equal(card.querySelector('.wp-feishu-bot-state').attributes['aria-hidden'], undefined);
   assert.equal(findButton(cards[3], '扫码连接'), undefined);
   for (let i = 0; i < cards.length; i++) {
     assert.equal(cards[i].querySelectorAll('a').length, i < 2 ? 2 : 0);
@@ -368,7 +373,7 @@ test('setup pauses hidden, resumes visible, and stops on close including infligh
   assert.equal([...p.timers.values()].some(t => t.delay === 2000), false);
 });
 
-for (const terminal of ['expired', 'failed']) test(`setup ${terminal} stops polling until retry, and needs_identity polls every ten seconds`, async () => {
+for (const terminal of ['none', 'expired', 'failed']) test(`setup ${terminal} stops polling until retry, and needs_identity polls every ten seconds`, async () => {
   let setup = terminal;
   const p = page({ home: true, responseData: payload(), handleRequest: url =>
     url.endsWith('/setup') ? jsonResponse({ status: setup }) : undefined }); await settle();
@@ -376,7 +381,7 @@ for (const terminal of ['expired', 'failed']) test(`setup ${terminal} stops poll
   const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
   const pollingDelays = () => [...p.timers.values()].map(t => t.delay).filter(delay => delay === 2000 || delay === 10000);
   const dialog = p.document.querySelector('dialog');
-  assert.match(dialog.textContent, terminal === 'expired' ? /二维码已过期/ : /创建没有成功/);
+  assert.match(dialog.textContent, { none: /二维码没有准备好，请重试/, expired: /二维码已过期/, failed: /创建没有成功/ }[terminal]);
   assert.equal(findButton(dialog, '重试').hidden, false);
   assert.deepEqual(pollingDelays(), []);
   await tick(p, 60000); assert.equal(setupRequests().length, 1);
@@ -394,6 +399,80 @@ for (const terminal of ['expired', 'failed']) test(`setup ${terminal} stops poll
   p.document.hidden = false; await p.listeners.visibilitychange(); await settle(); assert.deepEqual(pollingDelays(), [10000]);
   setup = 'waiting'; await tick(p, 10000); assert.deepEqual(pollingDelays(), [2000]);
   setup = terminal; await tick(p, 2000); assert.deepEqual(pollingDelays(), []);
+});
+
+test('create and rename reject reserved agent-id names locally and allow near matches', async () => {
+  for (const rename of [false, true]) {
+    const p = page({ home: true, responseData: payload() }); await settle();
+    if (rename) {
+      const card = p.document.querySelectorAll('.wp-feishu-bot-card')[1];
+      await findButton(card, '…').fire('click'); await findButton(card, '改名').fire('click');
+    } else await p.document.querySelector('.wp-feishu-bot-add').fire('click');
+    const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
+    const save = findButton(dialog, rename ? '保存' : '下一步：扫码创建机器人');
+    for (const value of ['s1234abcd', 'S1234ABCD', 'sAbCd0123', '  S00000001  ']) {
+      input.value = value; await input.fire('input');
+      assert.equal(save.disabled, true); assert.equal(input.attributes['aria-invalid'], 'true');
+      assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, '名字只能用汉字、字母、数字、空格和 _ - ·，最多 16 个字');
+      await submit(dialog);
+      assert.equal(p.requests.some(r => r.options.method === 'POST'), false);
+    }
+    for (const value of ['s1234567', 's123456789', 's1234567g']) {
+      input.value = value; await input.fire('input');
+      assert.equal(save.disabled, false); assert.equal(input.attributes['aria-invalid'], 'false');
+      assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, '');
+    }
+  }
+});
+
+test('create with setup none shows retry immediately and starts only when retry is clicked', async () => {
+  const p = page({ home: true, responseData: payload(), handleRequest: (url, options) => {
+    if (url.endsWith('/agents')) return jsonResponse({ agent: agent(5, 'none') }, 201);
+    if (url.endsWith('/setup')) return jsonResponse({ status: options.method === 'POST' ? 'preparing' : 'waiting', qr: 'data:image/png;base64,YQ==' });
+  } }); await settle();
+  await p.document.querySelector('.wp-feishu-bot-add').fire('click');
+  const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
+  input.value = '新助手'; await input.fire('input'); await submit(dialog); await settle();
+  const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
+  assert.match(dialog.textContent, /二维码没有准备好，请重试/);
+  assert.equal(dialog.querySelector('img').hidden, true);
+  assert.equal(findButton(dialog, '重试').hidden, false);
+  assert.equal([...p.timers.values()].some(t => t.delay === 2000 || t.delay === 10000), false);
+  await tick(p, 60000);
+  p.document.hidden = true; await p.listeners.visibilitychange();
+  p.document.hidden = false; await p.listeners.visibilitychange(); await settle();
+  assert.equal(setupRequests().length, 0);
+  await findButton(dialog, '重试').fire('click');
+  assert.deepEqual(setupRequests().map(r => [r.url, r.options.method]), [['/_wp/feishu-bot/agents/s00000005/setup', 'POST']]);
+  assert.match(dialog.textContent, /正在准备二维码/);
+  await tick(p, 2000);
+  assert.equal(setupRequests().at(-1).options.method, 'GET');
+  assert.equal(dialog.querySelector('img').hidden, false);
+  assert.equal(p.requests.filter(r => r.url.endsWith('/agents')).length, 1);
+});
+
+test('setup not_found stops polling, hides an old QR and leaves the card feature available', async () => {
+  let missing = false;
+  const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/setup')
+    ? missing ? jsonResponse({ error: 'not_found' }, 404) : jsonResponse({ status: 'waiting', qr: 'data:image/png;base64,YQ==' }) : undefined });
+  await settle(); await findButton(p.document, '扫码连接').fire('click'); await settle();
+  const dialog = p.document.querySelector('dialog');
+  assert.equal(dialog.querySelector('img').hidden, false);
+  missing = true; await tick(p, 2000);
+  const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
+  assert.equal(setupRequests().at(-1).options.method, 'GET');
+  assert.match(dialog.textContent, /操作没有成功，请稍后重试/);
+  assert.equal(dialog.querySelector('img').hidden, true);
+  assert.equal([...p.timers.values()].some(t => t.delay === 2000 || t.delay === 10000), false);
+  await tick(p, 60000);
+  p.document.hidden = true; await p.listeners.visibilitychange();
+  p.document.hidden = false; await p.listeners.visibilitychange(); await settle();
+  assert.equal(setupRequests().length, 2);
+  assert.ok(p.document.querySelector('.wp-feishu-bot-section'));
+  assert.equal(findButton(dialog, '重试').hidden, false);
+  missing = false; await findButton(dialog, '重试').fire('click');
+  assert.equal(setupRequests().at(-1).options.method, 'POST');
+  assert.equal([...p.timers.values()].some(t => t.delay === 2000), true);
 });
 
 test('rename validates, reports conflict and success; delete confirms; sub restart targets its own id', async () => {

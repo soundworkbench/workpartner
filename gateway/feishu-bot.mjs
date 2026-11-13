@@ -14,7 +14,7 @@ const validAppId = value => typeof value === 'string' && APP_ID.test(value) && !
 function normalizeAgentName(value) {
   if (typeof value !== 'string') throw fail(400, 'invalid_name');
   const name = value.normalize('NFC').trim();
-  if (!name || Array.from(name).length > 16 || /^(主助手|main)$/i.test(name)
+  if (!name || Array.from(name).length > 16 || /^(主助手|main|s[0-9a-f]{8})$/i.test(name)
     || !/^[㐀-䶿一-鿿豈-﫿A-Za-z0-9_·-]+(?: [㐀-䶿一-鿿豈-﫿A-Za-z0-9_·-]+)*$/.test(name)) throw fail(400, 'invalid_name');
   return name;
 }
@@ -78,7 +78,7 @@ function readJson(req) {
 }
 
 export function createFeishuBot({ organization, organizationData, authenticate, runtime }) {
-  const pending = new Map(), restarting = new Map(), writes = new Map();
+  const pending = new Map(), restarting = new Map(), writes = new Map(), subAgentSupport = new Map();
   const origin = organization.server.publicOrigin || `https://${organization.server.publicHost}`;
   function policy(sub = false) {
     try {
@@ -96,6 +96,7 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
       const task = botCommand(user, 'info', ...(refresh ? ['--refresh'] : [])).then(data => {
         if (!Array.isArray(data.bots)) throw fail(503);
         const supported = Array.isArray(data.agents);
+        subAgentSupport.set(user.slug, supported);
         const agents = supported ? [...data.agents].sort((a, b) => createdAt(a) - createdAt(b)).flatMap(publicAgent) : [];
         return { bots: data.bots.flatMap(publicBot), agents, supported,
           count: supported ? data.agents.filter(a => a?.kind === 'sub').length : 0,
@@ -130,6 +131,7 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
       ...(status === 'waiting' && typeof data.qr === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(data.qr) && !data.qr.includes('\n') ? { qr: data.qr } : {}) };
   }
   async function requireSubAgents(user) {
+    if (subAgentSupport.get(user.slug) === true) return;
     if (!(await info(user)).supported) throw fail(404, 'not_found');
   }
   const start = (user, id) => command(user, 'feishu-onboard.py', ['start', '--agent', id], { timeout: 10000, detached: true });

@@ -291,6 +291,55 @@ test('create enforces container limit capped at five, including unconnected agen
   assert.deepEqual((await f.request('/agents', named('助理'))).data, { error: 'unavailable' });
 });
 
+test('create and rename reject reserved agent-id names before exec but accept near matches', async t => {
+  const f = await subFixture(t, [sub(1)]);
+  for (const route of ['/agents', '/agents/s00000001/rename']) {
+    for (const name of ['s1234abcd', 'S1234ABCD', 'sAbCd0123', '  S00000001  ']) {
+      const before = f.calls.length;
+      const response = await f.request(route, named(name));
+      assert.equal(response.status, 400);
+      assert.deepEqual(response.data, { error: 'invalid_name' });
+      assert.equal(f.calls.length, before);
+    }
+    for (const name of ['s1234567', 's123456789', 's1234567g']) {
+      const response = await f.request(route, named(name));
+      assert.equal(response.status, route === '/agents' ? 201 : 200);
+      assert.equal(response.data.agent.name, name);
+    }
+  }
+});
+
+test('repeated setup reads reuse support learned from setup, bots or a write', async t => {
+  for (const warmup of [null, '/bots', '/agents', '/agents/s00000001/rename']) {
+    const f = await subFixture(t, [sub(1)]);
+    if (warmup) assert.ok((await f.request(warmup, warmup === '/bots' ? {} : named('助手'))).status < 400);
+    for (let i = 0; i < 4; i++) {
+      const response = await f.request('/agents/s00000001/setup');
+      assert.equal(response.status, 200);
+      assert.equal(response.data.status, 'waiting');
+    }
+    assert.equal(f.calls.filter(c => c[1][2] === 'info').length, 1, String(warmup));
+    assert.equal(f.calls.filter(c => c[1][2] === 'status').length, 4);
+  }
+});
+
+test('support cache is per slug, follows latest info and retries unsupported containers', async t => {
+  const f = await subFixture(t);
+  f.config({ features: { feishuBot: true }, feishuBot: { allow: ['*'], subAgents: { allow: ['*'] } } });
+  let supported = true;
+  f.execute(async (_slug, cmd) => cmd[2] === 'info'
+    ? result({ ok: true, bots: [], ...(supported ? { agents: [] } : {}) }) : result({ status: 'waiting' }));
+  assert.equal((await f.request()).data.subAgents.enabled, true);
+  supported = false;
+  assert.equal((await f.request('/agents/s00000001/setup', { who: 'other' })).status, 404);
+  assert.equal((await f.request('/agents/s00000001/setup')).status, 200);
+  assert.equal((await f.request('/bots?refresh=1')).data.subAgents.enabled, false);
+  for (let i = 0; i < 2; i++) assert.equal((await f.request('/agents/s00000001/setup')).status, 404);
+  supported = true;
+  for (let i = 0; i < 2; i++) assert.equal((await f.request('/agents/s00000001/setup')).status, 200);
+  assert.deepEqual(f.calls.filter(c => c[1][2] === 'info').map(c => c[0]), ['tang', 'other', 'tang', 'tang', 'tang', 'tang']);
+});
+
 test('simultaneous creates serialize and second info observes the newly created fifth agent', async t => {
   const f = await subFixture(t, [1, 2, 3, 4].map(i => sub(i)));
   const responses = await Promise.all([f.request('/agents', named('甲')), f.request('/agents', named('乙'))]);
@@ -331,9 +380,8 @@ test('setup whitelists status/QR/expiry and starts only none, expired or failed'
     assert.deepEqual((await f.request('/agents/s00000001/setup')).data, expected);
     const before = f.calls.length, starts = ['unconnected', 'none', 'expired', 'failed'].includes(state);
     assert.deepEqual((await f.request('/agents/s00000001/setup', post)).data, starts ? { status: 'preparing' } : expected);
-    assert.equal(f.calls.length, before + (starts ? 3 : 2));
-    assert.deepEqual(f.calls[before][1], ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'info']);
-    assert.deepEqual(f.calls[before + 1][1], ['python3', '/opt/workpartner/bin/feishu-onboard.py', 'status', '--agent', 's00000001']);
+    assert.equal(f.calls.length, before + (starts ? 2 : 1));
+    assert.deepEqual(f.calls[before][1], ['python3', '/opt/workpartner/bin/feishu-onboard.py', 'status', '--agent', 's00000001']);
   }
   for (const qr of ['https://private', 'data:image/svg+xml;base64,YQ==', 'data:image/png;base64,YQ==\n', {}]) {
     f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [] })
@@ -416,7 +464,7 @@ test('failed writes release the per-user queue; rename and delete never overlap'
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(f.calls.map(c => c[1][2]), ['info', 'rename']);
   release(); assert.deepEqual((await Promise.all([rename, deletion])).map(r => r.status), [409, 200]);
-  assert.deepEqual(f.calls.map(c => c[1][2]), ['info', 'rename', 'info', 'delete']);
+  assert.deepEqual(f.calls.map(c => c[1][2]), ['info', 'rename', 'delete']);
 });
 
 
