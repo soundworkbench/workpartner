@@ -4,6 +4,7 @@ import { createSuite, LONG } from './lib/suite.mjs';
 import { ORIGIN } from './lib/harness.mjs';
 
 const BUTTON = 'button[aria-label="语音输入"]', AREA = '#voice-composer textarea';
+const SEND = '[data-testid="sendbox-send-btn"], [data-testid="guid-send-btn"], .sendbox-stop-button';
 const TEXT = '语音夹具文字';
 const suite = createSuite('voice', async s => {
   s.main = await s.harness.startGateway('voice', { feedback: false, voice: { allow: ['member'] }, asrUrl: s.harness.voice.baseUrl });
@@ -24,13 +25,43 @@ async function toggle(page) {
   await page.click(BUTTON); await recorded(page); await page.click(BUTTON);
   await page.waitForSelector(BUTTON + '[data-state="idle"]');
 }
-async function noOverlap(page) {
+async function placement(page, singleLine = false) {
+  await page.waitForFunction(selector => {
+    const wrap = document.querySelector('.wp-voice'), send = document.querySelector(selector);
+    return wrap && send && wrap.parentElement === send.parentElement && wrap.nextElementSibling === send;
+  }, SEND);
+  assert.equal(await page.locator('.wp-voice').count(), 1);
+  assert.equal(await page.locator(BUTTON).count(), 1);
   assert.deepEqual(await page.evaluate(() => {
-    const a = document.querySelector('.wp-voice-button').getBoundingClientRect(), b = document.querySelector('[data-testid="send"]').getBoundingClientRect();
+    const wrap = document.querySelector('.wp-voice'), a = wrap.getBoundingClientRect(), b = wrap.nextElementSibling.getBoundingClientRect();
+    const model = wrap.parentElement.querySelector('.wp-pick-btn');
     return { overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       overlap: a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top,
-      inside: a.width > 0 && a.left >= 0 && a.right <= innerWidth && b.width > 0 && b.left >= 0 && b.right <= innerWidth };
-  }), { overflow: false, overlap: false, inside: true });
+      inside: a.width > 0 && a.left >= 0 && a.right <= innerWidth && b.width > 0 && b.left >= 0 && b.right <= innerWidth,
+      modelBefore: !model || Boolean(model.compareDocumentPosition(wrap) & Node.DOCUMENT_POSITION_FOLLOWING),
+      zeroMargin: getComputedStyle(wrap).margin === '0px' };
+  }), { overflow: false, overlap: false, inside: true, modelBefore: true, zeroMargin: true });
+  const boxes = await page.evaluate(() => {
+    const wrap = document.querySelector('.wp-voice');
+    const rect = el => { const { left, right, top, bottom, width } = el.getBoundingClientRect(); return { left, right, top, bottom, width }; };
+    const model = document.querySelector('#voice-composer .wp-pick-btn');
+    return { mic: rect(wrap), send: rect(wrap.nextElementSibling), area: rect(document.querySelector('#voice-composer textarea')),
+      model: rect(model), sameModelParent: model.parentElement === wrap.parentElement,
+      modelFirst: model === model.parentElement.firstElementChild, modelRow: Boolean(model.closest('.wp-pick-row')) };
+  });
+  const { mic, send, area, model } = boxes;
+  assert.ok(mic.left < mic.right && mic.right <= send.left, 'microphone is left of send/stop');
+  assert.ok(mic.top < send.bottom && send.top < mic.bottom, 'microphone and send/stop share a row');
+  assert.equal(boxes.modelFirst, true, 'model remains the first child');
+  if (singleLine) {
+    assert.ok(area.right <= mic.left && area.top < mic.bottom && mic.top < area.bottom, 'single-line microphone is right of input');
+    assert.equal(boxes.sameModelParent, false);
+    assert.equal(boxes.modelRow, true);
+    assert.ok(model.top >= mic.bottom, 'single-line model stays on the following row');
+  } else {
+    assert.equal(boxes.sameModelParent, true);
+    assert.ok(model.width > 0 && model.right <= mic.left, 'model right ≤ microphone left < microphone right ≤ send left');
+  }
 }
 
 test('tap toggle inserts recognized WAV text through input event and never sends', LONG, async () => {
@@ -302,22 +333,78 @@ test('admission hides button and disabled feature leaves client unchanged; previ
   }
 });
 
+test('missing send button prevents mounting and unrelated mutations leave a correctly placed microphone alone', LONG, async () => {
+  await session('mount-guard', {}, async ({ page }) => {
+    for (const route of ['#/conversation/fixture', '#/guid']) {
+      await page.goto(ORIGIN + '/' + route); await page.waitForSelector(BUTTON);
+      await placement(page);
+      const moves = await page.evaluate(async () => {
+        const wrap = document.querySelector('.wp-voice');
+        let moves = 0;
+        const observer = new MutationObserver(records => {
+          for (const record of records) if ([...record.addedNodes, ...record.removedNodes].includes(wrap)) moves++;
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        const unrelated = document.createElement('div'); document.body.append(unrelated);
+        for (let i = 0; i < 5; i++) await new Promise(requestAnimationFrame);
+        observer.disconnect(); unrelated.remove(); return moves;
+      });
+      assert.equal(moves, 0, 'observer does not repeatedly move an already adjacent microphone');
+      await page.evaluate(async selector => {
+        document.querySelector(selector).remove(); document.querySelector('.wp-voice').remove();
+        for (let i = 0; i < 5; i++) await new Promise(requestAnimationFrame);
+      }, SEND);
+      assert.equal(await page.locator(BUTTON).count(), 0, 'no fallback to tools or submit container');
+      await page.evaluate(() => window.__renderComposer());
+      await placement(page);
+    }
+  });
+});
+
 for (const width of [1280, 390, 360]) {
-  test(`home and chat at ${width}px: no overflow/overlap, reinsert after rendering, ignore transition clone`, LONG, async () => {
+  test(`home and chat at ${width}px: model/mic/send order, replacement, token insertion and transition clone`, LONG, async () => {
     await session('layout-' + width, { viewport: { width, height: 844 }, avatar: width >= 768 }, async ({ page }) => {
       for (const route of ['#/conversation/fixture', '#/guid']) {
+        const home = route.includes('guid'), singleLine = !home && width < 768;
         await page.goto(ORIGIN + '/' + route); await page.waitForSelector(BUTTON);
-        assert.equal(await page.locator(BUTTON).count(), 1); await noOverlap(page);
-        if (width < 768 && route.includes('conversation')) assert.equal(await page.locator('.sendbox-tools-mobile-compact ' + BUTTON).count(), 1);
-        await suite.shot(page, `${width}-${route.includes('guid') ? 'home' : 'chat'}`);
+        await placement(page, singleLine);
+        await suite.shot(page, `${width}-${home ? 'home' : singleLine ? 'chat-single' : 'chat-multi'}`);
+        const modes = singleLine ? [false, true, false] : [false];
+        for (const multiline of modes) {
+          if (singleLine) {
+            await page.evaluate(value => {
+              window.__previousSendParent = document.querySelector('[data-testid="sendbox-send-btn"]').parentElement;
+              window.__previousArea = document.querySelector('#voice-composer textarea');
+              window.__setComposerMultiline(value);
+            }, multiline);
+            assert.equal(await page.evaluate(() => !window.__previousSendParent.isConnected
+              && window.__previousArea === document.querySelector('#voice-composer textarea')), true);
+            assert.equal(await page.locator('.wp-pick-row').count(), multiline ? 0 : 1);
+          }
+          const compact = singleLine && !multiline;
+          await placement(page, compact);
+          if (singleLine && multiline) await suite.shot(page, `${width}-chat-multi`);
+          for (const stopping of [true, false]) {
+            await page.evaluate(value => window.__setComposerStopping(value), stopping);
+            assert.equal(await page.locator('.sendbox-stop-button').count(), stopping ? 1 : 0);
+            await placement(page, compact);
+          }
+          await page.evaluate(() => window.__insertComposerToken());
+          await placement(page, compact);
+          assert.equal(await page.locator('.wp-voice').evaluate(wrap => wrap.previousElementSibling.className), 'fixture-token');
+          await page.evaluate(() => window.__setComposerStopping(true));
+          await placement(page, compact);
+          await page.evaluate(() => window.__setComposerStopping(false));
+          await placement(page, compact);
+        }
         await page.evaluate(() => { const area = document.querySelector('#voice-composer textarea'); area.replaceWith(area.cloneNode(true)); });
         await page.waitForFunction(() => document.querySelector('.wp-voice')?._area === document.querySelector('#voice-composer textarea'));
-        assert.equal(await page.locator(BUTTON).count(), 1);
+        await placement(page, singleLine);
         await page.evaluate(() => window.__renderComposer()); await page.waitForSelector(BUTTON);
-        assert.equal(await page.locator(BUTTON).count(), 1);
+        await placement(page, singleLine);
         await page.evaluate(() => { const clone = document.querySelector('#voice-composer').cloneNode(true); clone.id = ''; clone.className = 'wp-transition-composer'; document.body.append(clone); });
         await page.waitForFunction(() => !document.querySelector('.wp-transition-composer .wp-voice'));
-        assert.equal(await page.locator(BUTTON).count(), 1); await noOverlap(page);
+        await placement(page, singleLine);
         await page.evaluate(() => document.querySelector('.wp-transition-composer').remove());
         await toggle(page); assert.equal(await page.inputValue(AREA), TEXT);
       }

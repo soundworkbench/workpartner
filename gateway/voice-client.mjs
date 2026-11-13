@@ -160,10 +160,9 @@ function installVoice(resample, encodeWav) {
     });
     document.querySelectorAll(selector).forEach(area => {
       if (area.closest('.wp-transition-composer')) return;
-      const panel = area.closest('.sendbox-panel'), home = area.closest('[class*="_guidInputInner"]');
-      const actions = panel?.querySelector('.sendbox-actions'), compact = panel?.querySelector('.sendbox-tools-mobile-compact');
-      const submit = home?.querySelector('[class*="_actionSubmit"]');
-      const slot = visible(actions) ? actions : compact || submit?.parentElement;
+      const panel = area.closest('.sendbox-panel, [class*="_guidInputInner"]');
+      const send = panel?.querySelector('[data-testid="sendbox-send-btn"], [data-testid="guid-send-btn"], .sendbox-stop-button');
+      const slot = send?.parentElement;
       if (!slot) return;
       let wrap = [...document.querySelectorAll('.wp-voice')].find(el => el._area === area);
       if (!wrap) {
@@ -202,9 +201,7 @@ function installVoice(resample, encodeWav) {
           if (unsupported) hint(unsupported); else if (current) finish(); else start(area);
         });
       }
-      if (wrap.parentElement !== slot) {
-        if (submit?.parentElement === slot) slot.insertBefore(wrap, submit); else slot.append(wrap);
-      }
+      if (wrap.parentElement !== slot || wrap.nextElementSibling !== send) slot.insertBefore(wrap, send);
     });
     if (current && !current.area.isConnected && current.state !== 'recognizing') cancel();
     render();
@@ -215,7 +212,7 @@ function installVoice(resample, encodeWav) {
   }
   function init() {
     const style = node('style', 'wp-voice-style'); style.textContent = `
-.wp-voice { position:relative; display:inline-flex; align-items:center; flex:0 0 auto; margin:0 4px; vertical-align:middle; }
+.wp-voice { position:relative; display:inline-flex; align-items:center; flex:0 0 auto; margin:0; vertical-align:middle; }
 .wp-voice-button { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border:1px solid var(--wp-line); border-radius:50%; background:var(--wp-card); color:var(--wp-ink-2); cursor:pointer; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
 .wp-voice-button:hover { background:var(--wp-hover); }
 .wp-voice-button[data-state="recording"] { color:var(--wp-danger, #d92d20); border-color:currentColor; }
