@@ -30,7 +30,9 @@ export function findChrome() {
 export async function launch(harness) {
   return chromium.launch({
     executablePath: findChrome(), headless: true,
-    args: ['--no-sandbox', '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', `--host-resolver-rules=MAP ${HOST} 127.0.0.1:${harness.frontPort}`],
+    args: ['--no-sandbox', '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', `--host-resolver-rules=MAP ${HOST} 127.0.0.1:${harness.frontPort}`,
+      ...(harness.group === 'voice' ? ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+        `--use-file-for-fake-audio-capture=${harness.voice.audioFile}`] : [])],
   });
 }
 

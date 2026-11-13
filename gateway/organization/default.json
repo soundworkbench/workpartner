@@ -164,11 +164,15 @@
   "features": {
     "feedback": false,
     "myKey": false,
+    "voice": false,
     "feishuAuthorization": false,
     "feishuOnboarding": true,
     "marketSkills": true,
     "autoTitle": true,
     "preview": true
+  },
+  "voice": {
+    "allow": []
   },
   "myKey": {
     "allow": [],

@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [menu, flow, access, my-key]
+        group: [menu, flow, access, my-key, voice]
     defaults:
       run:
         shell: bash
