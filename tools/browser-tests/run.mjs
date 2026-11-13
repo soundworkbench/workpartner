@@ -1,9 +1,9 @@
-// Usage: node run.mjs [group ...]   (groups: menu, flow, access, my-key; default: all, one after another)
+// Usage: node run.mjs [group ...]   (groups: menu, flow, access, my-key, feishu-bot; default: all, one after another)
 // Exit code is non-zero when a test fails. Screenshots and gateway logs go to ./output (or BROWSER_TESTS_OUTPUT).
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const GROUPS = ['menu', 'flow', 'access', 'my-key'];
+const GROUPS = ['menu', 'flow', 'access', 'my-key', 'feishu-bot'];
 const wanted = process.argv.slice(2);
 const unknown = wanted.filter(name => !GROUPS.includes(name));
 if (unknown.length) { console.error(`Unknown group: ${unknown.join(', ')}. Known groups: ${GROUPS.join(', ')}.`); process.exit(2); }
