@@ -163,12 +163,42 @@ The voice API requires the public same-origin `Origin` and `audio/wav`. Disabled
 
 The browser captures mono PCM, resamples to 16 kHz and uploads a 16-bit WAV. Press and hold for more than 300 ms, then release to recognize; a short tap starts recording and a second tap stops it. Escape or releasing outside the button cancels. Recording stops automatically at 60 seconds, with a warning from 50 seconds; recordings shorter than 0.5 seconds are rejected locally. Recognition inserts at the focused textarea's caret or appends with a space when unfocused, and never sends the message. Microphone access requires a secure context and browser permission; AudioWorklet is preferred with a ScriptProcessor fallback. Every completed or cancelled recording stops its media tracks.
 
-`features.feishuBot` controls “我的飞书机器人”（首页输入框下方的机器人卡片区）, and `GET /_wp/feishu-bot/bots` / `POST /_wp/feishu-bot/reconnect`. 用户菜单里的入口会跳回首页，滚动到卡片区并短暂高亮。The default is `false`; `feishuBot` defaults to `{"allow":[]}`. Both the feature flag and allow list are re-read through `organizationData()` for each request and client admission. Only users with `backend === 'aionui'` can access this feature. The allow list accepts provisioned slugs, union IDs or `"*"`; malformed/unreadable policy denies access. Unauthenticated, disabled and non-admitted requests (including non-AionUi users) return 404. Non-admitted pages receive no client script.
+`features.feishuBot` controls “我的飞书机器人”（首页输入框下方的机器人卡片区）, and `GET /_wp/feishu-bot/bots` / `POST /_wp/feishu-bot/reconnect`. 用户菜单里的入口会跳回首页，滚动到卡片区并短暂高亮。The default is `false`; `feishuBot` defaults to `{"allow":[],"subAgents":{"allow":[]}}`. Both the feature flag and allow list are re-read through `organizationData()` for each request and client admission. Only users with `backend === 'aionui'` can access this feature. The allow list accepts provisioned slugs, union IDs or `"*"`; malformed/unreadable policy denies access. Unauthenticated, disabled and non-admitted requests (including non-AionUi users) return 404. Non-admitted pages receive no client script.
 
-For the first rollout, set `"features": {"feishuBot": true}` and `"feishuBot": {"allow": ["tang"]}` in the deployment organization configuration; keep the repository defaults disabled. The homepage cards list all configured bots, with chat, management and inline reconnect actions. Visible pages refresh once every 60 seconds; a successful reconnect refreshes once after 3 seconds. “刷新” requests fresh metadata with `?refresh=1`. Concurrent info requests for the same user share the running command, including mixed normal/refresh requests; the first request determines whether that command uses `--refresh`.
+For the first rollout, set `"features": {"feishuBot": true}` and `"feishuBot": {"allow": ["tang"], "subAgents": {"allow": ["tang"]}}` in the deployment organization configuration; keep the repository defaults disabled. The homepage cards list the main assistant and, for users admitted to sub-agents, its sub-assistants, with chat, management and inline reconnect actions. Visible pages refresh once every 60 seconds; a successful reconnect refreshes once after 3 seconds. “刷新” requests fresh metadata with `?refresh=1`. Concurrent info requests for the same user share the running command, including mixed normal/refresh requests; the first request determines whether that command uses `--refresh`.
 
 Background refresh failures (including returning to a visible page) show “数据可能已过期” beside the cards heading without a toast; the next successful refresh clears that label. Only a failed manual “刷新” shows a refresh error toast. Reconnect progress remains visible until the request completes, then its success or failure toast disappears after 3 seconds.
 
-The gateway runs `python3 /opt/workpartner/bin/wp-feishu-bot.py info [--refresh]` or `restart` as `runtime.uid`, with a 10-second runtime timeout for info and a 20-second timeout for restart. Both commands have a 1 MiB output limit; exceeding it returns 503 `{"error":"unavailable"}`. GET returns only `appId,name,avatar,online,activate,lastEventAt,error,openUrl`; App IDs must match `^cli_[A-Za-z0-9]+$`, names are limited to 64 characters, and avatars must start with a PNG/JPEG/GIF/WebP base64 data URL prefix. Only known status/error values and timestamp strings are exposed. `openUrl` is built from the validated App ID using the Feishu bot AppLink. Failed execs and malformed/failed worker replies produce 503 `{"error":"unavailable"}`, never raw worker output. Reconnect requires the configured public Origin, an `application/json` content type and a JSON object of at most 1 KiB (the client sends `{}`). It restarts the Feishu service only; old images without the worker return 503 for this manual action.
+The gateway runs `python3 /opt/workpartner/bin/wp-feishu-bot.py info [--refresh]` or `restart` as `runtime.uid`, with a 10-second runtime timeout for info and a 20-second timeout for restart. Both commands have a 1 MiB output limit; exceeding it returns 503 `{"error":"unavailable"}`. The `bots` array returns only `agentId,appId,name,avatar,online,activate,lastEventAt,error,openUrl`; App IDs must match `^cli_[A-Za-z0-9]+$`, names are limited to 64 characters, and avatars must start with a PNG/JPEG/GIF/WebP base64 data URL prefix. Only known status/error values and timestamp strings are exposed. `openUrl` is built from the validated App ID using the Feishu bot AppLink. Failed execs and malformed worker replies produce 503 `{"error":"unavailable"}`, never raw worker output. Reconnect requires the configured public Origin, an `application/json` content type and a JSON object of at most 1 KiB (the client sends `{}`). It restarts the Feishu service only; old images without the worker return 503 for this manual action.
 
 Feishu onboarding uses that same service restart for all users, independently of `feishuBot` admission. If it fails (including on older images without the worker), onboarding falls back to the existing container restart. The `restarting → connected` state transition and AionUi connection-cache invalidation remain unchanged.
+
+`feishuBot.subAgents.allow` 是第一步名单下的第二层子开关，不新增 `features` 键。用户必须同时通过 `features.feishuBot`、`feishuBot.allow` 和 `feishuBot.subAgents.allow`；子名单也支持 slug、unionId 和 `"*"`，每次请求通过 `organizationData()` 重读，非数组或含非字符串项按空名单处理。默认空名单通过组织配置的 deep merge 保留；上线时由协调者只为 tang 写入上述配置。子名单移除后，子助手继续在容器运行，但网页只返回和展示主助手。
+
+`GET /_wp/feishu-bot/bots` 同时返回 `agents:[{id,name,kind,setup,appId}]` 和 `subAgents:{enabled,limit,count}`。子助手在网关内按 `createdAt` 升序排列，创建时间本身不透传；客户端保持主助手在前、子助手按此顺序展示，「+」始终在第一张。旧镜像没有 `agents` 数组时 `enabled:false`，旧机器人没有 `agentId` 时按 `main` 处理。子助手最多 5 个，主助手不计入；未扫码的也计数。网关取容器合法整数 `limit` 与 5 的较小值，无合法值时用 5，创建前查 info，容器还须在锁内复查。子助手名单未开放时「+」保持第一步提示；没有机器人时仍触发主助手开通横幅。
+
+子助手接口均位于 `/_wp/feishu-bot`：
+
+| 方法与路径 | 请求 / 行为 |
+| --- | --- |
+| `POST /agents` | `{name}`，创建子助手后 detached 启动扫码流程，返回 201 `{agent:{id,name,kind,setup:"preparing"}}`；若创建成功但启动失败，仍返回 201，`setup:"none"`，可从卡片「扫码连接」补启动 |
+| `GET /agents/<id>/setup` | 返回 `{status,expiresAt?,qr?}`，`unconnected` 映射 `none`，只放行 PNG base64 二维码 |
+| `POST /agents/<id>/setup` | `{}`，仅 none / expired / failed 状态重新启动，其他状态原样返回 |
+| `POST /agents/<id>/rename` | `{name}`，只修改工作伙伴中的名字，不修改飞书机器人名 |
+| `POST /agents/<id>/delete` | `{}`，停止消息桥并把工作目录移到回收目录；仅解绑，不删除飞书平台上的机器人 |
+| `POST /agents/<id>/restart` | `{}`，重启该助手的消息桥；`main` 只要求第一步名单 |
+| `POST /reconnect` | 保留，等同于主助手 restart |
+
+`<id>` 必须匹配 `^(main|s[0-9a-f]{8})$`；main 不允许 setup、rename 或 delete。写请求必须同源、`application/json`、JSON 对象且不超过 1 KiB。名字比较前做 NFC 归一并去首尾空白，归一后为 1–16 个 Unicode 字符，允许汉字 `[㐀-䶿一-鿿豈-﫿]`、ASCII 字母数字、`_ - ·` 和单个内部空格；保留「主助手」、不区分大小写的 `main`，以及不区分大小写的 `s` + 8 位十六进制（如 `s1a2b3c4d`），后者留给系统生成的子助手编号。前端即时校验，网关执行命令前复查，容器最终判断重名。
+
+网关以 `runtime.uid` 调用 `python3 /opt/workpartner/bin/wp-agent create` / `rename <id>` / `delete <id>`（20 秒）；只有 create/rename 用 stdin 传 `{name}`。扫码为 `python3 /opt/workpartner/bin/feishu-onboard.py start --agent <id>`（detached，不带 stdin）和 `status --agent <id>`（10 秒）。子助手重启使用 `python3 /opt/workpartner/bin/wp-feishu-bot.py restart --agent <id>`，主助手不带 `--agent`。同一用户的创建、改名、删除和 setup POST 串行，成功后清掉运行中的 info 合并结果。并发隔离仅在单网关进程内，容器锁负责最终上限和重名约束。
+
+容器退出码 1 的一行 JSON 中，仅白名单错误码映射为 HTTP：`invalid_name` / `main_agent` → 400，`name_taken` / `limit_reached` → 409，`not_found` → 404；`no_supervisor` 和其他 exec/超时/解析失败 → 503 `unavailable`。未获准接口返回 404，来源或类型错误返回 403，非法 body 返回 400。错误响应只有 `{error}`，不透传命令输出、凭据或额外字段。旧镜像缺少 `wp-agent` 也返回 503。setup（GET/POST）、rename、delete 在执行助手命令前先检查 info 的 `agents` 数组；缺失或不是数组时返回 404，不调用旧版 onboarding，避免误读主助手的状态或二维码。
+
+首页仅提供飞书跳转和管理，不在网页对话。原生 dialog 承载新建、改名和扫码；二维码通常每 2 秒轮询，`needs_identity` 时改为每 10 秒；`expired` / `failed` 停止轮询，点「重试」后恢复。关闭或页面隐藏时暂停，重新可见时只恢复尚未结束的流程，连接成功后刷新卡片。写操作后的刷新遇到在途请求时，会等待它结束再请求新数据。仅 `subAgents.enabled:true` 时显示主/子助手标签；未连接卡片常显主色「扫码连接」按钮及状态说明，`needs_identity` 不显示扫码按钮。删除需要卡片内二次确认；若还需删除飞书侧机器人，请通过「管理」前往飞书开放平台操作。主助手横幅和 `/_wp/aionui/feishu/*` 的开通状态机不受影响。
+
+上线清单：
+
+1. **先升级镜像，再开子助手名单**：部署 T-1193 镜像，确认目标用户容器的 info 返回 `agents` 数组且子助手命令可用。
+2. 部署网关后，由协调者为 tang 配置上述两层名单；仓库默认 `subAgents.allow: []` 保持关闭。
+3. 验证新建、扫码、改名、删除及主助手原有入口，并检查 Actions 浏览器测试与截图。
