@@ -142,11 +142,20 @@ function installFeishuBot() {
   function mount() {
     if (revoked) return;
     for (const menu of document.querySelectorAll('.wp-settings-menu')) {
-      if (!menu.querySelector('[data-wp-feishu-bot]')) {
-        const entry = button('我的飞书机器人', event => { event.stopPropagation(); show(); });
+      const anchor = menu.querySelector('[data-wp-feedback], [data-wp-my-key]')
+        || [...menu.querySelectorAll('[role="menuitem"]')].filter(element => !element.matches('[data-wp-feishu-bot]')).at(-1);
+      if (!anchor) continue;
+      let entry = menu.querySelector('[data-wp-feishu-bot]');
+      if (!entry) {
+        entry = button('我的飞书机器人', event => { event.stopPropagation(); show(); });
         entry.className = 'wp-pick-item'; entry.setAttribute('role', 'menuitem'); entry.setAttribute('data-wp-feishu-bot', '');
-        const anchor = menu.querySelector('[data-wp-feedback], [data-wp-my-key]') || [...menu.querySelectorAll('[role="menuitem"]')].at(-1);
-        menu.insertBefore(entry, anchor || null);
+      }
+      if (entry.nextElementSibling !== anchor) menu.insertBefore(entry, anchor);
+      const sep = menu.querySelector('[data-wp-feishu-bot-separator]');
+      if (sep && (sep.nextElementSibling !== entry || sep.previousElementSibling?.matches('.wp-pick-sep'))) sep.remove();
+      if (!entry.previousElementSibling?.matches('.wp-pick-sep')) {
+        const separator = node('div', undefined, 'wp-pick-sep'); separator.setAttribute('data-wp-feishu-bot-separator', '');
+        menu.insertBefore(separator, entry);
       }
       const user = document.querySelector('button.wp-user');
       if (user) {

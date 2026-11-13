@@ -3,16 +3,19 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { Script } from 'node:vm';
 import { createFeishuBot } from '../feishu-bot.mjs';
+import { createDockerRuntime } from '../runtime/docker.mjs';
 
 const API = '/_wp/feishu-bot', ORIGIN = 'https://workspace.example.test';
-const tang = { slug: 'tang', unionId: 'union-tang' };
+const tang = { slug: 'tang', unionId: 'union-tang', backend: 'aionui' };
 async function fixture(t) {
   const organization = { server: { publicOrigin: ORIGIN }, runtime: { uid: 1001 }, features: { feishuBot: true } };
   let config = { features: { feishuBot: true }, feishuBot: { allow: ['tang'] } };
   const calls = [];
-  let execute = async () => ({ exitCode: 0, logs: JSON.stringify({ ok: true, bots: [] }) });
+  let execute = async () => ({ exitCode: 0, stdout: JSON.stringify({ ok: true, bots: [] }) });
   const handler = createFeishuBot({ organization, organizationData: () => { if (config instanceof Error) throw config; return config; },
-    authenticate: req => req.headers.cookie === 'tang' ? tang : req.headers.cookie === 'other' ? { slug: 'other', unionId: 'union-other' } : null,
+    authenticate: req => req.headers.cookie === 'tang' ? tang : req.headers.cookie === 'other' ? { slug: 'other', unionId: 'union-other', backend: 'aionui' }
+      : req.headers.cookie === 'other-backend' ? { ...tang, backend: 'claude' }
+      : req.headers.cookie === 'no-backend' ? { ...tang, backend: undefined } : null,
     runtime: { exec: (...args) => { calls.push(args); return execute(...args); } } });
   const request = async (route = '/bots', { who = 'tang', method = 'GET', headers = {}, body } = {}) => {
     const req = Readable.from(body === undefined ? [] : [Buffer.from(body)]);
@@ -28,9 +31,45 @@ async function fixture(t) {
     return { status, data: raw ? JSON.parse(raw) : null, raw };
   };
   return { handler, calls, request, config: value => { config = value; }, execute: fn => { execute = fn; },
-    reply: value => { execute = async () => ({ exitCode: 0, logs: JSON.stringify(value) }); } };
+    reply: value => { execute = async () => ({ exitCode: 0, stdout: JSON.stringify(value) }); } };
 }
 const post = { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: '{}' };
+
+test('non-aionui users receive neither API access nor client even on the allowlist', async t => {
+  const f = await fixture(t);
+  for (const allow of [['tang'], ['union-tang'], ['*']]) {
+    f.config({ features: { feishuBot: true }, feishuBot: { allow } });
+    for (const who of ['other-backend', 'no-backend']) {
+      assert.equal((await f.request('/bots', { who })).status, 404);
+      assert.equal((await f.request('/reconnect', { ...post, who })).status, 404);
+    }
+    for (const backend of ['claude', undefined]) assert.equal(f.handler.clientFor({ ...tang, backend }), '');
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('valid stdout with noisy stderr succeeds for info and reconnect without exposing output', async t => {
+  const f = await fixture(t);
+  const stdout = '{"ok":true,"bots":[]}', stderr = 'diagnostic: token app_secret private\n';
+  f.execute(async () => ({ exitCode: 0, stdout, stderr, logs: stderr + stdout }));
+  assert.deepEqual(await f.request(), { status: 200, data: { bots: [] }, raw: '{"bots":[]}' });
+  assert.deepEqual(await f.request('/reconnect', post), { status: 200, data: { ok: true }, raw: '{"ok":true}' });
+});
+
+test('runtime output limit failures are opaque 503 on both endpoints', async t => {
+  const f = await fixture(t);
+  const stdout = Buffer.from(JSON.stringify({ ok: true, bots: [], padding: 'x'.repeat(1024 * 1024) }));
+  const header = Buffer.alloc(8); header[0] = 1; header.writeUInt32BE(stdout.length, 4);
+  const runtime = createDockerRuntime({ docker: async (_method, route) => route.endsWith('/start')
+    ? { status: 200, body: Buffer.concat([header, stdout]) }
+    : route.endsWith('/json') ? { status: 200, body: '{"ExitCode":0}' }
+    : { status: 201, body: '{"Id":"output-limit-test"}' } });
+  f.execute(runtime.exec);
+  for (const [route, options] of [['/bots', {}], ['/reconnect', post]]) {
+    assert.deepEqual(await f.request(route, options), { status: 503, data: { error: 'unavailable' }, raw: '{"error":"unavailable"}' });
+  }
+  for (const call of f.calls) assert.equal(call[2].maxOutputBytes, 1024 * 1024);
+});
 
 test('live feature and slug, unionId, wildcard admission govern HTTP and client', async t => {
   const f = await fixture(t);
@@ -50,7 +89,7 @@ test('live feature and slug, unionId, wildcard admission govern HTTP and client'
   }
   f.config({ features: { feishuBot: true }, feishuBot: { allow: ['tang', 'union-tang'] } });
   for (const who of ['other', '']) assert.equal((await f.request('/bots', { who })).status, 404);
-  for (const user of [null, { slug: '../tang', unionId: 'union-tang' }, { slug: 'tang\n', unionId: 'union-tang' }, { slug: 'tang' }, { slug: 'other', unionId: 'union-other' }]) assert.equal(f.handler.clientFor(user), '');
+  for (const user of [null, { ...tang, slug: '../tang' }, { ...tang, slug: 'tang\n' }, { ...tang, unionId: undefined }, { slug: 'other', unionId: 'union-other' }]) assert.equal(f.handler.clientFor(user), '');
 });
 
 test('info uses fixed argv and returns only validated public fields', async t => {
@@ -60,7 +99,7 @@ test('info uses fixed argv and returns only validated public fields', async t =>
   f.reply({ ok: true, bots: [bot, ...['javascript:bad', 'cli_a?token=bad', 'cli_a-b', 'cli_tail\n', '', null].map(appId => ({ ...bot, appId })), null] });
   assert.deepEqual((await f.request('/bots?refresh=1')).data, { bots: [{ appId: 'cli_Ab123', name: '名'.repeat(64), avatar: bot.avatar,
     online: 'online', activate: true, lastEventAt: bot.lastEventAt, error: null, openUrl: 'https://applink.feishu.cn/client/bot/open?appId=cli_Ab123' }] });
-  assert.deepEqual(f.calls[0], ['tang', ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'info', '--refresh'], { user: '1001', timeout: 10000 }]);
+  assert.deepEqual(f.calls[0], ['tang', ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'info', '--refresh'], { user: '1001', timeout: 10000, maxOutputBytes: 1024 * 1024 }]);
   for (const kind of ['png', 'jpeg', 'gif', 'webp']) {
     f.reply({ ok: true, bots: [{ ...bot, avatar: `data:image/${kind};base64,YQ==` }] });
     assert.equal((await f.request()).data.bots[0].avatar, `data:image/${kind};base64,YQ==`);
@@ -81,8 +120,8 @@ test('info uses fixed argv and returns only validated public fields', async t =>
 test('exec failures, timeouts, invalid JSON and failed worker replies are opaque 503', async t => {
   const f = await fixture(t);
   for (const execute of [async () => { throw new Error('app_secret private stdout'); }, async () => { throw Object.assign(new Error('token timeout'), { code: 'ETIMEDOUT' }); },
-    async () => ({ exitCode: 1, logs: 'private app_secret' }), async () => ({ exitCode: 0, logs: 'private token' }),
-    async () => ({ exitCode: 0, logs: '{"ok":false,"error":"private"}' }), async () => ({ exitCode: 0, logs: '{"ok":true}' })]) {
+    async () => ({ exitCode: 1, stdout: 'private app_secret' }), async () => ({ exitCode: 0, stdout: 'private token' }),
+    async () => ({ exitCode: 0, stdout: '{"ok":false,"error":"private"}' }), async () => ({ exitCode: 0, stdout: '{"ok":true}' })]) {
     f.execute(execute);
     assert.deepEqual(await f.request(), { status: 503, data: { error: 'unavailable' }, raw: '{"error":"unavailable"}' });
   }
@@ -99,7 +138,7 @@ test('reconnect validates origin, JSON content type and body before executing', 
   }
   assert.equal(f.calls.length, 0);
   assert.deepEqual((await f.request('/reconnect', post)).data, { ok: true });
-  assert.deepEqual(f.calls[0], ['tang', ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'restart'], { user: '1001', timeout: 10000 }]);
+  assert.deepEqual(f.calls[0], ['tang', ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'restart'], { user: '1001', timeout: 20000, maxOutputBytes: 1024 * 1024 }]);
   f.execute(async () => { throw new Error('private'); });
   assert.deepEqual((await f.request('/reconnect', post)).data, { error: 'unavailable' });
   assert.equal((await f.request('/reconnect', post)).status, 503);
@@ -112,7 +151,7 @@ test('concurrent info including refresh shares one exec, clears after failure an
   const f = await fixture(t);
   let release, started;
   const ready = new Promise(resolve => { started = resolve; });
-  f.execute(async () => { started(); await new Promise(resolve => { release = resolve; }); return { exitCode: 0, logs: '{"ok":true,"bots":[]}' }; });
+  f.execute(async () => { started(); await new Promise(resolve => { release = resolve; }); return { exitCode: 0, stdout: '{"ok":true,"bots":[]}' }; });
   const first = f.request('/bots?refresh=1'); await ready;
   const second = f.request();
   await new Promise(resolve => setTimeout(resolve, 30));
@@ -122,4 +161,28 @@ test('concurrent info including refresh shares one exec, clears after failure an
   f.reply({ ok: true, bots: [] });
   await Promise.all([f.request(), f.request('/bots', { who: 'other' })]);
   assert.deepEqual(f.calls.slice(1).map(call => call[0]).sort(), ['other', 'tang']);
+});
+
+for (const succeeds of [true, false]) test(`concurrent reconnect shares restart, isolates users and permits retry (${succeeds})`, async t => {
+  const f = await fixture(t);
+  f.config({ features: { feishuBot: true }, feishuBot: { allow: ['*'] } });
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  f.execute(async () => {
+    await blocked;
+    if (!succeeds) throw new Error('private restart failure');
+    return { exitCode: 0, stdout: '{"ok":true}' };
+  });
+  const requests = [f.request('/reconnect', post), f.request('/reconnect', post), f.request('/reconnect', { ...post, who: 'other' })];
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.calls.map(call => [call[0], call[1].at(-1)]).sort(), [['other', 'restart'], ['tang', 'restart']]);
+  // An info request must not share the pending restart result.
+  f.reply({ ok: true, bots: [] });
+  assert.deepEqual((await f.request()).data, { bots: [] });
+  release();
+  assert.deepEqual((await Promise.all(requests)).map(r => [r.status, r.data]),
+    Array.from({ length: 3 }, () => succeeds ? [200, { ok: true }] : [503, { error: 'unavailable' }]));
+  f.reply({ ok: true });
+  assert.equal((await f.request('/reconnect', post)).status, 200);
+  assert.equal(f.calls.length, 4);
 });

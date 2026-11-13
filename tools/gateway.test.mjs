@@ -946,10 +946,11 @@ test('feishu bot preview on and off preserve original serializer bytes unless ad
     org.feedback = { ...org.feedback, allow: ['member'], handlers: [] };
     org.publicHost = 'workspace.example.test'; org.previewHost = 'preview.example.test';
     org.model.baseUrl = 'http://127.0.0.1:1/v1'; org.extensions.gatewayModule = '';
-    org.feishuBot = { allow: ['member'] };
+    org.feishuBot = { allow: ['member', 'legacy-member'] };
     Object.assign(org.runtime, { gatewayPort: 0, sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'),
       stateDirectory: path.join(dir, 'state'), secureDirectory: path.join(dir, 'secure'), nextDirectory: path.join(dir, 'workspaces') });
-    const people = [{ slug: 'member', unionId: 'union-member', backend: 'legacy' }, { slug: 'outsider', unionId: 'union-outsider', backend: 'legacy' }];
+    const people = [{ slug: 'member', unionId: 'union-member', backend: 'aionui' }, { slug: 'outsider', unionId: 'union-outsider', backend: 'aionui' },
+      { slug: 'legacy-member', unionId: 'union-legacy', backend: 'legacy' }];
     fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key'); fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
     fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
     const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');

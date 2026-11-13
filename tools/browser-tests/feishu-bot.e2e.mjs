@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSuite, LONG } from './lib/suite.mjs';
 import { ORIGIN } from './lib/harness.mjs';
-import { openMenu, overflow } from './lib/browser.mjs';
+import { openMenu, closeMenu, overflow } from './lib/browser.mjs';
 
 const API = '/_wp/feishu-bot', D = '.wp-feishu-bot-dialog', BAR = '.wp-feishu-bot-bar';
 const bot = { appId: 'cli_Test123', name: '唐的飞书助手', avatar: null, online: 'online', activate: true, lastEventAt: null, error: null };
@@ -11,6 +11,13 @@ const openUrl = 'https://applink.feishu.cn/client/bot/open?appId=cli_Test123';
 const suite = createSuite('feishu-bot', async s => {
   s.main = await s.harness.startGateway('bots', { feishuBot: { allow: ['member'] }, bots: [bot], myKey: { allow: ['member'] } });
   s.noPreview = await s.harness.startGateway('no-preview', { preview: false, feishuBot: { allow: ['member'] }, bots: [bot] });
+  s.menuCases = [];
+  for (const feedback of [false, true]) for (const feishuBot of [false, true]) for (const myKey of [false, true]) {
+    const label = `menu-${Number(feedback)}-${Number(feishuBot)}-${Number(myKey)}`;
+    const gateway = await s.harness.startGateway(label, { feedback,
+      feishuBot: feishuBot ? { allow: ['member'] } : null, myKey: myKey ? { allow: ['member'] } : null });
+    s.menuCases.push({ label, gateway, feedback, feishuBot, myKey });
+  }
 });
 function init() {
   window.__copied = [];
@@ -42,7 +49,12 @@ for (const width of [1280, 390, 360]) {
       const chat = page.locator(BAR).getByRole('link', { name: '对话', exact: true });
       assert.equal(await chat.getAttribute('href'), openUrl); assert.equal(await chat.getAttribute('target'), '_blank');
       assert.match(await chat.getAttribute('rel'), /noopener/);
-      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      const barFits = await page.locator(BAR).evaluate(bar => ({
+        fits: bar.scrollWidth <= bar.clientWidth,
+        outside: [...bar.querySelectorAll('button, a')].filter(element => element.getBoundingClientRect().right > innerWidth).map(element => element.textContent),
+      }));
+      assert.equal(barFits.fits, true, 'status bar content fits its own width');
+      assert.deepEqual(barFits.outside, [], 'status bar controls stay inside viewport');
       await suite.shot(page, `home-${width}`);
       await open(page);
       assert.equal(await page.locator(D + ' .wp-feishu-bot-card').count(), 3);
@@ -87,6 +99,34 @@ for (const width of [1280, 390, 360]) {
     });
   });
 }
+
+test('menu features share one separator in every enablement combination', LONG, async () => {
+  let baselineSeparators;
+  for (const { label, gateway, feedback, feishuBot, myKey } of suite.menuCases) {
+    suite.harness.use(gateway);
+    await suite.session(label, {}, async ({ page, log }) => {
+      for (let round = 0; round < 2; round++) {
+        await openMenu(page);
+        const shape = await page.locator('.wp-settings-menu').evaluate(menu => {
+          const children = [...menu.children];
+          const kinds = children.map(element => element.matches('.wp-pick-sep') ? 'SEP'
+            : element.matches('[data-wp-feishu-bot]') ? 'BOT' : element.matches('[data-wp-my-key]') ? 'KEY'
+            : element.matches('[data-wp-feedback]') ? 'FEEDBACK' : element.getAttribute('role') === 'menuitem' ? 'LOGOUT' : 'EXISTING');
+          return { kinds, separators: kinds.filter(kind => kind === 'SEP').length };
+        });
+        baselineSeparators ??= shape.separators;
+        const group = ['SEP', ...(feishuBot ? ['BOT'] : []), ...(feedback ? ['FEEDBACK'] : []), ...(myKey ? ['KEY'] : []), 'LOGOUT'];
+        assert.deepEqual(shape.kinds.slice(-group.length), group, label);
+        assert.equal(shape.separators, baselineSeparators, label + ' has no extra separator');
+        for (const [kind, enabled] of [['BOT', feishuBot], ['KEY', myKey], ['FEEDBACK', feedback]]) {
+          assert.equal(shape.kinds.filter(value => value === kind).length, Number(enabled), label);
+        }
+        await closeMenu(page);
+      }
+      assert.deepEqual(log.pageErrors, []);
+    });
+  }
+});
 
 test('empty bots hide homepage bar and show setup hint; preview disabled still injects client', LONG, async () => {
   suite.harness.use(suite.noPreview); suite.noPreview.setBots([]);

@@ -4,10 +4,11 @@ const API = '/_wp/feishu-bot';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fail = status => Object.assign(new Error('Feishu bot request failed'), { status });
 
-export async function executeFeishuBot(runtime, uid, slug, ...args) {
-  const result = await runtime.exec(slug, ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', ...args], { user: String(uid), timeout: 10000 });
+export async function executeFeishuBot(runtime, uid, slug, action, ...args) {
+  const result = await runtime.exec(slug, ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', action, ...args],
+    { user: String(uid), timeout: action === 'restart' ? 20000 : 10000, maxOutputBytes: 1024 * 1024 });
   if (result.exitCode !== 0) throw fail(503);
-  const data = JSON.parse(result.logs);
+  const data = JSON.parse(result.stdout);
   if (data?.ok !== true) throw fail(503);
   return data;
 }
@@ -44,7 +45,7 @@ function readJson(req) {
 }
 
 export function createFeishuBot({ organization, organizationData, authenticate, runtime }) {
-  const pending = new Map();
+  const pending = new Map(), restarting = new Map();
   const origin = organization.server.publicOrigin || `https://${organization.server.publicHost}`;
   function policy() {
     try {
@@ -52,7 +53,7 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
       return data?.features?.feishuBot === true && Array.isArray(allow) && allow.every(v => typeof v === 'string') ? allow : [];
     } catch { return []; }
   }
-  const admitted = user => Boolean(typeof user?.slug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(user.slug)
+  const admitted = user => Boolean(user?.backend === 'aionui' && typeof user.slug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(user.slug)
     && user.unionId && policy().some(v => v === '*' || v === user.slug || v === user.unionId));
   const execute = (user, ...args) => executeFeishuBot(runtime, organization.runtime.uid, user.slug, ...args);
   function info(user, refresh) {
@@ -66,6 +67,14 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
     }
     return pending.get(user.slug);
   }
+  function reconnect(user) {
+    if (!restarting.has(user.slug)) {
+      const task = execute(user, 'restart');
+      restarting.set(user.slug, task);
+      task.finally(() => restarting.delete(user.slug)).catch(() => {});
+    }
+    return restarting.get(user.slug);
+  }
   const reply = (res, status, data) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
     res.end(JSON.stringify(data));
@@ -75,12 +84,12 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
     try {
       const user = authenticate(req);
       if (!admitted(user)) { reply(res, 404, { error: 'not_found' }); return true; }
-      const reconnect = url.pathname.endsWith('/reconnect');
-      if (req.method !== (reconnect ? 'POST' : 'GET')) throw fail(405);
-      if (reconnect) {
+      const isReconnect = url.pathname.endsWith('/reconnect');
+      if (req.method !== (isReconnect ? 'POST' : 'GET')) throw fail(405);
+      if (isReconnect) {
         if (req.headers.origin !== origin || !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) throw fail(403);
         await readJson(req);
-        await execute(user, 'restart');
+        await reconnect(user);
         reply(res, 200, { ok: true });
       } else reply(res, 200, await info(user, url.searchParams.get('refresh') === '1'));
     } catch (error) {
