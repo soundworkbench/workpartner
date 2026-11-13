@@ -31,8 +31,11 @@ function installVoice(resample, encodeWav) {
   const unsupported = !window.isSecureContext ? '当前页面不是安全上下文，无法使用语音输入'
     : !navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext) ? '当前浏览器不支持语音输入' : '';
   const selector = '[data-testid="sendbox-input"], [data-testid="guid-input"]';
-  let current, press, toastTimer, toast, observer;
+  let current, press, toastTimer, toast, observer, mountFrame;
   const node = (tag, cls) => { const el = document.createElement(tag); el.className = cls; return el; };
+  const safe = fn => (...args) => { try { return Promise.resolve(fn(...args)).catch(() => {}); } catch {} };
+  const visible = el => el?.isConnected && !el.closest('.wp-transition-composer')
+    && el.getClientRects().length && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
   function hint(text) {
     if (!toast) { toast = node('div', 'wp-voice-toast'); toast.setAttribute('role', 'status'); document.body.append(toast); }
     toast.textContent = text; toast.hidden = false;
@@ -67,7 +70,7 @@ function installVoice(resample, encodeWav) {
   }
   async function start(area) {
     if (current) return;
-    const session = { area, state: 'starting', chunks: [], count: 0 }; current = session;
+    const session = { area, selector: '[data-testid="' + area.dataset.testid + '"]', state: 'starting', chunks: [], count: 0 }; current = session;
     try {
       session.context = new (window.AudioContext || window.webkitAudioContext)();
       const resumed = session.context.resume();
@@ -120,8 +123,8 @@ function installVoice(resample, encodeWav) {
     }
   }
   function insert(session, text) {
-    const area = session.area;
-    if (!area.isConnected) return;
+    const area = visible(session.area) ? session.area : [...document.querySelectorAll(session.selector)].find(visible);
+    if (!area) { hint('找不到输入框，请返回对话页面后重试'); return; }
     const focused = document.activeElement === area;
     const start = focused ? area.selectionStart : area.value.length, end = focused ? area.selectionEnd : start;
     const prefix = !focused && start && !/\s$/.test(area.value) && !/^\s/.test(text) ? ' ' : '';
@@ -158,7 +161,6 @@ function installVoice(resample, encodeWav) {
     document.querySelectorAll(selector).forEach(area => {
       if (area.closest('.wp-transition-composer')) return;
       const panel = area.closest('.sendbox-panel'), home = area.closest('[class*="_guidInputInner"]');
-      const visible = el => el && el.getClientRects().length && getComputedStyle(el).display !== 'none';
       const actions = panel?.querySelector('.sendbox-actions'), compact = panel?.querySelector('.sendbox-tools-mobile-compact');
       const submit = home?.querySelector('[class*="_actionSubmit"]');
       const slot = visible(actions) ? actions : compact || submit?.parentElement;
@@ -172,6 +174,7 @@ function installVoice(resample, encodeWav) {
         const label = node('span', 'wp-voice-time'); label.setAttribute('role', 'status'); wrap.append(button, label);
         button.addEventListener('contextmenu', event => event.preventDefault());
         button.addEventListener('pointerdown', event => {
+          if (press && !press.button.isConnected) cancel();
           if (event.button !== 0 || press || button.disabled) return;
           event.preventDefault(); event.stopPropagation();
           if (unsupported) { hint(unsupported); return; }
@@ -206,12 +209,16 @@ function installVoice(resample, encodeWav) {
     if (current && !current.area.isConnected && current.state !== 'recognizing') cancel();
     render();
   }
+  function scheduleMount() {
+    if (mountFrame) return;
+    mountFrame = requestAnimationFrame(safe(() => { mountFrame = null; mount(); }));
+  }
   function init() {
     const style = node('style', 'wp-voice-style'); style.textContent = `
 .wp-voice { position:relative; display:inline-flex; align-items:center; flex:0 0 auto; margin:0 4px; vertical-align:middle; }
 .wp-voice-button { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border:1px solid var(--wp-line); border-radius:50%; background:var(--wp-card); color:var(--wp-ink-2); cursor:pointer; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
 .wp-voice-button:hover { background:var(--wp-hover); }
-.wp-voice-button[data-state="recording"] { color:#d92d20; border-color:currentColor; }
+.wp-voice-button[data-state="recording"] { color:var(--wp-danger, #d92d20); border-color:currentColor; }
 .wp-voice-button:disabled,.wp-voice-button[aria-disabled="true"] { opacity:.45; cursor:default; }
 .wp-voice-button[data-state="recognizing"] svg { display:none; }
 .wp-voice-button[data-state="recognizing"]::after { content:''; width:16px; height:16px; border:2px solid var(--wp-line); border-top-color:var(--wp-ink); border-radius:50%; animation:wp-voice-spin .8s linear infinite; }
@@ -219,10 +226,11 @@ function installVoice(resample, encodeWav) {
 .wp-voice-toast { position:fixed; z-index:2147483647; bottom:100px; left:50%; transform:translateX(-50%); width:max-content; max-width:calc(100vw - 32px); box-sizing:border-box; padding:10px 14px; border:1px solid var(--wp-line); border-radius:8px; background:var(--wp-card); color:var(--wp-ink); font:14px var(--wp-font); overflow-wrap:anywhere; }
 @keyframes wp-voice-spin { to { transform:rotate(360deg); } }`;
     document.head.append(style); mount();
-    observer = new MutationObserver(mount); observer.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener('resize', mount);
+    observer = new MutationObserver(safe(scheduleMount)); observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('resize', safe(scheduleMount));
   }
+  document.addEventListener('lostpointercapture', event => { if (press?.id === event.pointerId) cancel(); });
   document.addEventListener('keydown', event => { if (event.key === 'Escape') cancel(); });
   window.addEventListener('pagehide', cancel);
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safe(init), { once: true }); else safe(init)();
 }

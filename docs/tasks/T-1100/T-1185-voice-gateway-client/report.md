@@ -63,3 +63,42 @@
 2. 与 T-1184 的 `wp-asr` 联调并部署后，在实际组织配置设置 `features.voice: true`、`voice.allow: ["tang"]`；默认服务地址是 `http://wp-asr:8080`，有差异时通过 `WP_ASR_URL` 指定。本轮没有修改部署或实际组织配置。
 3. 合并 T-1183 时保留双方的客户端拼接、路由行和 matrix 组；本轮语音追加表达式和路由单独成行，工作流只增加 voice 一项。
 4. 尚未完成的事项是受环境限制的 HTTP/浏览器端到端验收及真实 ASR 联调；当前不能宣称全部验收标准通过。没有其他已知必须越界修改的事项。
+
+## 第 2 轮（2026-11-13）
+
+### 1. 改动文件与返工项
+
+- `gateway/tests/voice.test.mjs`：GET 用 `send: req => req.end()` 明确不写请求体，避免污染 keep-alive 连接；增加慢速上传超时、上传期间不访问 ASR、超时释放名额及上传/上游共用截止时间的 HTTP 断言。503 夹具改为真实契约的 JSON `{"error":"busy"}`；非 JSON 503 仍断言 `unavailable`。
+- `gateway/voice-client.mjs`：在 document 监听 `lostpointercapture`，匹配当前指针后取消，覆盖目标已脱离 DOM 时事件发到 document 的情况；新 pointerdown 先清除指向已脱离按钮的旧 press 状态。识别会话保存原输入框的具体 data-testid selector，结果优先写回原可见输入框，否则按相同 selector 找当前可见输入框，跳过过渡克隆；找不到时提示「找不到输入框，请返回对话页面后重试」。MutationObserver/resize 用 requestAnimationFrame 合并挂载，safe 包装同步异常及 Promise rejection；录音颜色改为 `var(--wp-danger, #d92d20)`。
+- `gateway/voice.mjs`：用单调时钟记录总截止时间，读体阶段也有超时；在 2 MiB 限制内收完整个请求体后才访问 ASR，上游仅使用剩余预算。慢速上传到期返回 408 `unavailable`、关闭连接，清除读体监听器/计时器和缓冲区，finally 释放用户名额。405/403/415 校验及现有上游响应映射保持审核通过的逻辑。
+- `gateway/tests/voice-client.test.mjs`：删除按源码字符串边界截取函数后放入 vm 执行的测试；直接 import 已正式导出的 resample/encodeWav，验证采样时长、幅度、RIFF 字段、16 kHz/单声道/16 位、PCM 样本、裁剪和空输入。vm 仅用于完整下发脚本的语法解析，不执行截取片段。
+- `gateway/tests/voice-upload.test.mjs`：新增无需监听端口的公开路由处理器测试，以 Node 流、模拟时钟及模拟 HTTP 上游验证慢速读体、429、408、预算扣除、完整体转发、413、中断和名额释放。
+- `tools/browser-tests/voice.e2e.mjs`：新增真实页面交互断言，覆盖丢失指针捕获后的取消/track 释放、丢失事件未送达时旧按钮被移除后的再次操作、识别中 textarea 整体重建及光标插入、同 selector 的隐藏/克隆输入框跳过、无输入框提示、MutationObserver 多次变化在一帧只扫描一次、DOM 查询异常后可恢复；将权限等待中的取消/提前结束、Worklet 加载失败回退与加载期间取消/Blob URL 释放等生命周期交给浏览器测试。
+- `tools/browser-tests/lib/voice.mjs`：busy 假 ASR 返回 T-1184 约定的 JSON `{"error":"busy"}`，不修改生产映射。
+- `docs/organization.md`：补充上传和识别共用 30 秒截止时间、先缓冲再访问 ASR，以及 408 关闭连接/释放名额的行为。
+- `docs/tasks/T-1100/T-1185-voice-gateway-client/report.md`：追加本轮改动和真实验证结果。
+
+未新增依赖，未改 `image/`、`asr/`、`deploy/` 或工作流，未执行 git 提交。
+
+### 2. 验证
+
+本轮环境为 Node v22.22.1。已执行并通过：
+
+- `node gateway/tests/voice-client.test.mjs`：4/4 通过；日志 `tools/browser-tests/output/T-1185-round2-client.log`。
+- `node gateway/tests/voice-upload.test.mjs`：3/3 通过；日志 `tools/browser-tests/output/T-1185-round2-upload.log`。这些是流和模拟 HTTP 调用测试，不是实际监听端口的 HTTP 集成测试。
+- `node --test gateway/tests/voice-client.test.mjs`：通过。
+- 对本轮 7 个新增/修改 JS 模块运行 `node --check`：通过。
+- `git diff --check`：通过。
+
+已尝试，但未完成验收：
+
+- `node --test gateway/tests/voice.test.mjs` 和 `node gateway/tests/voice.test.mjs`：均失败；本机禁止监听端口，直接执行的 10 个用例均在 `listen 127.0.0.1` 时遇到 EPERM，未进入接口验证，**不能宣称 voice.test.mjs 已通过或接口断言已跑过**。日志分别为 `tools/browser-tests/output/T-1185-round2-voice-api.log`、`tools/browser-tests/output/T-1185-round2-voice-api-direct.log`。
+- `bash tools/check.sh`：前置语法检查完成，随后已有 `tools/wp-seed.test.py` 创建 HTTPServer 被拒绝，报 `PermissionError: [Errno 1] Operation not permitted`；后续检查未执行，全量检查未通过。日志 `tools/browser-tests/output/T-1185-round2-check.log`。
+- `node tools/browser-tests/run.mjs voice`：缺少仓库已声明的 `playwright-core`，报 ERR_MODULE_NOT_FOUND，未启动浏览器，本轮新增与原有浏览器断言均未执行；日志 `tools/browser-tests/output/T-1185-round2-browser-voice.log`。
+- `node tools/browser-tests/run.mjs menu flow access my-key`：四组均因相同依赖缺失未启动；日志 `tools/browser-tests/output/T-1185-round2-browser-existing.log`。
+
+本轮未生成截图。原有六张截图的预期路径仍为 `tools/browser-tests/output/shots/voice/{1280,390,360}-{home,chat}.png`，无溢出/不遮挡断言仍保留，需在浏览器环境实际验证。
+
+### 3. 需要协调者处理
+
+在允许本地监听的 CI/Actions 中准备仓库现有锁定依赖和 Chrome/Chromium，运行 `bash tools/check.sh`、voice 及 menu/flow/access/my-key 浏览器组并检查截图。尤其复核 GET 后连续 403/415 的 keep-alive 回归、新增真实 HTTP 慢速上传用例和浏览器生命周期/重渲染断言。本轮受环境限制不能确认这些集成验收通过；不需要新增依赖或越界改动。

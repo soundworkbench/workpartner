@@ -5,16 +5,24 @@ import { voiceClient } from './voice-client.mjs';
 const API = '/_wp/api/voice/recognize';
 const MAX = 2 * 1024 * 1024;
 
-function read(req) {
+function read(req, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0;
+    const chunks = []; let size = 0, done = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      req.removeListener('data', data); req.removeListener('end', end);
+      req.removeListener('error', error); req.removeListener('aborted', error);
+    };
     const fail = status => {
-      req.pause(); req.removeListener('data', data); req.removeListener('end', end);
+      if (done) return;
+      done = true; req.pause(); cleanup();
       chunks.length = 0; reject(Object.assign(new Error('Voice request failed'), { status }));
     };
     const data = chunk => { size += chunk.length; if (size > MAX) fail(413); else chunks.push(chunk); };
-    const end = () => resolve(Buffer.concat(chunks));
-    req.on('error', () => fail(400)); req.on('aborted', () => fail(400));
+    const end = () => { done = true; cleanup(); resolve(Buffer.concat(chunks)); };
+    const error = () => fail(400);
+    const timer = setTimeout(() => fail(408), timeoutMs);
+    req.on('error', error); req.on('aborted', error);
     if (Number(req.headers['content-length']) > MAX) return fail(413);
     req.on('data', data); req.on('end', end);
   });
@@ -58,7 +66,7 @@ export function createVoice({ organization, organizationData, authenticate, asrU
     && config.allow.some(v => v === '*' || v === user.slug || v === user.unionId));
   const reply = (res, status, data) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
-      'x-content-type-options': 'nosniff', ...(status === 413 ? { connection: 'close' } : {}) });
+      'x-content-type-options': 'nosniff', ...([408, 413].includes(status) ? { connection: 'close' } : {}) });
     res.end(data === undefined ? '' : JSON.stringify(data));
   };
   const handle = async (req, res, url) => {
@@ -72,13 +80,16 @@ export function createVoice({ organization, organizationData, authenticate, asrU
       if (!/^audio\/wav(?:\s*;|$)/i.test(req.headers['content-type'] || '')) { reply(res, 415); return true; }
       if (active.has(user.unionId)) { reply(res, 429, { error: 'busy' }); return true; }
       owner = user.unionId; active.add(owner);
-      const result = await upstream(asrUrl, await read(req), timeoutMs);
+      const deadline = performance.now() + timeoutMs;
+      const body = await read(req, timeoutMs);
+      const remaining = deadline - performance.now();
+      const result = remaining > 0 ? await upstream(asrUrl, body, remaining) : null;
       if (result?.status === 200 && typeof result.data?.text === 'string') reply(res, 200, { text: Array.from(result.data.text).slice(0, 2000).join('') });
       else if (result?.status === 400 && ['bad_audio', 'too_long'].includes(result.data?.error)) reply(res, 400, { error: result.data.error });
       else if (result?.status === 503) reply(res, 503, { error: 'busy' });
       else reply(res, 503, { error: 'unavailable' });
     } catch (error) {
-      if (error.status === 413) res.once('finish', () => req.destroy());
+      if ([408, 413].includes(error.status)) res.once('finish', () => req.destroy());
       reply(res, error.status || 503, { error: error.status === 413 ? 'too_large' : 'unavailable' });
     } finally { if (owner) active.delete(owner); }
     return true;

@@ -28,7 +28,8 @@ export async function startVoiceFixture(work) {
       assert.ok(body.subarray(44).some(value => value !== 0), 'fake microphone produces actual PCM');
       hits.push({ samples: (body.length - 44) / 2 });
       res.writeHead(mode === 'busy' ? 503 : mode === 'unavailable' ? 500 : 200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(mode === 'ok' ? { text: '语音夹具文字', private: 'ASR_PRIVATE' } : mode === 'empty' ? { text: '  ' } : { error: 'ASR_PRIVATE' }));
+      res.end(JSON.stringify(mode === 'ok' ? { text: '语音夹具文字', private: 'ASR_PRIVATE' } : mode === 'empty' ? { text: '  ' }
+        : { error: mode === 'busy' ? 'busy' : 'ASR_PRIVATE' }));
     } catch (error) {
       failures.push(error.message); res.writeHead(500); res.end('{}');
     }

@@ -72,6 +72,107 @@ test('hold and release recognizes; Esc, moving outside and pointer cancel never 
   });
 });
 
+test('lost capture cancels recording; replacing a held button permits a new gesture', LONG, async () => {
+  await session('lost-capture', { init: [[() => {
+    window.__voiceTracks = [];
+    const get = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async options => {
+      const stream = await get(options); window.__voiceTracks.push(...stream.getTracks()); return stream;
+    };
+    document.addEventListener('pointerdown', event => { window.__voicePointer = event.pointerId; }, true);
+  }]] }, async ({ page }) => {
+    const hits = suite.harness.voice.hits.length, box = await page.locator(BUTTON).boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down(); await recorded(page);
+    await page.locator(BUTTON).evaluate(button => button.releasePointerCapture(window.__voicePointer));
+    await page.mouse.move(box.x + box.width / 2 + 1, box.y + box.height / 2);
+    await page.waitForSelector(BUTTON + '[data-state="idle"]'); await page.mouse.up();
+    assert.equal(suite.harness.voice.hits.length, hits);
+    assert.deepEqual(await page.evaluate(() => window.__voiceTracks.map(track => track.readyState)), ['ended']);
+    // Simulate a detached target whose lostpointercapture event never reaches its old listener.
+    await page.locator(BUTTON).evaluate(button => {
+      button.setPointerCapture = () => {};
+      button.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 99, button: 0, bubbles: true }));
+    });
+    await recorded(page);
+    await page.evaluate(() => document.querySelector('.wp-voice').remove());
+    await page.waitForSelector(BUTTON);
+    assert.equal(suite.harness.voice.hits.length, hits);
+    await toggle(page);
+    assert.equal(await page.inputValue(AREA), TEXT); assert.equal(suite.harness.voice.hits.length, hits + 1);
+    assert.ok(await page.evaluate(() => window.__voiceTracks.every(track => track.readyState === 'ended')));
+  });
+});
+
+test('recognition inserts into the visible replacement with the same selector, or explains a missing input', LONG, async () => {
+  for (const mode of ['replacement', 'missing']) {
+    await session('recognizing-' + mode, {}, async ({ page }) => {
+      let unblock;
+      const held = new Promise(resolve => { unblock = resolve; });
+      await page.route('**/_wp/api/voice/recognize', async route => { await held; await route.continue(); });
+      try {
+        await page.click(BUTTON); await recorded(page); await page.click(BUTTON);
+        await page.waitForSelector(BUTTON + '[data-state="recognizing"]');
+        await page.evaluate(mode => {
+          const old = document.querySelector('#voice-composer textarea');
+          const hidden = old.cloneNode(true); hidden.hidden = true; document.body.prepend(hidden);
+          const clone = document.createElement('div'); clone.className = 'wp-transition-composer';
+          clone.append(old.cloneNode(true)); document.body.prepend(clone);
+          const other = document.createElement('textarea'); other.dataset.testid = 'guid-input'; document.body.prepend(other);
+          if (mode === 'missing') { old.remove(); return; }
+          window.__renderComposer();
+          const area = document.querySelector('#voice-composer textarea');
+          area.value = '前后'; area.focus(); area.setSelectionRange(1, 1);
+        }, mode);
+      } finally { unblock(); }
+      if (mode === 'replacement') {
+        await page.waitForFunction(text => document.querySelector('#voice-composer textarea').value === '前' + text + '后', TEXT);
+        assert.deepEqual(await page.evaluate(() => window.__voiceInputs), ['前' + TEXT + '后']);
+        assert.equal(await page.locator(AREA).evaluate(el => el.selectionStart), 1 + TEXT.length);
+      } else {
+        await page.waitForSelector('.wp-voice-toast');
+        assert.equal(await page.textContent('.wp-voice-toast'), '找不到输入框，请返回对话页面后重试');
+      }
+      assert.equal(await page.inputValue('body > textarea[data-testid="guid-input"]'), '');
+      assert.equal(await page.inputValue('body > textarea[data-testid="sendbox-input"]'), '');
+      assert.equal(await page.inputValue('.wp-transition-composer textarea'), '');
+    });
+  }
+});
+
+test('mutation bursts mount once per frame and recover after a DOM read fails', LONG, async () => {
+  await session('mount-scheduling', {}, async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const original = document.querySelectorAll.bind(document), pending = [];
+      const raf = window.requestAnimationFrame;
+      let scans = 0, fail = false, frameId = 0;
+      document.querySelectorAll = selector => {
+        if (selector === '[data-testid="sendbox-input"], [data-testid="guid-input"]') {
+          scans++; if (fail) throw new Error('fixture DOM read failure');
+        }
+        return original(selector);
+      };
+      window.requestAnimationFrame = callback => { pending.push(callback); return ++frameId; };
+      const frame = () => pending.splice(0).forEach(callback => callback(performance.now()));
+      const mutate = async () => {
+        const el = document.createElement('span'); document.body.append(el);
+        await new Promise(resolve => setTimeout(resolve, 0)); el.remove();
+        await new Promise(resolve => setTimeout(resolve, 0));
+      };
+      try {
+        await mutate(); await mutate();
+        const beforeFrame = scans;
+        frame(); const afterFrame = scans;
+        fail = true; await mutate(); frame();
+        fail = false; await mutate(); frame();
+        return { beforeFrame, afterFrame, recovered: scans === 3 };
+      } finally { document.querySelectorAll = original; window.requestAnimationFrame = raf; }
+    });
+    assert.deepEqual(result, { beforeFrame: 0, afterFrame: 1, recovered: true });
+    await toggle(page); assert.equal(await page.inputValue(AREA), TEXT);
+  });
+});
+
 test('busy, unavailable, empty and short audio have transient inline messages', LONG, async () => {
   await session('messages', {}, async ({ page }) => {
     for (const [mode, message] of [['busy', '识别忙，请稍后再试'], ['unavailable', '语音识别暂时不可用'], ['empty', '没听清，请再说一次']]) {
@@ -106,6 +207,69 @@ test('microphone denial and unsupported browsers show the prescribed messages', 
     assert.equal(await page.getAttribute(BUTTON, 'title'), '当前浏览器不支持语音输入');
     await page.click(BUTTON); assert.equal(await page.textContent('.wp-voice-toast'), '当前浏览器不支持语音输入');
   });
+});
+
+test('pending permission cancellation stops late tracks; early stop skips recognition', LONG, async () => {
+  for (const action of ['cancel', 'finish']) {
+    await session('pending-permission-' + action, { init: [[() => {
+      const get = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = options => new Promise(resolve => {
+        window.__grantVoice = async () => {
+          const stream = await get(options); window.__voiceTracks = stream.getTracks(); resolve(stream);
+        };
+      });
+      const resume = AudioContext.prototype.resume;
+      AudioContext.prototype.resume = function () { window.__voiceContext = this; return resume.call(this); };
+    }]] }, async ({ page }) => {
+      const hits = suite.harness.voice.hits.length;
+      await page.click(BUTTON); await page.waitForSelector(BUTTON + '[data-state="starting"]');
+      assert.equal(await page.evaluate(() => Boolean(window.__voiceContext)), true, 'context created in the gesture');
+      if (action === 'cancel') await page.keyboard.press('Escape'); else await page.click(BUTTON);
+      await page.evaluate(() => window.__grantVoice());
+      await page.waitForFunction(() => window.__voiceTracks?.every(track => track.readyState === 'ended') && window.__voiceContext.state === 'closed');
+      await page.waitForSelector(BUTTON + '[data-state="idle"]');
+      assert.equal(suite.harness.voice.hits.length, hits);
+      if (action === 'finish') assert.equal(await page.textContent('.wp-voice-toast'), '说话时间太短');
+    });
+  }
+});
+
+test('worklet load failure falls back to PCM; cancellation while loading releases tracks and Blob URLs', LONG, async () => {
+  for (const mode of ['failure', 'cancel']) {
+    await session('worklet-' + mode, { init: [[mode => {
+      const Base = AudioContext, revoke = URL.revokeObjectURL;
+      window.__voiceRevoked = [];
+      URL.revokeObjectURL = url => { window.__voiceRevoked.push(url); revoke.call(URL, url); };
+      window.AudioContext = class extends Base {
+        constructor() {
+          super(); window.__voiceContext = this;
+          this.audioWorklet.addModule = url => {
+            window.__voiceBlob = url;
+            if (mode === 'failure') return Promise.reject(new Error('fixture worklet failure'));
+            return new Promise(resolve => { window.__loadVoice = resolve; });
+          };
+        }
+      };
+      const get = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = async options => {
+        const stream = await get(options); window.__voiceTracks = stream.getTracks(); return stream;
+      };
+    }, mode]] }, async ({ page }) => {
+      const hits = suite.harness.voice.hits.length;
+      if (mode === 'failure') {
+        await toggle(page); assert.equal(await page.inputValue(AREA), TEXT);
+        assert.equal(suite.harness.voice.hits.length, hits + 1);
+      } else {
+        await page.click(BUTTON); await page.waitForFunction(() => Boolean(window.__loadVoice));
+        await page.keyboard.press('Escape'); await page.evaluate(() => window.__loadVoice());
+        await page.waitForSelector(BUTTON + '[data-state="idle"]');
+        assert.equal(suite.harness.voice.hits.length, hits);
+      }
+      await page.waitForFunction(() => window.__voiceContext.state === 'closed');
+      assert.ok(await page.evaluate(() => window.__voiceTracks.every(track => track.readyState === 'ended')));
+      assert.ok(await page.evaluate(() => window.__voiceRevoked.includes(window.__voiceBlob)));
+    });
+  }
 });
 
 test('recognition disables button and shows spinner; 50s warning and 60s automatic stop', LONG, async () => {

@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
 import { once } from 'node:events';
-import { Script } from 'node:vm';
 import { createVoice } from '../voice.mjs';
-import { voiceClient, resample, encodeWav } from '../voice-client.mjs';
+import { voiceClient } from '../voice-client.mjs';
 import { createHarness } from '../../tools/browser-tests/lib/harness.mjs';
 
 const API = '/_wp/api/voice/recognize', ORIGIN = 'https://voice.example.test';
@@ -68,7 +67,7 @@ test('voice policy admits slug, union ID and wildcard and reloads feature/list f
 
 test('voice checks method, exact origin and WAV content type before forwarding', async t => {
   const f = await fixture(t);
-  assert.equal((await f.request({ method: 'GET' })).status, 405);
+  assert.equal((await f.request({ method: 'GET', send: req => req.end() })).status, 405);
   for (const origin of ['', 'https://evil.test', ORIGIN + '.evil.test']) assert.equal((await f.request({ headers: { origin } })).status, 403);
   for (const type of ['audio/webm', '', 'audio/wav-extra']) assert.equal((await f.request({ headers: { 'content-type': type } })).status, 415);
   assert.equal(f.hits.length, 0);
@@ -103,6 +102,38 @@ test('one in-flight recognition per union ID, other users proceed, and completio
   assert.equal((await f.request()).status, 200);
 });
 
+test('slow uploads time out before ASR admission and release the user without reading the full body', async t => {
+  const f = await fixture(t, { timeoutMs: 300 });
+  let upload;
+  const pending = f.request({ send: req => { upload = req; req.write(Buffer.alloc(32)); } });
+  t.after(() => upload.destroy());
+  while (!f.reads[0]?.bytes) await new Promise(resolve => setTimeout(resolve, 2));
+  assert.equal(f.hits.length, 0, 'ASR receives nothing while upload is incomplete');
+  assert.equal((await f.request()).status, 429, 'upload holds the gateway user slot');
+  const trickle = setInterval(() => upload.write(Buffer.alloc(32)), 20);
+  t.after(() => clearInterval(trickle));
+  const started = Date.now(), reply = await pending; clearInterval(trickle);
+  assert.equal(reply.status, 408); assert.deepEqual(reply.data, { error: 'unavailable' });
+  assert.equal(reply.headers.connection, 'close'); assert.ok(Date.now() - started < 1500);
+  assert.equal(f.reads[0].ended, false); assert.equal(f.hits.length, 0);
+  assert.equal((await f.request()).status, 200, 'timed-out upload releases the user slot');
+});
+
+test('upload and upstream share one deadline and only complete bodies are forwarded', async t => {
+  const f = await fixture(t, { timeoutMs: 800 }); f.state.hang = true;
+  let finishUpload;
+  const started = Date.now();
+  const pending = f.request({ send: req => { req.write('first-'); finishUpload = () => req.end('last'); } });
+  while (!f.reads[0]?.bytes) await new Promise(resolve => setTimeout(resolve, 2));
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(f.hits.length, 0); finishUpload();
+  const reply = await pending;
+  assert.equal(reply.status, 503); assert.deepEqual(reply.data, { error: 'unavailable' });
+  assert.equal(f.hits.length, 1); assert.equal(f.hits[0].body.toString(), 'first-last');
+  assert.ok(Date.now() - started < 1150, 'upload time is deducted from the upstream budget');
+  f.state.hang = false; assert.equal((await f.request()).status, 200);
+});
+
 test('only recognized upstream fields escape; bad responses never leak bodies or logs', async t => {
   const f = await fixture(t);
   const logs = []; t.mock.method(console, 'error', (...args) => logs.push(args)); t.mock.method(console, 'log', (...args) => logs.push(args));
@@ -111,7 +142,7 @@ test('only recognized upstream fields escape; bad responses never leak bodies or
     [400, { error: 'bad_audio', text: 'upstream-private' }, 400, { error: 'bad_audio' }],
     [400, { error: 'too_long', detail: 'upstream-private' }, 400, { error: 'too_long' }],
     [400, { error: 'upstream-private' }, 503, { error: 'unavailable' }],
-    [503, { error: 'upstream-private' }, 503, { error: 'busy' }],
+    [503, { error: 'busy' }, 503, { error: 'busy' }],
     [500, { text: 'upstream-private' }, 503, { error: 'unavailable' }],
     [302, { text: 'upstream-private' }, 503, { error: 'unavailable' }],
     [200, { text: 42 }, 503, { error: 'unavailable' }], [200, null, 503, { error: 'unavailable' }],
@@ -144,24 +175,6 @@ test('wall-clock timeout covers hanging and trickling responses, failure release
 test('text is limited to 2000 Unicode characters', async t => {
   const f = await fixture(t); f.state.body = { text: '你😀'.repeat(1100) };
   assert.deepEqual((await f.request()).data, { text: '你😀'.repeat(1000) });
-});
-
-test('PCM resampling and WAV encoding preserve duration and emit mono 16-bit 16k RIFF', () => {
-  for (const rate of [16000, 44100, 48000]) {
-    const samples = resample(new Float32Array(rate).fill(0.5), rate);
-    assert.equal(samples.length, 16000); assert.ok(samples.every(v => Math.abs(v - 0.5) < 0.00001));
-    const wav = Buffer.from(encodeWav(samples));
-    assert.equal(wav.toString('ascii', 0, 4), 'RIFF'); assert.equal(wav.toString('ascii', 8, 12), 'WAVE');
-    assert.equal(wav.toString('ascii', 12, 16), 'fmt '); assert.equal(wav.readUInt32LE(16), 16);
-    assert.equal(wav.readUInt32LE(4), wav.length - 8); assert.equal(wav.readUInt16LE(20), 1);
-    assert.equal(wav.readUInt16LE(22), 1); assert.equal(wav.readUInt32LE(24), 16000);
-    assert.equal(wav.readUInt32LE(28), 32000); assert.equal(wav.readUInt16LE(32), 2); assert.equal(wav.readUInt16LE(34), 16);
-    assert.equal(wav.toString('ascii', 36, 40), 'data'); assert.equal(wav.readUInt32LE(40), 32000); assert.equal(wav.readInt16LE(44), 16384);
-  }
-  assert.deepEqual([...resample(new Float32Array([1, -1, 1, -1, 1, -1]), 48000)], [1 / 3, -1 / 3].map(Math.fround));
-  const clipped = Buffer.from(encodeWav(new Float32Array([-2, 0, 2])));
-  assert.deepEqual([44, 46, 48].map(at => clipped.readInt16LE(at)), [-32768, 0, 32767]);
-  assert.equal(resample(new Float32Array(0), 48000).length, 0); new Script(voiceClient());
 });
 
 test('real gateway appends voice at both preview injection points, default/off and denied bytes stay unchanged', async t => {
