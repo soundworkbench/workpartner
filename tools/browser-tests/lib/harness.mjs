@@ -12,6 +12,7 @@ import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSite } from './site.mjs';
+import { startVoiceFixture } from './voice.mjs';
 
 export const HOST = 'workspace.example.test';
 export const ORIGIN = `https://${HOST}`;
@@ -171,11 +172,12 @@ export async function createHarness(group) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-browser-tests-'));
   const logs = path.join(outputRoot, 'logs');
   fs.mkdirSync(logs, { recursive: true });
-  const staticDir = buildSite(repo, path.join(work, 'site'));
+  const staticDir = buildSite(repo, path.join(work, 'site'), { voice: group === 'voice' });
   const { organizationData, nextModelConfig } = await import(pathToFileURL(path.join(repo, 'gateway/organization/resolve.mjs')).href);
   const sessionKey = crypto.randomBytes(24).toString('hex');
   const gateways = [];
   const model = await startModelGateway();
+  const voice = group === 'voice' ? await startVoiceFixture(work) : null;
 
   // Fixture upstream: login always succeeds, API calls return an empty list, everything else is a static file.
   const upstream = http.createServer((req, res) => {
@@ -208,7 +210,7 @@ export async function createHarness(group) {
     return data + '.' + crypto.createHmac('sha256', sessionKey).update(data).digest('base64url');
   }
 
-  async function startGateway(name, { preview = true, feedback = true, allow = ['member'], handlers = ['union-handler'], maxImageBytes = 300000, maxImagesPerItem = 3, myKey = null, resetBroker = null, feishuBot = null, bots = [] } = {}) {
+  async function startGateway(name, { preview = true, feedback = true, allow = ['member'], handlers = ['union-handler'], maxImageBytes = 300000, maxImagesPerItem = 3, myKey = null, resetBroker = null, voice = null, asrUrl = null, feishuBot = null, bots = [] } = {}) {
     const run = path.join(work, 'run-' + name);
     fs.mkdirSync(path.join(run, 'secure/aionui'), { recursive: true });
     const runModel = resetBroker ? await startModelGateway() : model;
@@ -220,6 +222,8 @@ export async function createHarness(group) {
     org.features.preview = preview;
     org.features.feedback = feedback;
     org.features.myKey = Boolean(myKey);
+    org.features.voice = Boolean(voice);
+    if (voice) org.voice = voice;
     org.features.feishuBot = Boolean(feishuBot);
     if (feishuBot) org.feishuBot = feishuBot;
     if (myKey) org.myKey = { ...org.myKey, allow: ['member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 2, ...myKey,
@@ -302,7 +306,7 @@ http.Server.prototype.listen = function (...args) {
 globalThis.fetch = async url => { throw new Error('fixture: external fetch blocked ' + String(url).slice(0, 80)); };
 `);
     const child = fork(path.join(repo, 'gateway/gateway.mjs'), [], { execArgv: ['--import', pathToFileURL(transport).href], silent: true,
-      env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: run, ...(preview ? { PREVIEW_HOST } : {}) } });
+      env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: run, ...(asrUrl ? { WP_ASR_URL: asrUrl } : {}), ...(preview ? { PREVIEW_HOST } : {}) } });
     const logFile = path.join(logs, `${group}-gateway-${name}.log`);
     const log = fs.createWriteStream(logFile);
     child.stdout.pipe(log); child.stderr.pipe(log);
@@ -368,12 +372,13 @@ globalThis.fetch = async url => { throw new Error('fixture: external fetch block
   }
 
   return {
-    group, frontPort, sessionKey, cookie, startGateway, model,
+    group, frontPort, sessionKey, cookie, startGateway, model, voice,
     /** Point the browser-facing front at another gateway. */
     use(gateway) { target = gateway.port; },
     async stop() {
       for (const gateway of gateways) await gateway.stop();
       await model.stop();
+      await voice?.stop();
       front.close(); upstream.close();
       front.closeAllConnections?.(); upstream.closeAllConnections?.();
       fs.rmSync(work, { recursive: true, force: true });

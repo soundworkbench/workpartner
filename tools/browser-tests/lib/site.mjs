@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-export function buildSite(repo, out) {
+export function buildSite(repo, out, { voice = false } = {}) {
   const overlay = path.join(repo, 'image/rebrand/overlay');
   const brand = path.join(out, 'brand');
   const site = path.join(out, 'static');
@@ -63,6 +63,19 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Fixture</title>
+    ${voice ? `<style>
+      #voice-composer { width:100%; max-width:680px; margin-top:32px; }
+      #voice-composer textarea { box-sizing:border-box; width:100%; min-height:80px; }
+      #voice-composer .sendbox-actions, #voice-composer .fixture-home-actions { display:flex; align-items:center; justify-content:flex-end; }
+      #voice-composer .sendbox-tools-mobile-compact { display:none; }
+      #voice-composer [data-testid="send"] { flex:0 0 auto; width:48px; height:32px; }
+      @media(max-width:767px) {
+        #voice-composer .sendbox-actions { display:none; }
+        #voice-composer .sendbox-tools-mobile-compact { display:flex; justify-content:flex-end; align-items:center; }
+        #root > aside { display:none !important; }
+        #root > main { padding:16px !important; }
+      }
+    </style>` : ''}
     <script type="module" src="./assets/native-shim.js"></script>
     <script src="/_wp/preview/client.js"></script>
     <script src="./wp-web-tools.js?v=test"></script>
@@ -86,6 +99,11 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
           <input id="fixture-input" type="text" placeholder="state probe" style="box-sizing:border-box;max-width:100%" />
         </div>
         <a id="fixture-market" href="#/market">market</a>
+        ${voice ? `<form id="voice-composer"><div class="sendbox-panel">
+          <textarea data-testid="sendbox-input" aria-label="消息"></textarea>
+          <div class="sendbox-actions"><button type="submit" data-testid="send">发送</button></div>
+          <div class="sendbox-tools-mobile-compact"></div>
+        </div></form>` : ''}
       </main>
     </div>
     <script>
@@ -93,6 +111,24 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       window.__routes = [];
       function showRoute() { document.getElementById('fixture-route').textContent = 'route=' + location.hash; window.__routes.push(location.href); }
       addEventListener('hashchange', showRoute); showRoute();
+      ${voice ? `
+      window.__sent = 0; window.__voiceInputs = [];
+      const form = document.querySelector('#voice-composer');
+      form.addEventListener('submit', event => { event.preventDefault(); window.__sent++; });
+      function composer() {
+        const home = location.hash === '#/guid';
+        form.innerHTML = home
+          ? '<div class="fixture_guidInputInner"><textarea data-testid="guid-input" aria-label="消息"></textarea><div class="fixture-home-actions"><button class="fixture_actionSubmit" type="submit" data-testid="send">发送</button></div></div>'
+          : '<div class="sendbox-panel"><textarea data-testid="sendbox-input" aria-label="消息"></textarea><div class="sendbox-actions"><button type="submit" data-testid="send">发送</button></div><div class="sendbox-tools-mobile-compact"></div></div>';
+        const area = form.querySelector('textarea'), native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+        let tracked = '';
+        Object.defineProperty(area, 'value', { get() { return native.get.call(this); }, set(value) { tracked = value; native.set.call(this, value); } });
+        area.addEventListener('input', () => { if (area.value !== tracked) { tracked = area.value; window.__voiceInputs.push(tracked); } });
+        if (!home && innerWidth < 768) form.querySelector('.sendbox-tools-mobile-compact').append(form.querySelector('[data-testid="send"]'));
+      }
+      window.__renderComposer = composer;
+      addEventListener('hashchange', composer); composer();
+      ` : ''}
     </script>
   </body>
 </html>
