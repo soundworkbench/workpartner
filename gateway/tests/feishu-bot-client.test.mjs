@@ -451,7 +451,7 @@ test('create with setup none shows retry immediately and starts only when retry 
   assert.equal(p.requests.filter(r => r.url.endsWith('/agents')).length, 1);
 });
 
-test('setup not_found stops polling, hides an old QR and leaves the card feature available', async () => {
+test('setup not_found stops polling, hides an old QR, refreshes cards and leaves no retry', async () => {
   let missing = false;
   const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/setup')
     ? missing ? jsonResponse({ error: 'not_found' }, 404) : jsonResponse({ status: 'waiting', qr: 'data:image/png;base64,YQ==' }) : undefined });
@@ -460,19 +460,27 @@ test('setup not_found stops polling, hides an old QR and leaves the card feature
   assert.equal(dialog.querySelector('img').hidden, false);
   missing = true; await tick(p, 2000);
   const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
+  const cardRefreshes = () => p.requests.filter(r => r.url.endsWith('/bots'));
   assert.equal(setupRequests().at(-1).options.method, 'GET');
-  assert.match(dialog.textContent, /操作没有成功，请稍后重试/);
+  assert.match(dialog.textContent, /这个子助手已不存在/);
   assert.equal(dialog.querySelector('img').hidden, true);
+  assert.equal(findButton(dialog, '重试').hidden, true);
+  assert.equal(cardRefreshes().length, 2);
   assert.equal([...p.timers.values()].some(t => t.delay === 2000 || t.delay === 10000), false);
   await tick(p, 60000);
   p.document.hidden = true; await p.listeners.visibilitychange();
   p.document.hidden = false; await p.listeners.visibilitychange(); await settle();
   assert.equal(setupRequests().length, 2);
   assert.ok(p.document.querySelector('.wp-feishu-bot-section'));
+});
+
+test('setup errors other than not_found keep the generic message and retry button', async () => {
+  const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/setup')
+    ? jsonResponse({ error: 'unavailable' }, 500) : undefined });
+  await settle(); await findButton(p.document, '扫码连接').fire('click'); await settle();
+  const dialog = p.document.querySelector('dialog'); await tick(p, 2000);
+  assert.match(dialog.textContent, /操作没有成功，请稍后重试/);
   assert.equal(findButton(dialog, '重试').hidden, false);
-  missing = false; await findButton(dialog, '重试').fire('click');
-  assert.equal(setupRequests().at(-1).options.method, 'POST');
-  assert.equal([...p.timers.values()].some(t => t.delay === 2000), true);
 });
 
 test('rename validates, reports conflict and success; delete confirms; sub restart targets its own id', async () => {
