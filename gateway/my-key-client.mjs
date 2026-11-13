@@ -53,7 +53,7 @@ function installMyKey() {
       const nextLanguage = locale();
       if (language !== nextLanguage) { language = nextLanguage; if (dialog) render(); }
       document.querySelectorAll('.wp-settings-menu').forEach(menu => {
-        const logout = [...menu.querySelectorAll('[role="menuitem"]')].filter(n => !n.matches('[data-wp-feedback], [data-wp-my-key]')).at(-1);
+        const logout = [...menu.querySelectorAll('[role="menuitem"]')].filter(n => !n.matches('[data-wp-feedback], [data-wp-my-key], [data-wp-feishu-bot]')).at(-1);
         if (!logout) return;
         let entry = menu.querySelector('[data-wp-my-key]');
         if (!entry) {
@@ -63,12 +63,13 @@ function installMyKey() {
         if (entry.nextElementSibling !== logout) menu.insertBefore(entry, logout);
         const feedback = menu.querySelector('[data-wp-feedback]');
         if (feedback && feedback.nextElementSibling !== entry) menu.insertBefore(feedback, entry);
+        const first = menu.querySelector('[data-wp-feishu-bot]') || feedback || entry;
         let sep = menu.querySelector('[data-wp-my-key-separator]');
-        // Feedback may reuse our separator when its installer arrives later.
-        if (sep && ((sep.nextElementSibling !== entry && sep.nextElementSibling !== feedback)
+        // Other gateway menu entries may reuse our separator when installed later.
+        if (sep && (sep.nextElementSibling !== first
           || sep.previousElementSibling?.matches('.wp-pick-sep, [data-wp-feedback]') || sep.nextElementSibling?.matches('.wp-pick-sep'))) { sep.remove(); sep = null; }
-        if (!entry.previousElementSibling?.matches('.wp-pick-sep, [data-wp-feedback]')) {
-          sep = node('div', undefined, 'wp-pick-sep'); sep.setAttribute('data-wp-my-key-separator', ''); menu.insertBefore(sep, entry);
+        if (!first.previousElementSibling?.matches('.wp-pick-sep')) {
+          sep = node('div', undefined, 'wp-pick-sep'); sep.setAttribute('data-wp-my-key-separator', ''); menu.insertBefore(sep, first);
         }
         const label = t('我的钥匙', 'My key'); if (entry.textContent !== label) entry.textContent = label;
         const avatar = document.querySelector('button.wp-user[aria-expanded="true"]') || document.querySelector('button.wp-user');

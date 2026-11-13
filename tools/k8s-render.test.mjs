@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { organizationData } from '../gateway/organization/resolve.mjs';
 import { renderManifests, writeManifests } from './k8s/render.mjs';
 
@@ -73,6 +74,87 @@ function cli(args, options = {}) {
 function documents(text) {
   return text.trim().split(/^---\s*$/m).map(document => JSON.parse(document));
 }
+
+test('disabled ASR preserves pre-ASR CLI output byte for byte in all deployment modes', t => {
+  // Captured from the unmodified renderer before adding ASR support.
+  const hashes = {
+    'hostPort-selector': '80ccfdaa7a4f99d12db6812864cc33e94a3ba3c8a5400772e35654761657e2b6',
+    'hostPort-endpoint': '160615aa58cbe9c1e2625538aa7e0c3beed9341a3fc8fd9095d81e859ed0c9ad',
+    'clusterIP-selector': '31fc1981ed41b6ac5c06d87d18b63fba82ce79a5ecf61c0705d4804e0c09f7cc',
+    'clusterIP-endpoint': '0e944e7b49c2d8a8a11097532a5907e2debdbc4b5e9baab97e719b095ddd6c35',
+  };
+  const directory = temporary(t);
+  for (const [mode, hash] of Object.entries(hashes)) {
+    const org = fixture();
+    if (mode.startsWith('clusterIP')) org.runtime.k8s.deploy.entry = { mode: 'clusterIP', clusterIP: '10.43.0.80' };
+    if (mode.endsWith('endpoint')) {
+      delete org.runtime.k8s.deploy.modelEgressSelector;
+      org.runtime.k8s.deploy.modelEgressEndpoint = { address: '192.0.2.10', port: 4100 };
+    }
+    for (const asr of [undefined, { enabled: false, image: 'unused', nodeName: 'unused', threads: 4 }]) {
+      org.runtime.k8s.deploy.asr = asr;
+      fs.writeFileSync(path.join(directory, 'organization.json'), JSON.stringify(org));
+      const result = cli(['--org', directory]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(createHash('sha256').update(result.stdout).digest('hex'), hash, mode);
+    }
+  }
+});
+
+test('enabled ASR adds only its Deployment, Service and gateway-only NetworkPolicy', () => {
+  const org = fixture();
+  const baseline = renderManifests(org).objects;
+  org.runtime.k8s.deploy.asr = { enabled: true, image: 'docker.io/library/wp-asr:test', nodeName: 'srv2153109', threads: 3 };
+  const objects = renderManifests(org).objects;
+  assert.deepEqual(objects.slice(0, baseline.length), baseline);
+  const added = objects.slice(baseline.length);
+  assert.deepEqual(added.map(item => item.kind), ['Deployment', 'Service', 'NetworkPolicy']);
+  for (const item of added) assert.equal(item.metadata.namespace, 'fixture-system');
+  const deployment = find(added, 'Deployment', 'wp-asr');
+  assert.equal(deployment.spec.replicas, 1);
+  assert.equal(deployment.spec.strategy.type, 'Recreate');
+  const pod = deployment.spec.template.spec;
+  const labels = deployment.spec.template.metadata.labels;
+  assert.deepEqual(deployment.spec.selector.matchLabels, labels);
+  assert.deepEqual(pod.nodeSelector, { 'kubernetes.io/hostname': 'srv2153109' });
+  assert.equal(pod.automountServiceAccountToken, false);
+  assert.equal(pod.securityContext.runAsNonRoot, true);
+  assert.equal(pod.securityContext.runAsUser, 10001);
+  const container = pod.containers[0];
+  assert.equal(container.image, org.runtime.k8s.deploy.asr.image);
+  assert.equal(container.imagePullPolicy, 'Never');
+  assert.deepEqual(container.env, [{ name: 'ASR_THREADS', value: '3' }]);
+  assert.deepEqual(container.resources, { requests: { cpu: '500m', memory: '1Gi' }, limits: { cpu: '2', memory: '2Gi' } });
+  assert.deepEqual(container.securityContext, {
+    runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] },
+  });
+  for (const name of ['readinessProbe', 'livenessProbe', 'startupProbe']) {
+    assert.deepEqual(container[name].httpGet, { path: '/healthz', port: 'http' });
+  }
+  assert.ok(container.readinessProbe.initialDelaySeconds >= 30);
+  assert.ok(container.livenessProbe.initialDelaySeconds >= 120);
+  const service = find(added, 'Service', 'wp-asr');
+  assert.deepEqual(service.spec, { type: 'ClusterIP', selector: labels,
+    ports: [{ name: 'http', port: 8080, targetPort: 8080, protocol: 'TCP' }] });
+  const policy = find(added, 'NetworkPolicy', 'wp-asr');
+  assert.deepEqual(policy.spec, {
+    podSelector: { matchLabels: labels }, policyTypes: ['Ingress', 'Egress'],
+    ingress: [{ from: [{ podSelector: { matchLabels: gatewayLabels } }], ports: [{ protocol: 'TCP', port: 8080 }] }],
+    egress: [],
+  });
+  delete org.runtime.k8s.deploy.asr.threads;
+  assert.deepEqual(find(renderManifests(org).objects, 'Deployment', 'wp-asr').spec.template.spec.containers[0].env,
+    [{ name: 'ASR_THREADS', value: '2' }]);
+  assert.equal(renderManifests(org, { only: 'NetworkPolicy' }).objects.filter(item => item.metadata.name === 'wp-asr').length, 1);
+});
+
+test('ASR rejects invalid enabled configuration', () => {
+  for (const change of [{ enabled: 'true' }, { image: '' }, { nodeName: '' }, { threads: 0 }, { threads: 1.5 }, { threads: '2' }]) {
+    const org = fixture();
+    org.runtime.k8s.deploy.asr = { enabled: true, image: 'wp-asr:test', nodeName: 'srv2153109', ...change };
+    assert.throws(() => renderManifests(org), /runtime.k8s.deploy.asr/);
+  }
+});
 
 test('neutral defaults report all missing deployment settings without inventing organization values', () => {
   assert.throws(() => renderManifests(defaults), error => {

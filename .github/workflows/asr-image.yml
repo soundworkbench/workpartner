@@ -1,0 +1,27 @@
+name: ASR image
+on:
+  pull_request:
+    paths:
+      - 'asr/**'
+      - '.github/workflows/asr-image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'asr/**'
+      - '.github/workflows/asr-image.yml'
+permissions:
+  contents: read
+jobs:
+  asr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Unit tests with fake recognizer
+        run: python3 -m unittest discover asr/tests
+      - name: Build CPU image
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: docker build --platform linux/amd64 -t wp-asr:ci asr/
+      - name: Recognize model sample and check HTTP errors
+        run: bash asr/tests/smoke.sh wp-asr:ci

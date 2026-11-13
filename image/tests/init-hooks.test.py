@@ -5,6 +5,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -326,6 +327,9 @@ exec ''' + shlex.quote(timeout) + ' --foreground --kill-after=0.2s 1s "$@"\n')
     def test_startup_continues_after_published_link_failure(self):
         self.exercise_startup(('aionui', 'bridge', 'relay'), 'bridge', published=True)
 
+    def test_entrypoint_term_stops_bridge(self):
+        self.exercise_startup(('aionui', 'bridge', 'relay'), 'TERM')
+
     def exercise_startup(self, services, exiting, published=False):
         with tempfile.TemporaryDirectory(dir=self.root) as temporary:
             root = Path(temporary)
@@ -351,6 +355,7 @@ touch "$STATE/hooks"
             service = '''#!/bin/bash
 [ -f "$STATE/hooks" ] || exit 92
 touch "$STATE/$SERVICE-ready"
+echo $$ >> "$STATE/$SERVICE-pids"
 while [ ! -e "$STATE/$SERVICE-exit" ]; do sleep 0.02; done
 exit 23
 '''
@@ -364,13 +369,17 @@ else
 fi
 ''')
             relay = self.write(root / 'relay', service.replace('$SERVICE', 'relay'), 0o700)
-            self.executable('python3', 'exit 0\n')
+            self.write(app / 'bin/wp-feishu-bot.py', (ROOT / 'bin/wp-feishu-bot.py').read_text())
+            self.executable('python3', f'if [[ "$*" == *wp-feishu-bot.py* ]]; then exec {sys.executable} "$@"; fi\nexit 0\n')
             self.executable('curl', 'exit 0\n')
             source = (ROOT / 'bin/start.sh').read_text()
             source = source.replace('/opt/workpartner', str(app)).replace('/opt/aionui', str(ui))
             source = source.replace('/tmp/aionui', str(root / 'uploads')).replace('/data', str(data))
             script = self.write(root / 'start.sh', source)
-            env = dict(self.env, STATE=str(state), FIXTURE_DATA=str(data), RELAY=str(relay))
+            env = dict(self.env, STATE=str(state), FIXTURE_DATA=str(data), RELAY=str(relay),
+                       WP_CC_CONNECT_DIR=str(data / ".cc-connect"),
+                       WP_CC_CONNECT_BIN=str(app / 'bin/cc-connect'),
+                       PATH=str(app / "bin") + os.pathsep + self.env["PATH"])
             if published:
                 env['WORKPARTNER_PUBLISHED_DIR'] = str(self.published)
                 for name in PUBLISHED:
@@ -391,8 +400,19 @@ fi
                         for name in PUBLISHED[1:]:
                             self.assertEqual(os.readlink(data / name), str(self.published / name))
                         self.assertEqual(list(data.glob('.wp-published.*')), [])
-                    (state / (exiting + '-exit')).touch()
-                    self.assertEqual(process.wait(timeout=5), 23, log.read_text())
+                    if exiting == 'TERM':
+                        pid = int((data / '.cc-connect/run/bridge.pid').read_text())
+                        process.terminate()
+                        self.assertEqual(process.wait(timeout=5), 0, log.read_text())
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(pid, 0)
+                    else:
+                        (state / (exiting + '-exit')).touch()
+                        if exiting == 'bridge':
+                            self.wait_for(lambda: len((state / 'bridge-pids').read_text().splitlines()) >= 2, process)
+                            self.assertIsNone(process.poll(), log.read_text())
+                            (state / 'aionui-exit').touch()
+                        self.assertEqual(process.wait(timeout=5), 23, log.read_text())
                 finally:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)

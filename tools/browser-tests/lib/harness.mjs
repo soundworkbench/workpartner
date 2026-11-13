@@ -210,7 +210,7 @@ export async function createHarness(group) {
     return data + '.' + crypto.createHmac('sha256', sessionKey).update(data).digest('base64url');
   }
 
-  async function startGateway(name, { preview = true, feedback = true, allow = ['member'], handlers = ['union-handler'], maxImageBytes = 300000, maxImagesPerItem = 3, myKey = null, resetBroker = null, voice = null, asrUrl = null } = {}) {
+  async function startGateway(name, { preview = true, feedback = true, allow = ['member'], handlers = ['union-handler'], maxImageBytes = 300000, maxImagesPerItem = 3, myKey = null, resetBroker = null, voice = null, asrUrl = null, feishuBot = null, bots = [] } = {}) {
     const run = path.join(work, 'run-' + name);
     fs.mkdirSync(path.join(run, 'secure/aionui'), { recursive: true });
     const runModel = resetBroker ? await startModelGateway() : model;
@@ -224,6 +224,8 @@ export async function createHarness(group) {
     org.features.myKey = Boolean(myKey);
     org.features.voice = Boolean(voice);
     if (voice) org.voice = voice;
+    org.features.feishuBot = Boolean(feishuBot);
+    if (feishuBot) org.feishuBot = feishuBot;
     if (myKey) org.myKey = { ...org.myKey, allow: ['member'], publicBaseUrl: 'https://models.example.test', revealSeconds: 2, ...myKey,
       reset: { ...org.myKey.reset, ...myKey.reset } };
     Object.assign(org.runtime, { gatewayPort: 0, internalPort: 0, uid: process.getuid(), nextImage: 'fixture-image', nextPort: upstreamPort,
@@ -244,14 +246,22 @@ export async function createHarness(group) {
 
     // Fixture container API: every workspace container exists, runs the expected image and is reachable on loopback.
     const networks = Object.fromEntries(USERS.map(u => [`workpartner-next-${u.slug}-net`, { IPAddress: '127.0.0.1' }]));
-    const restarts = [];
+    const restarts = [], botCommands = [], commands = new Map();
     const docker = http.createServer(async (req, res) => {
-      for await (const _ of req);
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
       res.setHeader('content-type', 'application/json');
-      if (req.url.endsWith('/exec')) { res.writeHead(201); return res.end('{"Id":"command"}'); }
-      if (req.url === '/exec/command/json') return res.end('{"ExitCode":0}');
-      if (req.url === '/exec/command/start') {
-        const bytes = Buffer.from('{"skills":[]}'), header = Buffer.alloc(8);
+      if (req.url.endsWith('/exec')) {
+        const id = String(commands.size + 1); commands.set(id, body.Cmd || []);
+        if (body.Cmd?.includes('/opt/workpartner/bin/wp-feishu-bot.py')) botCommands.push(body.Cmd);
+        res.writeHead(201); return res.end(JSON.stringify({ Id: id }));
+      }
+      if (/^\/exec\/[^/]+\/json$/.test(req.url)) return res.end('{"ExitCode":0}');
+      if (/^\/exec\/[^/]+\/start$/.test(req.url)) {
+        const command = commands.get(req.url.split('/')[2]);
+        const value = command?.includes('/opt/workpartner/bin/wp-feishu-bot.py')
+          ? (command.includes('info') ? { ok: true, bots } : { ok: true }) : { skills: [] };
+        const bytes = Buffer.from(JSON.stringify(value)), header = Buffer.alloc(8);
         header[0] = 1; header.writeUInt32BE(bytes.length, 4);
         return res.end(Buffer.concat([header, bytes]));
       }
@@ -311,7 +321,8 @@ globalThis.fetch = async url => { throw new Error('fixture: external fetch block
     if (resetBroker) fs.mkdirSync(path.join(org.runtime.stateDirectory, 'my-key'), { recursive: true, mode: 0o700 });
     const broker = resetBroker ? standInResetBroker(org, organizationFile, runModel, resetBroker) : null;
     const gateway = {
-      name, port, preview, feedback, botToken, broker, restarts, model: runModel,
+      name, port, preview, feedback, botToken, broker, restarts, botCommands, model: runModel,
+      setBots(value) { bots = value; },
       setMyKey(settings) {
         const data = JSON.parse(fs.readFileSync(organizationFile, 'utf8'));
         data.myKey = { ...data.myKey, ...settings, reset: { ...data.myKey.reset, ...settings.reset } };

@@ -135,3 +135,46 @@
 ### 3. 需要协调者处理
 
 请在允许监听端口且已有仓库锁定依赖和 Chrome/Chromium 的 Actions 环境运行 `bash tools/check.sh`、voice 与 menu/flow/access/my-key 浏览器组，并检查六张布局截图。另将 `node --test --test-name-pattern='oversized' gateway/tests/voice.test.mjs` 连跑 30 次统计失败数，并复核慢速上传 408 用例。当前仅完成测试修正和本机可执行的检查，HTTP 稳定性及浏览器验收仍待 Actions 验证；不需要新增依赖或越界改动。
+
+## 第 4 轮（2026-11-13）
+
+### 1. 冲突解决
+
+本轮仅解决协调者发起的 `origin/main` 合并冲突并追加报告，不修改功能逻辑。
+
+- `.github/workflows/browser-tests.yml`：matrix 合并为 `menu, flow, access, my-key, voice, feishu-bot`，保留原有四组并同时运行两个新增组。
+- `docs/organization.md`：完整保留语音的开关、名单、接口和录音说明，随后保留主干飞书机器人的配置、接口、刷新和 onboarding 重启说明。
+- `gateway/gateway.mjs`：同时保留 `voice` / `feishuBot` 声明、导入、初始化；preview 开启和关闭两处均拼接双方客户端脚本；双方路由均保留在 `/_wp/` 兜底及主转发读取请求体之前。
+- `gateway/organization/default.json`：同时保留 `features.voice: false`、`features.feishuBot: false`，以及独立的 `voice.allow: []`、`feishuBot.allow: []`，正确补齐对象和逗号。
+- `tools/browser-tests/lib/harness.mjs`：`startGateway` 同时接受 `voice/asrUrl` 与 `feishuBot/bots`；分别写入双方 feature/allow 配置，保留已自动合并的 ASR 夹具及机器人命令夹具。
+- `tools/browser-tests/run.mjs`：说明和 `GROUPS` 同时包含 `voice`、`feishu-bot`，默认运行全部六组。
+- 本报告：追加逐文件合并说明、测试结果及待协调事项。
+
+未执行 `git add` / `git commit`，未新增依赖。未编辑 `image/`、`asr/`、`deploy/`；合并开始时这些目录已有的主干变更保持原样。由于没有暂存解决结果，Git 索引仍保留这六个文件的 unmerged 状态，待协调者完成暂存和合并提交。
+
+### 2. 验证
+
+环境：Node v22.22.1。已通过：
+
+- 分别执行 `node --check gateway/gateway.mjs`、`node --check tools/browser-tests/lib/harness.mjs`、`node --check tools/browser-tests/run.mjs`：全部通过。
+- 解析默认 JSON，同时检查重复键及双方默认关闭、空名单：通过。
+- `git diff --check`：无输出；`grep -rn '^<<<<<<<\|^>>>>>>>' .`：无输出；另用 `rg` 检查三类独占一行的冲突标记，无匹配。
+- `node gateway/tests/voice-client.test.mjs`：4/4 通过；日志 `tools/browser-tests/output/T-1185-round4-voice-client.test.log`。
+- `node gateway/tests/voice-upload.test.mjs`：3/3 通过；日志 `tools/browser-tests/output/T-1185-round4-voice-upload.test.log`。
+- `node gateway/tests/feishu-bot-client.test.mjs`：5/5 通过；日志 `tools/browser-tests/output/T-1185-round4-feishu-bot-client.test.log`。
+- `node gateway/tests/feishu-bot.test.mjs`：10/10 通过；日志 `tools/browser-tests/output/T-1185-round4-feishu-bot.test.log`。
+- `node tools/k8s/e2e/tests/organization.test.mjs`：7/7 通过（含嵌套用例）；日志 `tools/browser-tests/output/T-1185-round4-k8s-organization.log`。
+
+已执行，但未全部通过：
+
+- `node gateway/tests/voice.test.mjs`：10 个用例均在监听 `127.0.0.1` 时遇到 `listen EPERM`，无法验证真实 HTTP 行为；日志 `tools/browser-tests/output/T-1185-round4-voice.test.log`。
+- `node --test tools/organization-resolve.test.mjs tools/k8s/e2e/tests/organization.test.mjs`：Kubernetes organization 文件通过，resolve 文件失败；日志 `tools/browser-tests/output/T-1185-round4-organization.log`。随后直接运行 `node tools/organization-resolve.test.mjs` 定位到 9/10 通过，失败项为 `startup exports quick-line configuration and preserves a container override for child processes`：子进程退出码为 0、stdout/stderr 为空，期望 stdout 为 `fast'model`。单独重放相同启动片段仍得到空输出，尚未确定根因，未将其归类为 EPERM 或修改范围外代码；日志 `tools/browser-tests/output/T-1185-round4-organization-resolve.log`。
+- `node --test-name-pattern='organization|feishu bot preview' tools/gateway.test.mjs`：1/3 通过；飞书机器人 preview 开/关、名单准入及原脚本字节保留的用例通过，两个 organization 网关集成用例因 `listen EPERM` 失败；日志 `tools/browser-tests/output/T-1185-round4-gateway-integration.log`。
+- `node tools/browser-tests/run.mjs voice feishu-bot`：两个组均已被识别并尝试执行，但都因缺少仓库现有依赖 `playwright-core`（`ERR_MODULE_NOT_FOUND`）而未启动浏览器，未生成截图；日志 `tools/browser-tests/output/T-1185-round4-browser.log`。
+- `bash tools/check.sh`：前置语法检查完成，已有 `tools/wp-seed.test.py` 创建 HTTPServer 时遇到 `PermissionError: [Errno 1] Operation not permitted`，后续检查未执行；日志 `tools/browser-tests/output/T-1185-round4-check.log`。
+
+### 3. 需要协调者处理
+
+1. 暂存已解决的六个冲突文件及本报告，完成合并提交。
+2. 在 Actions 中运行完整检查及包含 `voice`、`feishu-bot` 的六组浏览器测试，验证受本机端口权限和依赖缺失阻断的项目。
+3. 复核 organization 的 quick-line 启动环境变量测试；本机观察到的空 stdout 尚未解释，不能报告为全绿。除此之外，没有遗留文本冲突或需要本轮扩大修改范围的事项。

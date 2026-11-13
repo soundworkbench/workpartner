@@ -86,9 +86,10 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
   execute: executeSkill,
 });
 const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
-let feedback, myKey, voice; // Preview callbacks run per request after feature initialization.
+let feedback, myKey, voice, feishuBot; // Preview callbacks run per request after feature initialization.
 const services = await createGatewayServices({ extraClient: user => (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || '')
-  + (voice?.clientFor(user) || ''), dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+  + (voice?.clientFor(user) || '')
+  + (feishuBot?.clientFor(user) || ''), dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
@@ -100,6 +101,7 @@ const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, 
 import { createFeedback } from './feedback.mjs';
 import { createMyKey } from './my-key.mjs';
 import { createVoice } from './voice.mjs';
+import { createFeishuBot } from './feishu-bot.mjs';
 voice = createVoice({ organization, organizationData, authenticate: req => userFor(req).user });
 feedback = organization.features.feedback ? createFeedback({ organization, organizationData,
   authenticate: req => userFor(req).user, tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()),
@@ -110,6 +112,10 @@ myKey = organization.features.myKey === true ? createMyKey({ organization, organ
   authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
   runtime, restarted: slug => aionui.forget(slug), keyFile: modelKeyFile,
 }) : undefined;
+
+feishuBot = createFeishuBot({ organization, organizationData,
+  authenticate: req => userFor(req).user, runtime,
+});
 
 function sessionOf(req) {
   const [data, mac] = String(cookieOf(req, "wp_sid") || legacy?.sessionCookieNames?.map(name => cookieOf(req, name)).find(Boolean) || "").split(".");
@@ -294,7 +300,8 @@ const server = http.createServer(async (req, res) => {
     if (!preview && url.pathname === "/_wp/preview/client.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
       return res.end("// Workspace preview is disabled." + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || "")
-        + (voice?.clientFor(userFor(req).user) || ""));
+        + (voice?.clientFor(userFor(req).user) || "")
+        + (feishuBot?.clientFor(userFor(req).user) || ""));
     }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
@@ -307,6 +314,7 @@ const server = http.createServer(async (req, res) => {
     if (feedback && await feedback(req, res, url)) return;
     if (myKey && await myKey(req, res, url)) return;
     if (await voice(req, res, url)) return;
+    if (await feishuBot(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
