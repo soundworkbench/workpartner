@@ -1,3 +1,5 @@
+import { executeFeishuBot } from './feishu-bot.mjs';
+
 // Feishu creation runs as the owner inside their container. No host paths or credentials cross this API.
 const PREFIX = '/_wp/aionui/feishu';
 const SCRIPT = '/opt/workpartner/bin/feishu-onboard.py';
@@ -30,7 +32,8 @@ export function createFeishuOnboarding({ authenticate, runtime, uid = 1001, orig
         const task = (async () => {
           try {
             await execute(user, 'restarting');
-            await runtime.restart(user.slug);
+            try { await executeFeishuBot(runtime, uid, user.slug, 'restart'); }
+            catch { await runtime.restart(user.slug); }
             await execute(user, 'connected');
             restarted(user.slug);
             return { status: 'connected' };

@@ -935,3 +935,50 @@ assert.ok(!fs.existsSync(${JSON.stringify(path.join(dir, 'state/my-key'))}));
     assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
   }
 });
+
+test('feishu bot preview on and off preserve original serializer bytes unless admitted', t => {
+  for (const preview of [false, true]) for (const enabled of [false, true]) for (const feedbackEnabled of [false, true]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-feishu-bot-client-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const org = fixtureOrganization(t);
+    for (const key of Object.keys(org.features)) org.features[key] = false;
+    org.features.preview = preview; org.features.feishuBot = enabled; org.features.feedback = feedbackEnabled;
+    org.feedback = { ...org.feedback, allow: ['member'], handlers: [] };
+    org.publicHost = 'workspace.example.test'; org.previewHost = 'preview.example.test';
+    org.model.baseUrl = 'http://127.0.0.1:1/v1'; org.extensions.gatewayModule = '';
+    org.feishuBot = { allow: ['member'] };
+    Object.assign(org.runtime, { gatewayPort: 0, sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'),
+      stateDirectory: path.join(dir, 'state'), secureDirectory: path.join(dir, 'secure'), nextDirectory: path.join(dir, 'workspaces') });
+    const people = [{ slug: 'member', unionId: 'union-member', backend: 'legacy' }, { slug: 'outsider', unionId: 'union-outsider', backend: 'legacy' }];
+    fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key'); fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
+    fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
+    const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');
+    const script = `
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import http from 'node:http';
+let server;
+http.Server.prototype.listen = function () { server = this; return this; };
+await import(${JSON.stringify(pathToFileURL(path.join(root, 'gateway/gateway.mjs')).href)});
+const handle = server.listeners('request')[0], people = ${JSON.stringify(people)}, baselines = ${JSON.stringify(people.map(baseline))};
+for (const [index, person] of people.entries()) {
+  const data = Buffer.from(JSON.stringify({ u: person.unionId, n: 'Fixture', e: Math.floor(Date.now() / 1000) + 600 })).toString('base64url');
+  const mac = crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
+  let status, body;
+  await handle({ method: 'GET', url: '/_wp/preview/client.js', headers: { host: 'workspace.example.test', cookie: 'wp_sid=' + data + '.' + mac } },
+    { writeHead(code) { status = code; }, end(value) { body = value ?? ''; } });
+  assert.equal(status, 200);
+  if (${enabled} && index === 0) { assert.ok(body.startsWith(baselines[index] + '\\n;')); assert.ok(body.includes('installFeishuBot'));
+    if (${feedbackEnabled}) assert.ok(body.indexOf('installFeishuBot') > body.indexOf('installFeedback')); }
+  else assert.equal(body, baselines[index]);
+  assert.ok(!body.includes(person.unionId));
+}
+assert.ok(!fs.existsSync(${JSON.stringify(path.join(dir, 'state/feishu-bot'))}));
+`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, WORKPARTNER_ORG_DIR: dir },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr + (result.error?.message || ''));
+  }
+});
