@@ -79,7 +79,7 @@ RUN mkdir -p /tmp/skel/.claude/skills \
  && cp -R /opt/workpartner/extra-skills/. /opt/workpartner/skills/ \
  && python3 -I /opt/workpartner/bin/wp-compact-skills.py /opt/workpartner/skills /opt/workpartner/skill-descriptions.json \
  && node /opt/workpartner/bin/wp-skill-catalog.mjs /opt/workpartner/skills /opt/workpartner/skills-zh.json /opt/workpartner/home/CLAUDE.md \
- && chmod 755 /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data /opt/workpartner/bin/chromium \
+ && chmod 755 /opt/workpartner/bin/wp-agent /opt/workpartner/bin/wp-skill /opt/workpartner/bin/wp-market /opt/workpartner/bin/wp-data /opt/workpartner/bin/chromium \
  && chmod -R a+rX /opt/workpartner /opt/aionui \
  && ln -sf python3 /usr/bin/python
 

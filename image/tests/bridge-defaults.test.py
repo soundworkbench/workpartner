@@ -27,6 +27,15 @@ ENV = {'PARTNER_BRIDGE_MODEL': 'fixture-claude', 'PARTNER_DEFAULT_EFFORT': 'high
 
 
 class BridgeDefaultsTest(unittest.TestCase):
+    def test_work_dir_upgrade_is_always_ignored(self):
+        for current in ({}, {'work_dir': '/data/agents/s12345678'}):
+            config = {'projects': [{'agent': {'options': current}}]}
+            template = {'projects': [{'agent': {'options': {'work_dir': '/data/work', 'other': 'new'}}}]}
+            upgrades = [{'key': 'projects.agent.options.work_dir', 'from': ['/data/agents/s12345678']},
+                        {'key': 'projects.agent.options.other', 'from': []}]
+            self.assertEqual(list(bridge.template_upgrades(config, template, upgrades)),
+                             [(('projects', 0, 'agent', 'options'), 'other', 'new')])
+
     def template(self):
         return (ROOT / 'home/cc-connect-feishu.toml').read_bytes()
 
@@ -307,14 +316,19 @@ config.write_text(text.replace('type = "claudecode"', 'type = "codex"'))
             config.write_bytes(source)
             command = ['python3', '-I', '-B', str(ROOT.parent / 'tools/migrate-bridge.py'), str(config),
                        '--model', ENV['PARTNER_BRIDGE_MODEL'], '--effort', 'high']
-            preview = subprocess.run(command, capture_output=True, text=True, check=True)
+            preview = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
             self.assertIn('Would update', preview.stdout)
             self.assertEqual(config.read_bytes(), source)
-            subprocess.run(command + ['--apply'], capture_output=True, check=True)
+            subprocess.run(command + ['--apply'], capture_output=True, check=True, timeout=10)
             self.assertEqual(config.read_bytes(), self.expected(source))
             metadata = config.stat()
-            subprocess.run(command + ['--apply'], capture_output=True, check=True)
-            self.assertEqual(config.stat(), metadata)
+            subprocess.run(command + ['--apply'], capture_output=True, check=True, timeout=10)
+            repeated = config.stat()
+            # 读取配置可由 relatime 更新 atime；幂等性要求内容、inode 和写入元数据不变。
+            for field in ('st_mode', 'st_ino', 'st_dev', 'st_nlink', 'st_uid', 'st_gid',
+                          'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+                self.assertEqual(getattr(repeated, field), getattr(metadata, field), field)
+            self.assertEqual(config.read_bytes(), self.expected(source))
 
     def test_startup_failure_warns_and_continues(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, ENV):

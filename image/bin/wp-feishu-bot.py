@@ -2,6 +2,7 @@
 """查询飞书机器人信息，并管理独立于网页服务的消息桥。"""
 import argparse
 import base64
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import fcntl
 import http.client
@@ -9,10 +10,10 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import selectors
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,7 @@ import urllib.request
 
 BASE = Path(os.environ.get('WP_CC_CONNECT_DIR', '/data/.cc-connect'))
 RUN = BASE / 'run'
+AGENTS = runpy.run_path(str(Path(__file__).with_name('wp-agent')))
 EVENTS = ('connected', 'disconnected', 'reconnecting', 'exhausted')
 
 
@@ -47,8 +49,8 @@ def read_json(path):
         return {}
 
 
-def bridge_status():
-    state = read_json(RUN / 'bridge-state.json')
+def bridge_status(run=RUN):
+    state = read_json(run / 'bridge-state.json')
     event, at = state.get('event'), state.get('at')
     try:
         if event not in EVENTS or not isinstance(at, str):
@@ -58,7 +60,7 @@ def bridge_status():
         event, at = None, None
     running = False
     try:
-        pid = int((RUN / 'bridge.pid').read_text())
+        pid = int((run / 'bridge.pid').read_text())
         if pid > 0:
             os.kill(pid, 0)
             running = True
@@ -210,67 +212,73 @@ def cached_bot(value):
     return {'name': name, 'avatar': avatar, 'activate': activate}
 
 
+def credentials(directory):
+    with (directory / 'config.toml').open('rb') as stream:
+        config = tomllib.load(stream)
+    result = []
+    for project in config.get('projects', []):
+        for platform in project.get('platforms', []):
+            if platform.get('type') == 'feishu':
+                options = platform['options']
+                values = (project['name'], options['app_id'], options['app_secret'])
+                if not all(isinstance(value, str) and value for value in values):
+                    raise ValueError
+                result.append(values)
+    return result
+
+
 def info(refresh):
     deadline = time.monotonic() + 7
-    try:
-        with (BASE / 'config.toml').open('rb') as stream:
-            config = tomllib.load(stream)
-        credentials = []
-        for project in config.get('projects', []):
-            for platform in project.get('platforms', []):
-                if platform.get('type') == 'feishu':
-                    options = platform['options']
-                    values = (project['name'], options['app_id'], options['app_secret'])
-                    if not all(isinstance(value, str) and value for value in values):
-                        raise ValueError
-                    credentials.append(values)
-    except FileNotFoundError:
-        return {'ok': True, 'bots': []}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return {'ok': False, 'error': 'config_unreadable'}
-    cache = read_json(RUN / 'bot-cache.json')
-    clean_cache = {key: dict(value, at=entry['at']) for key, entry in cache.items()
-                   if (value := cached_bot(entry)) is not None}
-    status = bridge_status()
-    bots = []
-    fetched = {}
-    signal.signal(signal.SIGALRM, alarm_timeout)
-    for project, app_id, secret in credentials:
-        bot = {'project': project, 'appId': app_id, 'name': None, 'avatar': None,
-               'activate': None, **status, 'error': None}
-        metadata = fetched.get(app_id) or (None if refresh else cached_bot(cache.get(app_id)))
-        if metadata is None:
-            try:
-                metadata = fetch_bot(app_id, secret, deadline)
-                fetched[app_id] = metadata
-                clean_cache[app_id] = dict(metadata, at=time.time())
-            except AuthFailed:
-                bot['error'] = 'feishu_auth_failed'
-            except (OSError, ValueError, RequestTimeout):
-                bot['error'] = 'feishu_unreachable'
-        if metadata is not None:
-            bot.update(metadata)
-        bots.append(bot)
-    if fetched:
+    sources = []
+    for agent_id in ['main', *[item['id'] for item in AGENTS['registered']()]]:
+        directory = AGENTS['agent_base'](agent_id)
         try:
-            atomic_json(RUN / 'bot-cache.json', clean_cache)
-        except OSError:
+            sources.append((agent_id, directory / 'run', credentials(directory)))
+        except FileNotFoundError:
             pass
-    return {'ok': True, 'bots': bots}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            if agent_id == 'main':
+                return {'ok': False, 'error': 'config_unreadable'}
+    bots = []
+    signal.signal(signal.SIGALRM, alarm_timeout)
+    for agent_id, run, entries in sources:
+        cache = read_json(run / 'bot-cache.json')
+        clean_cache = {key: dict(value, at=entry['at']) for key, entry in cache.items()
+                       if (value := cached_bot(entry)) is not None}
+        status = bridge_status(run)
+        fetched = {}
+        for project, app_id, secret in entries:
+            bot = {'project': project, 'appId': app_id, 'name': None, 'avatar': None,
+                   'activate': None, **status, 'error': None, 'agentId': agent_id}
+            metadata = fetched.get(app_id) or (None if refresh else cached_bot(cache.get(app_id)))
+            if metadata is None:
+                try:
+                    metadata = fetch_bot(app_id, secret, deadline)
+                    fetched[app_id] = metadata
+                    clean_cache[app_id] = dict(metadata, at=time.time())
+                except AuthFailed:
+                    bot['error'] = 'feishu_auth_failed'
+                except (OSError, ValueError, RequestTimeout):
+                    bot['error'] = 'feishu_unreachable'
+            if metadata is not None:
+                bot.update(metadata)
+            bots.append(bot)
+        if fetched:
+            try:
+                with AGENTS['locked'](blocking=False) if agent_id != 'main' else nullcontext():
+                    if agent_id == 'main' or (run.parent / 'agent.json').is_file():
+                        atomic_json(run / 'bot-cache.json', clean_cache)
+            except OSError:
+                pass
+    return {'ok': True, 'bots': bots, 'agents': AGENTS['agents'](), 'limit': 5}
 
 
-def restart():
-    try:
-        fd = os.open(RUN / 'restart.fifo', os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-        try:
-            if not stat.S_ISFIFO(os.fstat(fd).st_mode):
-                raise OSError
-            os.write(fd, b'restart\n')
-        finally:
-            os.close(fd)
-        return {'ok': True}
-    except OSError:
-        return {'ok': False, 'error': 'no_supervisor'}
+def restart(agent_id='main'):
+    if agent_id != 'main' and (not any(item['id'] == agent_id for item in AGENTS['registered']())
+                              or not (AGENTS['agent_base'](agent_id) / 'config.toml').is_file()):
+        return {'ok': False, 'error': 'not_found'}
+    message = 'restart' if agent_id == 'main' else 'restart ' + agent_id
+    return {'ok': True} if AGENTS['notify'](message) else {'ok': False, 'error': 'no_supervisor'}
 
 
 def warn(message):
@@ -280,22 +288,33 @@ def warn(message):
         pass
 
 
-def write_bridge_file(name, value):
+def write_bridge_file(name, value, run=RUN):
     try:
-        atomic_json(RUN / name, value)
+        with AGENTS['locked']() if run != RUN else nullcontext():
+            if run != RUN and not (run.parent / 'agent.json').is_file():
+                return
+            atomic_json(run / name, value)
     except OSError:
         warn(f'无法写入 {name}，消息桥继续运行')
 
 
-def remove_bridge_pid():
+def remove_bridge_pid(run=RUN):
     try:
-        (RUN / 'bridge.pid').unlink(missing_ok=True)
+        (run / 'bridge.pid').unlink(missing_ok=True)
     except OSError:
         warn('无法删除 bridge.pid，消息桥继续运行')
 
 
 class Supervisor:
-    def __init__(self, started):
+    def __init__(self, started, agent_id="main", manager=None):
+        self.agent_id = agent_id
+        self.base = AGENTS['agent_base'](agent_id)
+        self.run_dir = self.base / 'run'
+        self.manager = manager or self
+        self.retiring = False
+        self.bridges = {'main': self} if manager is None else {}
+        self.next_scan = 0
+        self.control_pending = b''
         self.started = started
         self.marked = False
         self.stopping = False
@@ -305,26 +324,38 @@ class Supervisor:
         self.next_start = 0
         self.backoff = 2
         self.pending = {'stdout': b'', 'stderr': b''}
-        self.selector = selectors.DefaultSelector()
+        self.selector = manager.selector if manager else selectors.DefaultSelector()
         self.lock_fd = None
         self.fifo_fd = None
 
     def terminate(self, signum, frame):
         self.stopping = True
 
-    def log_chunk(self, chunk, channel):
+    def forward(self, chunk, channel):
         try:
             stream = getattr(sys, channel).buffer
             stream.write(chunk)
             stream.flush()
         except OSError:
             warn(f'无法转发消息桥 {channel}')
+
+    def log_chunk(self, chunk, channel):
+        if self.agent_id == 'main':
+            self.forward(chunk, channel)
         self.parse_output(chunk, channel)
 
     def parse_output(self, chunk, channel):
         lines = (self.pending[channel] + chunk).split(b'\n')
-        self.pending[channel] = lines.pop()[-65536:]
+        tail = lines.pop()
+        if self.agent_id != 'main':
+            # 超长无换行日志分段转发，避免一个桥无限占用行缓冲。
+            while len(tail) > 65536:
+                lines.append(tail[:65536])
+                tail = tail[65536:]
+        self.pending[channel] = tail[-65536:]
         for line in lines:
+            if self.agent_id != 'main':
+                self.forward(f'[agent {self.agent_id}] '.encode() + line + b'\n', channel)
             event = None
             if re.search(rb'\bwebsocket reconnect attempts exhausted after [0-9]+ attempts\b', line):
                 event = 'exhausted'
@@ -334,9 +365,9 @@ class Supervisor:
                 event = 'reconnecting'
             elif re.search(rb'\bconnected to wss://', line):
                 event = 'connected'
-            if event:
+            if event and not self.retiring:
                 write_bridge_file('bridge-state.json',
-                                  {'event': event, 'at': datetime.now(timezone.utc).isoformat()})
+                                  {'event': event, 'at': datetime.now(timezone.utc).isoformat()}, self.run_dir)
 
     def read_output(self, channel):
         stream = getattr(self.child, channel)
@@ -371,10 +402,15 @@ class Supervisor:
             pass
         self.child.wait()
         for channel in ('stdout', 'stderr'):
-            while self.read_output(channel):
-                pass
-            if self.pending[channel]:
-                self.parse_output(b'\n', channel)
+            try:
+                while self.read_output(channel):
+                    pass
+                if self.pending[channel]:
+                    self.parse_output(b'\n', channel)
+            except Exception:
+                # 子桥输出已坏时仍须关闭两个通道并回收进程，不能卡住独立退避。
+                if self.agent_id == 'main':
+                    raise
             stream = getattr(self.child, channel)
             try:
                 self.selector.unregister(stream)
@@ -383,16 +419,23 @@ class Supervisor:
             stream.close()
         self.child = None
         self.pending = {'stdout': b'', 'stderr': b''}
-        remove_bridge_pid()
+        remove_bridge_pid(self.run_dir)
 
     def launch(self):
-        write_bridge_file('bridge-state.json', {'event': None, 'at': None})
+        if self.agent_id != 'main':
+            try:
+                helper = runpy.run_path(str(Path(__file__).with_name('wp-bridge-defaults.py')))
+                helper['refresh'](self.base / 'config.toml')
+            except Exception:
+                warn('未更新子助手消息桥配置，继续启动')
+        write_bridge_file('bridge-state.json', {'event': None, 'at': None}, self.run_dir)
         self.pending = {'stdout': b'', 'stderr': b''}
         try:
             command = os.environ.get('WP_CC_CONNECT_BIN', '/opt/workpartner/bin/cc-connect')
-            self.child = subprocess.Popen([command, '--config', str(BASE / 'config.toml')],
+            self.child = subprocess.Popen([command, '--config', str(self.base / 'config.toml')],
                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, start_new_session=True)
+                                          stderr=subprocess.PIPE, start_new_session=True,
+                                          umask=0o077 if self.agent_id != 'main' else -1)
         except OSError:
             warn('消息桥启动失败，稍后重试')
             self.next_start = time.monotonic() + self.backoff
@@ -402,12 +445,12 @@ class Supervisor:
         for channel in ('stdout', 'stderr'):
             stream = getattr(self.child, channel)
             os.set_blocking(stream.fileno(), False)
-            self.selector.register(stream, selectors.EVENT_READ, channel)
-        write_bridge_file('bridge.pid', self.child.pid)
-        if not self.marked:
+            self.selector.register(stream, selectors.EVENT_READ, (self, channel))
+        write_bridge_file('bridge.pid', self.child.pid, self.run_dir)
+        if not self.manager.marked:
             elapsed = int((time.time() - self.started) * 1000)
             print(f'[startup] bridge-started +{elapsed}ms', file=sys.stderr, flush=True)
-            self.marked = True
+            self.manager.marked = True
 
     def prepare_control(self):
         if self.lock_fd is None:
@@ -427,7 +470,7 @@ class Supervisor:
                 raise
             self.lock_fd = fd
             if self.child is None:
-                remove_bridge_pid()
+                remove_bridge_pid(self.run_dir)
         RUN.chmod(0o700)
         fifo = RUN / 'restart.fifo'
         fifo.unlink(missing_ok=True)
@@ -441,16 +484,60 @@ class Supervisor:
         self.fifo_fd = fd
         return True
 
+    def scan(self):
+        wanted = {item['id'] for item in AGENTS['registered']()
+                  if (AGENTS['agent_base'](item['id']) / 'config.toml').is_file()}
+        for agent_id, bridge in list(self.bridges.items()):
+            if agent_id != 'main' and agent_id not in wanted:
+                bridge.retiring = True
+                bridge.stop_child()
+                del self.bridges[agent_id]
+        for agent_id in sorted(wanted):
+            if agent_id not in self.bridges:
+                self.bridges[agent_id] = Supervisor(self.started, agent_id, self)
+        if not (BASE / 'config.toml').is_file():
+            self.stop_child()
+        self.next_scan = time.monotonic() + 3
+
+    def control(self, chunk):
+        lines = (self.control_pending + chunk).split(b'\n')
+        self.control_pending = lines.pop()[-1024:]
+        for line in lines:
+            if line == b'rescan':
+                self.next_scan = 0
+            elif line == b'restart':
+                self.requested = True
+            elif line.startswith(b'restart '):
+                bridge = self.bridges.get(line[8:].decode(errors='replace'))
+                if bridge:
+                    bridge.requested = True
+
+    def tick(self, now):
+        if self.requested:
+            self.stop_child()
+            self.next_start = 0
+            self.backoff = 2
+            self.requested = False
+        if self.child and self.child.poll() is not None:
+            stable = now - self.child_started >= 300
+            self.stop_child()
+            if stable:
+                self.backoff = 2
+            self.next_start = time.monotonic() + self.backoff
+            self.backoff = min(60, self.backoff * 2)
+        if self.child is None and now >= self.next_start and (self.base / 'config.toml').is_file():
+            self.launch()
+
     def wait_after_error(self, delay):
         until = time.monotonic() + delay
         while not self.stopping and time.monotonic() < until:
-            if self.child:
-                for channel in ('stdout', 'stderr'):
-                    try:
-                        self.read_output(channel)
-                    except Exception:
-                        # 单路读取/解析故障不妨碍另一路；主循环稍后重试并报警。
-                        pass
+            for bridge in self.bridges.values():
+                if bridge.child:
+                    for channel in ('stdout', 'stderr'):
+                        try:
+                            bridge.read_output(channel)
+                        except Exception:
+                            pass
             time.sleep(0.1)
 
     def run(self):
@@ -471,29 +558,33 @@ class Supervisor:
                             warn('消息桥控制通道准备失败，稍后重试；消息桥继续运行')
                             next_prepare = now + prepare_backoff
                             prepare_backoff = min(60, prepare_backoff * 2)
-                    if self.requested:
-                        self.stop_child()
-                        self.next_start = 0
-                        self.backoff = 2
-                        self.requested = False
-                    if self.child and self.child.poll() is not None:
-                        stable = now - self.child_started >= 300
-                        self.stop_child()
-                        if stable:
-                            self.backoff = 2
-                        self.next_start = time.monotonic() + self.backoff
-                        self.backoff = min(60, self.backoff * 2)
-                    if self.child is None and now >= self.next_start:
-                        if (BASE / 'config.toml').is_file():
-                            self.launch()
+                    if now >= self.next_scan:
+                        self.scan()
+                    for bridge in self.bridges.values():
+                        if bridge is self:
+                            bridge.tick(now)
                         else:
-                            self.next_start = now + 3
+                            try:
+                                bridge.tick(now)
+                            except Exception:
+                                warn(f'子助手 {bridge.agent_id} 消息桥异常，稍后重试')
+                                bridge.next_start = now + bridge.backoff
+                                bridge.backoff = min(60, bridge.backoff * 2)
                     for key, _ in self.selector.select(timeout=0.1):
                         if key.data == 'restart':
-                            if os.read(self.fifo_fd, 65536):
-                                self.requested = True
-                        elif self.child:
-                            self.read_output(key.data)
+                            self.control(os.read(self.fifo_fd, 65536))
+                        else:
+                            bridge, channel = key.data
+                            if bridge.child:
+                                try:
+                                    bridge.read_output(channel)
+                                except Exception as error:
+                                    if bridge is self:
+                                        raise
+                                    warn(f'子助手 {bridge.agent_id} 消息桥输出异常（{type(error).__name__}）')
+                                    bridge.stop_child()
+                                    bridge.next_start = time.monotonic() + bridge.backoff
+                                    bridge.backoff = min(60, bridge.backoff * 2)
                     error_backoff = 1
                 except Exception as error:
                     # 不记录异常原文，避免桥日志或凭据进入额外诊断。
@@ -502,7 +593,8 @@ class Supervisor:
                     error_backoff = min(60, error_backoff * 2)
         finally:
             try:
-                self.stop_child()
+                for bridge in self.bridges.values():
+                    bridge.stop_child()
             finally:
                 self.selector.close()
                 if self.fifo_fd is not None:
@@ -521,13 +613,13 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     query = commands.add_parser('info')
     query.add_argument('--refresh', action='store_true')
-    commands.add_parser('restart')
+    commands.add_parser('restart').add_argument('--agent', default='main')
     daemon = commands.add_parser('supervise', help=argparse.SUPPRESS)
     daemon.add_argument('--started', type=float, default=time.time())
     args = parser.parse_args()
     if args.command == 'supervise':
         return Supervisor(args.started).run()
-    result = info(args.refresh) if args.command == 'info' else restart()
+    result = info(args.refresh) if args.command == 'info' else restart(args.agent)
     print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
     return 0 if result['ok'] else 1
 
