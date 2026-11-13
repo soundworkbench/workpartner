@@ -35,7 +35,7 @@ function installFeishuBot() {
   }
   function revoke() {
     revoked = true; bots = []; clearTimeout(timer); clearTimeout(reconnectTimer); observer?.disconnect();
-    document.querySelectorAll('[data-wp-feishu-bot]').forEach(element => element.remove());
+    document.querySelectorAll('[data-wp-feishu-bot], [data-wp-feishu-bot-separator]').forEach(element => element.remove());
     bar?.remove(); dialog?.close();
   }
   async function request(route, post = false) {
@@ -170,7 +170,9 @@ function installFeishuBot() {
     if (bar?.isConnected) return;
     const bot = bots[0]; bar = node('div', undefined, 'wp-feishu-bot-bar');
     bar.append(avatar(bot), node('span', '飞书机器人：' + name(bot), 'wp-feishu-bot-name'), state(bot), chat(bot), button('管理', show));
-    home.before(bar);
+    const host = home.closest('main');
+    if (host) host.prepend(bar);
+    else home.before(bar);
   }
   function init() {
     const style = node('style'); style.textContent = `

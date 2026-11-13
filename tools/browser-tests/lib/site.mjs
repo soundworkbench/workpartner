@@ -82,7 +82,9 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       </aside>
       <main style="flex:1;min-width:0;box-sizing:border-box;padding:24px;overflow:hidden">
         <h1 id="fixture-route" style="font-size:16px;overflow-wrap:anywhere">route</h1>
-        <input id="fixture-input" type="text" placeholder="state probe" style="box-sizing:border-box;max-width:100%" />
+        <div id="fixture-input-container" style="box-sizing:border-box;max-width:100%;padding:12px;border:1px solid #ddd;border-radius:12px">
+          <input id="fixture-input" type="text" placeholder="state probe" style="box-sizing:border-box;max-width:100%" />
+        </div>
         <a id="fixture-market" href="#/market">market</a>
       </main>
     </div>

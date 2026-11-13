@@ -44,6 +44,8 @@ for (const width of [1280, 390, 360]) {
       { ...bot, appId: 'cli_Third', name: null, avatar, online: 'unknown', error: 'feishu_auth_failed' }]);
     await suite.session('width-' + width, { viewport: { width, height: 844 }, init: [[init]] }, async ({ page, log }) => {
       await page.locator(BAR).waitFor();
+      assert.equal(await page.locator('main > ' + BAR).count(), 1, 'status bar mounts alongside banners under main');
+      assert.equal(await page.locator('#fixture-input-container ' + BAR).count(), 0, 'status bar stays outside the input container');
       assert.match(await page.locator(BAR).innerText(), /飞书机器人：唐的飞书助手/);
       assert.equal(await page.locator(BAR + ' .wp-feishu-bot-state').innerText(), '在线');
       const chat = page.locator(BAR).getByRole('link', { name: '对话', exact: true });
@@ -150,6 +152,35 @@ test('outside allowlist has no menu, bar or bot requests', LONG, async () => {
   });
 });
 
+test('homepage without main falls back to immediately before the input', LONG, async () => {
+  suite.harness.use(suite.main); suite.main.setBots([bot]);
+  await suite.session('no-main', { init: [[init]] }, async ({ page, log }) => {
+    await page.locator(BAR).waitFor();
+    await page.evaluate(() => {
+      const input = document.querySelector('#fixture-input-container');
+      document.body.append(input); document.querySelector('main').remove();
+    });
+    await page.locator('#fixture-input-container > ' + BAR).waitFor();
+    assert.equal(await page.locator(BAR + ' + [data-testid="guid-input"]').count(), 1);
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
+
+test('live admission failure removes the bot-owned menu separator', LONG, async () => {
+  const { gateway } = suite.menuCases.find(value => value.feishuBot && !value.feedback && !value.myKey);
+  suite.harness.use(gateway); gateway.setBots([bot]);
+  await suite.session('revoke-separator', { init: [[init]] }, async ({ page, log }) => {
+    await page.locator(BAR).waitFor(); await openMenu(page);
+    await page.locator('[data-wp-feishu-bot]').evaluate(entry => entry.previousElementSibling.remove());
+    await page.locator('[data-wp-feishu-bot-separator]').waitFor();
+    await page.route('**/_wp/feishu-bot/bots', route => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not_found"}' }));
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.locator('[data-wp-feishu-bot]').waitFor({ state: 'detached' });
+    assert.equal(await page.locator('[data-wp-feishu-bot-separator]').count(), 0);
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
+
 
 test('SPA homepage remount restores bar; live admission failure removes UI', LONG, async () => {
   suite.harness.use(suite.main); suite.main.setBots([bot]);
@@ -157,7 +188,7 @@ test('SPA homepage remount restores bar; live admission failure removes UI', LON
     await page.locator(BAR).waitFor();
     await page.evaluate(() => { window.__homeInput = document.querySelector('[data-testid="guid-input"]'); window.__homeInput.remove(); });
     await page.locator(BAR).waitFor({ state: 'detached' });
-    await page.evaluate(() => document.querySelector('main').append(window.__homeInput));
+    await page.evaluate(() => document.querySelector('#fixture-input-container').append(window.__homeInput));
     await page.locator(BAR).waitFor(); assert.equal(await page.locator(BAR).count(), 1);
     await open(page);
     await page.route('**/_wp/feishu-bot/bots?refresh=1', route => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not_found"}' }));

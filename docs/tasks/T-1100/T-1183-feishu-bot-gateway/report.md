@@ -101,3 +101,41 @@
 
 1. 在 Actions 上运行本轮 `test` 和 `menu`、`flow`、`access`、`my-key`、`feishu-bot` 五组浏览器测试，确认新增状态条溢出和菜单分组断言，并查看三种宽度截图。
 2. 本轮没有新增依赖、超出范围的改动或已知未修复的代码问题；尚未完成的是受沙箱阻碍的全量和浏览器验收。
+
+## 第 3 轮（2026-11-13）
+
+本轮仅处理第 2 轮审核后的三条建议，目标、范围和验收标准不变。
+
+### 1. 改了哪些文件
+
+- `gateway/feishu-bot-client.mjs`：状态条优先通过输入框的 `closest('main')` 挂到 main 顶部，与开通/授权横幅使用同一层级，避免落入输入区外框；找不到 main 时保留 `home.before(bar)` 回退。`revoke()` 同时删除机器人菜单项及 `[data-wp-feishu-bot-separator]`，沿用反馈客户端的清理方式。
+- `tools/browser-tests/lib/site.mjs`：给测试页输入框增加带边框和内边距的容器，模拟真实输入区嵌套结构。
+- `tools/browser-tests/feishu-bot.e2e.mjs`：三个宽度（1280、390、360px）均新增状态条直接挂在 main 下、位于输入区外的断言，保留原有状态条、按钮和弹层溢出断言及截图；增加无 main 时紧邻输入框的回退用例；撤权用例先触发并确认机器人自己的分隔线存在，再模拟 404，断言菜单项及分隔线均被移除；SPA 重挂载把输入框放回其容器。
+- `docs/organization.md`：明确只有 `backend === 'aionui'` 的用户可访问，info 超时为 10 秒、restart 为 20 秒，两类命令均有 1 MiB 输出上限，超限返回脱敏 503。
+- `docs/tasks/T-1100/T-1183-feishu-bot-gateway/report.md`：追加第 3 轮修改和验证结果。
+
+没有 git 提交，没有新增依赖，没有修改 `image/`、`asr/`、`deploy/` 或工作流。
+
+### 2. 怎么验证的
+
+| 命令 | 结果 |
+| --- | --- |
+| `node gateway/tests/feishu-bot.test.mjs` | 10/10 通过。 |
+| `node gateway/tests/feishu-bot-client.test.mjs` | 5/5 通过。 |
+| `node gateway/tests/my-key-client.test.mjs` | 6/6 通过。 |
+| `node gateway/tests/feishu-onboarding.test.mjs` | 6/6 通过。 |
+| `node --check gateway/feishu-bot-client.mjs`、`node --check tools/browser-tests/feishu-bot.e2e.mjs`、`node --check tools/browser-tests/lib/site.mjs` | 全部通过。 |
+| `git diff --check` | 通过。 |
+| `bash tools/check.sh` | 未完成：停在现有 `tools/wp-seed.test.py::ModelDiscovery.test_model_permissions_are_read_with_an_identified_client`，创建 HTTPServer 时沙箱报 `PermissionError: [Errno 1] Operation not permitted`。 |
+| `node tools/browser-tests/run.mjs feishu-bot menu flow access my-key` | 五组均未进入页面断言；逐文件直接运行确认均在假服务器初始化时报 `listen EPERM: operation not permitted 127.0.0.1`。 |
+
+最初尝试浏览器测试时工作区缺少 `playwright-core`，随后仅临时链接机器已有的网关依赖和 Playwright 1.65.0，并设置 `CHROME_PATH=/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome` 重试；未联网、未安装包，验证后已清理临时链接。新增浏览器断言尚未在本机执行，不能宣称通过。
+
+日志：`/tmp/t1183-r3-api.log`、`/tmp/t1183-r3-check.log`、`/tmp/t1183-r3-browser-before.log`、`/tmp/t1183-r3-browser.log`，以及 `/tmp/t1183-r3-browser-{feishu-bot,menu,flow,access,my-key}-detail.log`。
+
+本机未生成截图。Actions 截图路径仍为 `tools/browser-tests/output/shots/feishu-bot/home-{1280,390,360}.png`、`dialog-{1280,390,360}.png` 和 `empty.png`。
+
+### 3. 需要协调者处理的事
+
+1. 在 Actions 运行 `bash tools/check.sh` 及 `feishu-bot`、`menu`、`flow`、`access`、`my-key` 五组浏览器测试，确认新增挂载位置、无 main 回退及撤权清理断言，并查看三种宽度的截图和溢出结果。
+2. 无新增依赖、超范围改动或已知未修复的代码问题；剩余验收为上述受沙箱限制的全量和浏览器测试。
