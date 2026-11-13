@@ -57,6 +57,8 @@ function homeDocument() {
     closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector); }
     addEventListener(type, callback) { (this.listeners[type] ??= []).push(callback); }
     focus() { document.activeElement = this; }
+    showModal() { this.open = true; }
+    close() { this.open = false; this.fire('close'); }
     async fire(type, event = {}) { for (const callback of this.listeners[type] || []) await callback(event); }
   }
   document = {
@@ -69,7 +71,7 @@ function homeDocument() {
   return document;
 }
 
-function page({ home = false, clipboardFails = false, reconnectResponse } = {}) {
+function page({ home = false, clipboardFails = false, reconnectResponse, responseData, handleRequest } = {}) {
   const timers = new Map(), frames = new Map(), listeners = {}, requests = [], tags = [], copied = [];
   let mutation, disconnected = false;
   let nextTimer = 0, status = 200;
@@ -89,9 +91,10 @@ function page({ home = false, clipboardFails = false, reconnectResponse } = {}) 
       copied.push(value);
     } } },
     fetch: async (url, options) => { requests.push({ url, options });
+      if (handleRequest) { const response = await handleRequest(url, options); if (response) return response; }
       if (url.endsWith('/reconnect') && reconnectResponse) return reconnectResponse;
       return { status, ok: status === 200,
-      json: async () => ({ bots: home ? [{ appId: 'cli_Test', name: '助手', online: 'online', openUrl: '#' }] : [] }) }; },
+      json: async () => responseData || ({ bots: home ? [{ appId: 'cli_Test', name: '助手', online: 'online', openUrl: '#' }] : [] }) }; },
   });
   vm.runInContext(feishuBotClient(), context);
   return { timers, frames, requests, tags, copied, document, listeners, mutate: () => mutation(), disconnected: () => disconnected, status: value => { status = value; } };
@@ -256,4 +259,145 @@ test('safe mount callbacks contain DOM errors without stopping refresh', async (
   await assert.doesNotReject(async () => { await callback(); });
   await tick(p); assert.equal(p.requests.length, 2);
   assert.deepEqual([...p.timers.values()].map(t => t.delay), [60000]);
+});
+
+const main = { agentId: 'main', appId: 'cli_Main', name: '主机器人', online: 'online', openUrl: 'https://example.test/main' };
+const agent = (id, setup = 'none') => ({ id: 's0000000' + id, kind: 'sub', name: '助手' + id, setup, appId: null });
+const payload = () => ({ bots: [main, { ...main, agentId: 's00000001', appId: 'cli_Sub', name: '子机器人' }],
+  agents: [agent(1, 'connected'), agent(2, 'waiting'), agent(3, 'needs_identity'), agent(4)], subAgents: { enabled: true, limit: 5, count: 4 } });
+const findButton = (root, text) => root.querySelectorAll('button').find(b => b.textContent === text);
+const jsonResponse = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+const submit = root => root.querySelector('form').fire('submit', { preventDefault() {} });
+
+test('sub-agent cards follow main, label kinds and expose only appropriate actions', async () => {
+  const p = page({ home: true, responseData: payload() }); await settle();
+  const cards = p.document.querySelectorAll('.wp-feishu-bot-card');
+  assert.deepEqual(cards.map(c => c.querySelector('h3').textContent), ['主机器人', '助手1', '助手2', '助手3', '助手4']);
+  assert.deepEqual(cards.map(c => c.querySelector('.wp-feishu-bot-tag').textContent), ['主助手', '子助手', '子助手', '子助手', '子助手']);
+  assert.match(cards[1].querySelector('.wp-feishu-bot-summary').textContent, /飞书机器人：子机器人 · App ID cli_Sub/);
+  assert.equal(cards[2].querySelector('.wp-feishu-bot-avatar').textContent, '助');
+  assert.deepEqual(cards.slice(2).map(c => c.querySelector('.wp-feishu-bot-state').textContent), ['等待扫码', '待管理员完成连接', '还没连接飞书']);
+  assert.equal(findButton(cards[3], '扫码连接'), undefined);
+  for (let i = 0; i < cards.length; i++) {
+    assert.equal(cards[i].querySelectorAll('a').length, i < 2 ? 2 : 0);
+    if (i === 2 || i === 4) assert.ok(findButton(cards[i], '扫码连接'));
+    await findButton(cards[i], '…').fire('click');
+    assert.deepEqual(cards[i].querySelector('.wp-feishu-bot-menu').querySelectorAll('button').map(b => b.textContent),
+      i === 0 ? ['复制 App ID', '重新连接'] : i === 1 ? ['复制 App ID', '重新连接', '改名', '删除'] : ['改名', '删除']);
+    await findButton(cards[i], '…').fire('click');
+  }
+  assert.equal(p.document.querySelector('.wp-feishu-bot-cards').children[0].className, 'wp-feishu-bot-add');
+});
+
+test('add card supports open, full, unavailable and empty states without changing legacy hint', async () => {
+  for (const enabled of [true, false]) for (const count of [1, 5]) {
+    const data = payload(); data.subAgents = { enabled, count, limit: 5 };
+    const p = page({ home: true, responseData: data }); await settle();
+    const add = p.document.querySelector('.wp-feishu-bot-add');
+    assert.equal(add.attributes['aria-label'], enabled ? '新建子助手' : '连接飞书机器人');
+    assert.equal(add.disabled, enabled && count === 5);
+    if (add.disabled) {
+      assert.equal(add.attributes['aria-describedby'], 'wp-feishu-bot-add-hint');
+      assert.equal(add.querySelector('small').textContent, '子助手最多 5 个（主助手另算），删掉不用的再建');
+    } else {
+      await add.fire('click');
+      if (enabled) assert.equal(p.document.querySelector('dialog').querySelector('h2').textContent, '新建子助手');
+      else assert.equal(p.document.querySelector('.wp-feishu-bot-message').textContent, '一个工作伙伴暂时只能连一个飞书机器人，多个子助手的功能做好后开放');
+    }
+  }
+  const p = page({ home: true, responseData: { bots: [], agents: [], subAgents: { enabled: true, count: 0, limit: 5 } } }); await settle();
+  assert.equal(p.document.querySelector('.wp-feishu-bot-add').attributes['aria-label'], '连接飞书机器人');
+});
+
+test('new name validates instantly and create transitions the same dialog to polling and connected', async () => {
+  const data = payload(); let setup = 'waiting';
+  const p = page({ home: true, responseData: data, handleRequest: (url, options) => {
+    if (url.endsWith('/agents')) return jsonResponse({ agent: agent(5, 'preparing') }, 201);
+    if (url.endsWith('/setup')) return jsonResponse({ status: setup, qr: 'data:image/png;base64,YQ==' });
+  } }); await settle();
+  await p.document.querySelector('.wp-feishu-bot-add').fire('click');
+  const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
+  assert.equal(p.document.activeElement, input);
+  const next = findButton(dialog, '下一步：扫码创建机器人');
+  for (const value of ['主助手', 'mAIN', 'a  b', '字'.repeat(17), 'emoji😀', '']) {
+    input.value = value; await input.fire('input'); assert.equal(next.disabled, true);
+    assert.match(dialog.querySelector('.wp-feishu-bot-input-error').textContent, /最多 16 个字/);
+  }
+  input.value = '  中文 Agent_·-1  '; await input.fire('input'); assert.equal(next.disabled, false);
+  await submit(dialog); await settle();
+  assert.equal(p.document.querySelector('dialog'), dialog);
+  assert.equal(dialog.querySelector('h2').textContent, '给「助手5」创建飞书机器人');
+  assert.equal(dialog.querySelector('img').src, 'data:image/png;base64,YQ==');
+  assert.equal(p.requests.find(r => r.url.endsWith('/agents')).options.body, '{"name":"中文 Agent_·-1"}');
+  assert.equal(p.requests.find(r => r.url.endsWith('/setup')).options.method, 'GET');
+  setup = 'connected'; await tick(p, 2000);
+  assert.match(dialog.textContent, /已连接，可以在飞书里找「助手5」了/);
+  assert.equal([...p.timers.values()].some(t => t.delay === 2000), false);
+  assert.ok(p.requests.filter(r => r.url.endsWith('/bots')).length >= 3);
+});
+
+test('setup pauses hidden, resumes visible, retries and stops on close including inflight response', async () => {
+  let setup = 'expired', finish;
+  const p = page({ home: true, responseData: payload(), handleRequest: url => {
+    if (!url.endsWith('/setup')) return;
+    if (finish === 'pending') return new Promise(resolve => { finish = resolve; });
+    return jsonResponse({ status: setup });
+  } }); await settle();
+  await findButton(p.document, '扫码连接').fire('click'); await settle();
+  assert.equal(p.requests.at(-1).options.method, 'POST');
+  assert.match(p.document.querySelector('dialog').textContent, /二维码已过期/);
+  const count = p.requests.length;
+  p.document.hidden = true; await p.listeners.visibilitychange();
+  assert.equal([...p.timers.values()].some(t => t.delay === 2000), false); assert.equal(p.requests.length, count);
+  p.document.hidden = false; await p.listeners.visibilitychange(); await settle();
+  assert.equal(p.requests.filter(r => r.url.endsWith('/setup')).length, 2);
+  setup = 'needs_identity'; await findButton(p.document.querySelector('dialog'), '重试').fire('click');
+  assert.equal(p.requests.at(-1).options.method, 'POST'); assert.match(p.document.querySelector('dialog').textContent, /发 \/whoami/);
+  setup = 'failed'; await tick(p, 2000); assert.match(p.document.querySelector('dialog').textContent, /创建没有成功/);
+  finish = 'pending'; const ticking = tick(p, 2000); await settle();
+  await p.document.querySelector('dialog').fire('cancel', { preventDefault() {} });
+  finish(jsonResponse({ status: 'waiting' })); await ticking;
+  assert.equal(p.document.querySelector('dialog'), null);
+  assert.equal([...p.timers.values()].some(t => t.delay === 2000), false);
+});
+
+test('rename validates, reports conflict and success; delete confirms; sub restart targets its own id', async () => {
+  let error = true;
+  const p = page({ home: true, responseData: payload(), handleRequest: (url, options) => {
+    if (options.method === 'POST') return jsonResponse(url.endsWith('/rename') && error ? { error: 'name_taken' } : { ok: true }, url.endsWith('/rename') && error ? 409 : 200);
+  } }); await settle();
+  const card = () => p.document.querySelectorAll('.wp-feishu-bot-card')[1];
+  const menuAction = async text => { await findButton(card(), '…').fire('click'); await findButton(card(), text).fire('click'); };
+  await menuAction('改名');
+  const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
+  assert.equal(input.value, '助手1'); assert.match(dialog.textContent, /只改工作伙伴里的名字/);
+  await submit(dialog); assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, '这个名字已经有了');
+  error = false; input.value = '新名字'; await input.fire('input'); await submit(dialog);
+  assert.equal(p.document.querySelector('dialog'), null); assert.equal(p.document.querySelector('.wp-feishu-bot-message').textContent, '已改名');
+  assert.equal(p.requests.find(r => r.url.endsWith('/rename')).url, '/_wp/feishu-bot/agents/s00000001/rename');
+  await menuAction('删除'); assert.match(card().querySelector('.wp-feishu-bot-confirm').textContent, /工作目录移到回收目录。飞书里的机器人不会被删除/);
+  await findButton(card(), '取消').fire('click'); assert.equal(p.requests.some(r => r.url.endsWith('/delete')), false);
+  await menuAction('删除'); await findButton(card(), '确认删除').fire('click');
+  assert.equal(p.requests.find(r => r.url.endsWith('/delete')).url, '/_wp/feishu-bot/agents/s00000001/delete');
+  assert.equal(p.document.querySelector('.wp-feishu-bot-message').textContent, '已删除');
+  await menuAction('重新连接'); await findButton(card(), '确认重新连接').fire('click');
+  assert.equal(p.requests.find(r => r.url.endsWith('/restart')).url, '/_wp/feishu-bot/agents/s00000001/restart');
+});
+
+
+test('create shows fixed server error copy and a missing agent does not revoke the whole feature', async () => {
+  for (const [error, status, text] of [
+    ['invalid_name', 400, '名字只能用汉字、字母、数字、空格和 _ - ·，最多 16 个字'],
+    ['limit_reached', 409, '子助手最多 5 个（主助手另算）'],
+    ['name_taken', 409, '这个名字已经有了'],
+    ['unavailable', 503, '操作没有成功，请稍后重试'],
+    ['not_found', 404, '操作没有成功，请稍后重试'],
+  ]) {
+    const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/agents') ? jsonResponse({ error }, status) : undefined });
+    await settle(); await p.document.querySelector('.wp-feishu-bot-add').fire('click');
+    const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
+    input.value = '助手'; await input.fire('input'); await submit(dialog);
+    assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, text);
+    assert.equal(dialog.querySelector('img'), null); assert.ok(p.document.querySelector('.wp-feishu-bot-section'));
+  }
 });
