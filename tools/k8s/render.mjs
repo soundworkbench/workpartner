@@ -26,6 +26,7 @@ function context(organization) {
   const runtime = organization.runtime || {};
   const k8s = runtime.k8s || {};
   const deploy = k8s.deploy || {};
+  const asr = deploy.asr ?? {};
   const entry = deploy.entry || {};
   const paths = deploy.hostPaths || {};
   const storage = deploy.newUserStorage || {};
@@ -80,6 +81,17 @@ function context(organization) {
   const selector = value => stringMap(value) && Object.keys(value).length > 0
     && Object.entries(value).every(([key, item]) => labelKey(key) && (item === '' || labelPart(item)));
   const port = value => Number.isInteger(value) && value > 0 && value <= 65535;
+  check('runtime.k8s.deploy.asr (expected an object)',
+    asr !== null && typeof asr === 'object' && !Array.isArray(asr));
+  check('runtime.k8s.deploy.asr.enabled (expected boolean)',
+    asr.enabled === undefined || typeof asr.enabled === 'boolean');
+  if (asr.enabled === true) {
+    need('runtime.k8s.deploy.asr.image', asr.image);
+    need('runtime.k8s.deploy.asr.nodeName', asr.nodeName);
+    check('runtime.k8s.deploy.asr.image', typeof asr.image === 'string' && asr.image.length > 0 && !/\s/.test(asr.image));
+    check('runtime.k8s.deploy.asr.nodeName', labelPart(asr.nodeName));
+    check('runtime.k8s.deploy.asr.threads', Number.isInteger(asr.threads ?? 2) && (asr.threads ?? 2) > 0);
+  }
   const absolutePath = value => typeof value === 'string' && isAbsolute(value) && value !== '/' && !/[\0\r\n]/.test(value);
   if (organization.features?.marketSkills) {
     check('market.sharedDirectory', absolutePath(organization.market?.sharedDirectory));
@@ -234,6 +246,10 @@ function context(organization) {
   ];
   return {
     partOf, gatewayLabels, userLabels, warnings,
+    asrEnabled: asr.enabled === true,
+    asrLabels: { ...partOf, 'workpartner/role': 'asr' },
+    asrImage: asr.image, asrNodeSelector: { 'kubernetes.io/hostname': asr.nodeName },
+    asrThreads: String(asr.threads ?? 2),
     namespace: k8s.namespace, systemNamespace, imageConfigMap, governingService,
     gatewayName: gateway.name, gatewayEntryName: `${gateway.name}-entry`,
     gatewayPriorityClass: `${systemNamespace}-gateway`, gatewayNodeSelector,
@@ -280,7 +296,8 @@ export function renderManifests(organization, { only } = {}) {
   }
   const values = context(organization);
   const files = [...templates, values.modelEndpoint ? 'model-endpoint' : 'model-ingress',
-    ...(values.entryMode === 'clusterIP' ? ['gateway-entry'] : [])];
+    ...(values.entryMode === 'clusterIP' ? ['gateway-entry'] : []),
+    ...(values.asrEnabled ? ['asr'] : [])];
   const objects = files.flatMap(name => {
     const template = readFileSync(new URL(`${name}.yaml.tmpl`, templateDirectory), 'utf8');
     const rendered = template.replace(/\{\{([a-zA-Z]+)\}\}/g, (_, key) => {

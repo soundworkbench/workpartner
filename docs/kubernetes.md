@@ -107,6 +107,51 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 
 所有 hostPaths 必须是非根绝对路径且事先存在。sessionKeyFile、cookieFile、identity.appSecretFile，以及配置 migration 时的 ownersFile，必须在网关 secureDirectory 或 stateDirectory 内。渲染器要求网关与模型 URL 使用短 Service 名，不能用节点 IP、外部域名或完整集群域名替代。生成的 StorageClass 固定为 `Retain`、`WaitForFirstConsumer`。当前网络清单的公网放行/排除使用 IPv4；node-guard 支持 IPv4/IPv6 地址（如 `2001:db8::10`），不能据此宣称整个方案已完成双栈验收。
 
+### 集群内语音识别（可选）
+
+`asr/` 提供仅供网关调用的 CPU 语音识别服务，使用 `sherpa-onnx==2.0.1` 和 SenseVoice-Small int8；T-1185 的网关接口负责转发。系统命名空间中的地址为 `http://wp-asr:8080/v1/recognize`，POST 原始 PCM 16 位、16000Hz、单声道 WAV，Content-Type 为 `audio/wav` 或 `audio/x-wav`。成功返回 `text`、`seconds`、`elapsedMs`；短于 0.3 秒只返回 `{"text":""}`。默认上限为 2 MiB / 60 秒，识别串行执行，排队超过 10 秒返回 503；长于 25 秒在边界前 5 秒内寻找最低能量的 100ms 窗口分段。服务仅记录时长、耗时、状态码，不记录音频或文字。
+
+组织配置 `runtime.k8s.deploy.asr` 默认关闭，未配置或 `enabled: false` 时渲染输出不变。开启时必须提供镜像引用和节点名；`threads` 为正整数，默认 2。生产节点填写 `srv2153109`（须核实其 `kubernetes.io/hostname` 标签）：
+
+```json
+{
+  "runtime": {
+    "k8s": {
+      "deploy": {
+        "asr": {
+          "enabled": true,
+          "image": "docker.io/library/wp-asr:t1184",
+          "nodeName": "srv2153109",
+          "threads": 2
+        }
+      }
+    }
+  }
+}
+```
+
+开启后新增 Deployment、ClusterIP Service 和 NetworkPolicy，均名为 `wp-asr`。副本为 1，更新策略为 Recreate，资源 requests 为 500m/1Gi、limits 为 2 核/2Gi，启动探针允许模型加载最多约 5 分钟。容器以 UID 10001、只读根文件系统运行，不挂 ServiceAccount token。NetworkPolicy 只允许同系统命名空间的网关标签 Pod 访问 TCP 8080，拒绝全部出站；不向用户 Pod 或外部暴露。若目标节点带有 NoSchedule 污点，部署前需核实调度条件；模板不自动容忍节点污点。
+
+固定 wheel 校验值对应 Linux amd64 / Python 3.12。先在可联网的 amd64 构建机构建并测试，再用现有脚本导入目标节点，无需镜像仓库：
+
+```bash
+docker build -t docker.io/library/wp-asr:t1184 asr/
+bash asr/tests/smoke.sh docker.io/library/wp-asr:t1184
+bash tools/k8s/distribute-image.sh docker.io/library/wp-asr:t1184 \
+  --node "$ASR_NODE_SSH" --namespace "$SYSTEM_NAMESPACE" --kubeconfig "$JSON_KUBECONFIG"
+node tools/k8s/render.mjs --org "$ORG_DIRECTORY" \
+  --only Deployment,Service,NetworkPolicy --output "$MANIFEST_DIRECTORY"
+kubectl --kubeconfig "$JSON_KUBECONFIG" apply -f "$MANIFEST_DIRECTORY"
+```
+
+上述 `--only` 也会生成这些种类的现有对象，应用前审阅完整输出；不重写镜像登记 ConfigMap。`imagePullPolicy: Never` 要求组织配置、构建、分发使用相同镜像引用；若移到其他节点须先分发。关闭开关只停止生成 ASR 对象，已部署的三个对象需要部署方另行删除。
+
+服务支持 `ASR_PORT=8080`、`ASR_MODEL_DIR=/opt/model`、`ASR_THREADS=2`、`ASR_MAX_BYTES=2097152`、`ASR_MAX_SECONDS=60`、`ASR_QUEUE_TIMEOUT=10`；部署渲染器提供线程数配置，其余使用镜像默认值。健康检查为 `GET /healthz`，模型完成加载后才开始监听并返回 `{"ok":true}`。
+
+模型作者为阿里巴巴通义实验室（FunAudioLLM / SenseVoice 团队），原模型为 [SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice)，ONNX int8 包由 [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 发布：[sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2)。包大小 163002883 字节，SHA-256 为 `7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e`。模型采用 FunASR MODEL_LICENSE 1.1，使用、复制、修改、分享时须注明出处和作者、保留模型名；镜像原样保留 `/opt/model/LICENSE` 和 `/opt/model/README.md`，再分发时须保留并遵循其条款。Dockerfile 使用校验值下载模型，pip 对两个固定版本 wheel 启用 `--require-hashes`，不安装额外 Python 依赖。
+
+`.github/workflows/asr-image.yml` 在相关 PR 和 main push 中运行假识别器单测、构建镜像及真模型 smoke，不推送镜像。`smoke.sh IMAGE` 在容器内调用自带中文样例并断言含「开放时间」，只打印时长、耗时和错误码检查结果；容器退出时自动清理。
+
 <a id="model-egress-routing"></a>
 
 ### 模型出口与 Docker 中继
