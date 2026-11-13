@@ -482,6 +482,9 @@ class Supervisor:
             os.close(fd)
             raise
         self.fifo_fd = fd
+        for bridge in self.bridges.values():
+            if bridge.child is not None and bridge.child.poll() is None:
+                write_bridge_file('bridge.pid', bridge.child.pid, bridge.run_dir)
         return True
 
     def scan(self):
@@ -502,15 +505,20 @@ class Supervisor:
     def control(self, chunk):
         lines = (self.control_pending + chunk).split(b'\n')
         self.control_pending = lines.pop()[-1024:]
+        handled = False
         for line in lines:
             if line == b'rescan':
                 self.next_scan = 0
+                handled = True
             elif line == b'restart':
                 self.requested = True
+                handled = True
             elif line.startswith(b'restart '):
                 bridge = self.bridges.get(line[8:].decode(errors='replace'))
                 if bridge:
                     bridge.requested = True
+                    handled = True
+        return handled
 
     def tick(self, now):
         if self.requested:
@@ -531,6 +539,14 @@ class Supervisor:
     def wait_after_error(self, delay):
         until = time.monotonic() + delay
         while not self.stopping and time.monotonic() < until:
+            handled = False
+            if self.fifo_fd is not None:
+                try:
+                    chunk = os.read(self.fifo_fd, 65536)
+                except (BlockingIOError, OSError):
+                    chunk = None
+                if chunk:
+                    handled = self.control(chunk)
             for bridge in self.bridges.values():
                 if bridge.child:
                     for channel in ('stdout', 'stderr'):
@@ -538,6 +554,8 @@ class Supervisor:
                             bridge.read_output(channel)
                         except Exception:
                             pass
+            if handled:
+                return
             time.sleep(0.1)
 
     def run(self):
