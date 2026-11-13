@@ -98,6 +98,12 @@ for (const [width, dark] of [[1280, false], [390, false], [360, false], [360, tr
       assert.match(await card(page, 's00000001').locator('.wp-feishu-bot-summary').innerText(), /飞书机器人：飞书助手1/);
       assert.equal(await card(page, 's00000002').locator('.wp-feishu-bot-state').innerText(), '等待扫码');
       assert.equal(await card(page, 's00000002').getByRole('link').count(), 0);
+      await page.mouse.move(0, 0);
+      const connect = card(page, 's00000002').getByRole('button', { name: '扫码连接' });
+      assert.equal(await connect.isVisible(), true);
+      assert.equal(await connect.evaluate(el => getComputedStyle(el.parentElement).opacity), '1');
+      assert.equal(await connect.evaluate(el => getComputedStyle(el.parentElement).pointerEvents), 'auto');
+      assert.equal(await card(page, 's00000002').locator('.wp-feishu-bot-summary').innerText(), '等待扫码');
       await fits(page); await suite.shot(page, `cards-${width}-${dark ? 'dark' : 'light'}`, { fullPage: true });
       await page.getByRole('button', { name: '新建子助手', exact: true }).click();
       const input = page.locator(D).getByLabel('名字', { exact: true });
@@ -177,6 +183,7 @@ test('setup polling stops when hidden or closed and resumes when visible', LONG,
 test('users outside sub-agent list see only main and legacy plus hint', LONG, async () => {
   await session('not-enabled', {}, async ({ page, fixture }) => {
     assert.equal(await page.locator(CARD).count(), 1);
+    assert.equal(await page.locator('.wp-feishu-bot-tag').count(), 0);
     assert.equal(await page.locator(CARD + ' h3').innerText(), '主机器人');
     await page.getByRole('button', { name: '连接飞书机器人', exact: true }).click();
     assert.equal(await page.locator(D).count(), 0);

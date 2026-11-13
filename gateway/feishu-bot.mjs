@@ -129,6 +129,9 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
       ...((typeof data.expiresAt === 'number' && Number.isFinite(data.expiresAt) && data.expiresAt >= 0 || typeof data.expiresAt === 'string' && Number.isFinite(Date.parse(data.expiresAt))) ? { expiresAt: data.expiresAt } : {}),
       ...(status === 'waiting' && typeof data.qr === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(data.qr) && !data.qr.includes('\n') ? { qr: data.qr } : {}) };
   }
+  async function requireSubAgents(user) {
+    if (!(await info(user)).supported) throw fail(404, 'not_found');
+  }
   const start = (user, id) => command(user, 'feishu-onboard.py', ['start', '--agent', id], { timeout: 10000, detached: true });
   const reply = (res, status, data) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -160,7 +163,10 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
           subAgents: { enabled, limit: data.limit, count: enabled ? data.count : 0 } });
       } else if (route === '/reconnect' || action === 'restart') {
         await reconnect(user, id); reply(res, 200, { ok: true });
-      } else if (action === 'setup' && req.method === 'GET') reply(res, 200, await setup(user, id));
+      } else if (action === 'setup' && req.method === 'GET') {
+        await requireSubAgents(user);
+        reply(res, 200, await setup(user, id));
+      }
       else {
         const name = route === '/agents' || action === 'rename' ? normalizeAgentName(body.name) : undefined;
         const data = await serial(user, async () => {
@@ -172,9 +178,11 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
             pending.delete(user.slug);
             const agent = publicAgent(result.agent)[0];
             if (!agent || agent.kind !== 'sub') throw fail(503);
-            await start(user, agent.id);
-            return { agent: { id: agent.id, name: agent.name, kind: agent.kind, setup: 'preparing' } };
+            let setup = 'preparing';
+            try { await start(user, agent.id); } catch { setup = 'none'; }
+            return { agent: { id: agent.id, name: agent.name, kind: agent.kind, setup } };
           }
+          await requireSubAgents(user);
           if (action === 'setup') {
             const state = await setup(user, id);
             if (!['none', 'expired', 'failed'].includes(state.status)) return state;

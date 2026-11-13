@@ -181,7 +181,7 @@ Feishu onboarding uses that same service restart for all users, independently of
 
 | 方法与路径 | 请求 / 行为 |
 | --- | --- |
-| `POST /agents` | `{name}`，创建子助手后 detached 启动扫码流程，返回 201 `{agent:{id,name,kind,setup:"preparing"}}` |
+| `POST /agents` | `{name}`，创建子助手后 detached 启动扫码流程，返回 201 `{agent:{id,name,kind,setup:"preparing"}}`；若创建成功但启动失败，仍返回 201，`setup:"none"`，可从卡片「扫码连接」补启动 |
 | `GET /agents/<id>/setup` | 返回 `{status,expiresAt?,qr?}`，`unconnected` 映射 `none`，只放行 PNG base64 二维码 |
 | `POST /agents/<id>/setup` | `{}`，仅 none / expired / failed 状态重新启动，其他状态原样返回 |
 | `POST /agents/<id>/rename` | `{name}`，只修改工作伙伴中的名字，不修改飞书机器人名 |
@@ -193,6 +193,12 @@ Feishu onboarding uses that same service restart for all users, independently of
 
 网关以 `runtime.uid` 调用 `python3 /opt/workpartner/bin/wp-agent create` / `rename <id>` / `delete <id>`（20 秒）；只有 create/rename 用 stdin 传 `{name}`。扫码为 `python3 /opt/workpartner/bin/feishu-onboard.py start --agent <id>`（detached，不带 stdin）和 `status --agent <id>`（10 秒）。子助手重启使用 `python3 /opt/workpartner/bin/wp-feishu-bot.py restart --agent <id>`，主助手不带 `--agent`。同一用户的创建、改名、删除和 setup POST 串行，成功后清掉运行中的 info 合并结果。并发隔离仅在单网关进程内，容器锁负责最终上限和重名约束。
 
-容器退出码 1 的一行 JSON 中，仅白名单错误码映射为 HTTP：`invalid_name` / `main_agent` → 400，`name_taken` / `limit_reached` → 409，`not_found` → 404；`no_supervisor` 和其他 exec/超时/解析失败 → 503 `unavailable`。未获准接口返回 404，来源或类型错误返回 403，非法 body 返回 400。错误响应只有 `{error}`，不透传命令输出、凭据或额外字段。旧镜像缺少 `wp-agent` 也返回 503。
+容器退出码 1 的一行 JSON 中，仅白名单错误码映射为 HTTP：`invalid_name` / `main_agent` → 400，`name_taken` / `limit_reached` → 409，`not_found` → 404；`no_supervisor` 和其他 exec/超时/解析失败 → 503 `unavailable`。未获准接口返回 404，来源或类型错误返回 403，非法 body 返回 400。错误响应只有 `{error}`，不透传命令输出、凭据或额外字段。旧镜像缺少 `wp-agent` 也返回 503。setup（GET/POST）、rename、delete 在执行助手命令前先检查 info 的 `agents` 数组；缺失或不是数组时返回 404，不调用旧版 onboarding，避免误读主助手的状态或二维码。
 
-首页仅提供飞书跳转和管理，不在网页对话。原生 dialog 承载新建、改名和扫码；二维码每 2 秒轮询，关闭或页面隐藏时停止，重新可见时恢复，连接成功后刷新卡片。删除需要卡片内二次确认；若还需删除飞书侧机器人，请通过「管理」前往飞书开放平台操作。主助手横幅和 `/_wp/aionui/feishu/*` 的开通状态机不受影响。
+首页仅提供飞书跳转和管理，不在网页对话。原生 dialog 承载新建、改名和扫码；二维码通常每 2 秒轮询，`needs_identity` 时改为每 10 秒；`expired` / `failed` 停止轮询，点「重试」后恢复。关闭或页面隐藏时暂停，重新可见时只恢复尚未结束的流程，连接成功后刷新卡片。写操作后的刷新遇到在途请求时，会等待它结束再请求新数据。仅 `subAgents.enabled:true` 时显示主/子助手标签；未连接卡片常显主色「扫码连接」按钮及状态说明，`needs_identity` 不显示扫码按钮。删除需要卡片内二次确认；若还需删除飞书侧机器人，请通过「管理」前往飞书开放平台操作。主助手横幅和 `/_wp/aionui/feishu/*` 的开通状态机不受影响。
+
+上线清单：
+
+1. **先升级镜像，再开子助手名单**：部署 T-1193 镜像，确认目标用户容器的 info 返回 `agents` 数组且子助手命令可用。
+2. 部署网关后，由协调者为 tang 配置上述两层名单；仓库默认 `subAgents.allow: []` 保持关闭。
+3. 验证新建、扫码、改名、删除及主助手原有入口，并检查 Actions 浏览器测试与截图。

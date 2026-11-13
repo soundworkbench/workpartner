@@ -6,7 +6,7 @@ export function feishuBotClient() {
 function installFeishuBot() {
   const API = '/_wp/feishu-bot';
   let bots = [], agents = [], subAgents = { enabled: false, limit: 5, count: 0 }, modal, setupTimer, pollSetup, section, content, message, staleHint, refreshButton, addButton, observer, style, mountFrame, closeMenu;
-  let stale = false;
+  let stale = false, modalFocus;
   let highlightTimer, messageTimer, revealHome = false, loaded = false;
   let pending, timer, reconnectTimer, revoked = false, reconnecting = false;
   const safe = fn => (...args) => { try { return Promise.resolve(fn(...args)).catch(() => {}); } catch {} };
@@ -74,9 +74,9 @@ function installFeishuBot() {
     clearTimeout(timer);
     if (!document.hidden && !revoked) timer = setTimeout(safe(() => refresh()), 60000);
   }
-  function refresh(force = false) {
+  function refresh(force = false, fresh = false) {
     if (revoked) return Promise.resolve();
-    if (pending) return pending;
+    if (pending) return fresh ? pending.then(() => refresh(force, true)) : pending;
     if (refreshButton) refreshButton.disabled = true;
     pending = (async () => {
       try {
@@ -120,7 +120,7 @@ function installFeishuBot() {
         if (revoked) return;
         notify('已重新连接，稍后刷新状态。');
         clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(safe(() => { if (!document.hidden) refresh(); }), 3000);
+        reconnectTimer = setTimeout(safe(() => { if (!document.hidden) refresh(false, true); }), 3000);
       } catch { notify('重新连接失败，请稍后重试。'); }
       finally { reconnecting = false; render(); }
     }));
@@ -139,10 +139,14 @@ function installFeishuBot() {
     limit_reached: '子助手最多 5 个（主助手另算）' }[error.message] || '操作没有成功，请稍后重试');
   function closeDialog() {
     clearTimeout(setupTimer); pollSetup = undefined;
-    const previous = modal; modal = undefined;
+    const previous = modal, focus = modalFocus; modal = undefined; modalFocus = undefined;
     previous?.close(); previous?.remove();
+    if (focus && !revoked) {
+      const card = [...(content?.querySelectorAll('.wp-feishu-bot-card') || [])].find(card => card.dataset.agentId === focus.agentId);
+      (focus.trigger?.isConnected ? focus.trigger : card?.querySelector('.wp-feishu-bot-more') || addButton)?.focus();
+    }
   }
-  function dialog(title) {
+  function dialog(title, trigger, agentId) {
     closeDialog();
     const element = node('dialog', undefined, 'wp-feishu-bot-dialog');
     const header = node('div', undefined, 'wp-feishu-bot-dialog-header');
@@ -153,11 +157,11 @@ function installFeishuBot() {
     element.append(header, body);
     element.addEventListener('close', () => { if (modal === element) closeDialog(); });
     element.addEventListener('cancel', event => { event.preventDefault(); closeDialog(); });
-    document.body.append(element); modal = element; element.showModal();
+    document.body.append(element); modal = element; modalFocus = { trigger, agentId }; element.showModal();
     return { element, body, heading };
   }
-  function nameDialog(agent) {
-    const view = dialog(agent ? '改名' : '新建子助手');
+  function nameDialog(agent, trigger) {
+    const view = dialog(agent ? '改名' : '新建子助手', trigger, agent?.id);
     const form = node('form'), label = node('label', '名字'), input = node('input');
     input.type = 'text'; input.value = agent?.name || ''; input.id = 'wp-feishu-agent-name';
     input.autocomplete = 'off'; label.setAttribute('for', input.id);
@@ -175,6 +179,7 @@ function installFeishuBot() {
       : '子助手有自己的工作目录、记忆和飞书机器人，可以互相调用。'), submit);
     form.addEventListener('submit', safe(async event => {
       event.preventDefault();
+      validate();
       const name = normalizedName(input.value);
       if (busy || !name) return;
       busy = true; validate();
@@ -184,23 +189,26 @@ function installFeishuBot() {
           if (agent) { closeDialog(); notify('已改名'); }
           else setupDialog(data.agent, view, false);
         }
-        await refresh();
+        await refresh(false, true);
       } catch (error) { if (modal === view.element) hint.textContent = errorText(error); }
       finally { busy = false; submit.disabled = !normalizedName(input.value); }
     }));
-    view.body.append(form); validate(); input.focus();
+    view.body.append(form); submit.disabled = !normalizedName(input.value); input.focus();
   }
-  function setupDialog(agent, view = dialog(''), start = true) {
+  function setupDialog(agent, view, start = true, trigger) {
+    view ||= dialog('', trigger, agent.id);
+    modalFocus.agentId = agent.id;
     view.heading.textContent = '给「' + agent.name + '」创建飞书机器人';
     view.body.replaceChildren(node('p', '用飞书手机 App 扫码，完成机器人创建和授权。二维码 10 分钟内有效。飞书里给机器人起名时建议也用「' + agent.name + '」。'));
     const status = node('p', '正在准备二维码…'); status.setAttribute('role', 'status');
     const qr = node('img'); qr.alt = '创建飞书机器人的二维码'; qr.hidden = true;
     const retry = button('重试', () => poll(true)); retry.hidden = true;
     view.body.append(status, qr, retry);
-    let busy = false, finished = false, shouldStart = start;
+    let busy = false, finished = false, stopped = false, interval = 2000, shouldStart = start;
     async function poll(restart = false) {
       clearTimeout(setupTimer);
-      if (modal !== view.element || document.hidden || busy || finished) return;
+      if (modal !== view.element || document.hidden || busy || finished || stopped && !restart) return;
+      stopped = false;
       busy = true; retry.disabled = true;
       try {
         const data = await request('/agents/' + agent.id + '/setup', restart || shouldStart);
@@ -212,12 +220,14 @@ function installFeishuBot() {
           connected: '已连接，可以在飞书里找「' + agent.name + '」了', expired: '二维码已过期，请重试',
           failed: '创建没有成功，请重试', needs_identity: '请给新机器人发 /whoami，保留返回的本人 ID，再请管理员完成连接。' }[data.status] || '操作没有成功，请稍后重试';
         retry.hidden = !['none', 'expired', 'failed'].includes(data.status);
-        if (data.status === 'connected') { finished = true; await refresh(); }
+        stopped = ['expired', 'failed'].includes(data.status);
+        interval = data.status === 'needs_identity' ? 10000 : 2000;
+        if (data.status === 'connected') { finished = true; await refresh(false, true); }
       } catch (error) {
         if (modal === view.element) { status.textContent = errorText(error); retry.hidden = false; }
       } finally {
         busy = false; retry.disabled = false;
-        if (modal === view.element && !document.hidden && !finished) setupTimer = setTimeout(safe(() => poll()), 2000);
+        if (modal === view.element && !document.hidden && !finished && !stopped) setupTimer = setTimeout(safe(() => poll()), interval);
       }
     }
     pollSetup = () => poll(); poll();
@@ -234,7 +244,7 @@ function installFeishuBot() {
       confirm.disabled = true; cancel.disabled = true;
       try {
         await request('/agents/' + agent.id + '/delete', true);
-        box.remove(); notify('已删除'); await refresh();
+        box.remove(); notify('已删除'); await refresh(false, true);
       } catch (error) { notify(errorText(error)); }
       finally { confirm.disabled = false; cancel.disabled = false; }
     });
@@ -266,7 +276,7 @@ function installFeishuBot() {
     const focusIndex = [...content.querySelectorAll('button, a')].indexOf(focused);
     content.replaceChildren();
     addButton = button('', () => {
-      if (bots.length && subAgents.enabled) { nameDialog(); return; }
+      if (bots.length && subAgents.enabled) { nameDialog(undefined, addButton); return; }
       if (bots.length) {
         notify('一个工作伙伴暂时只能连一个飞书机器人，多个子助手的功能做好后开放'); return;
       }
@@ -284,16 +294,22 @@ function installFeishuBot() {
       card.dataset.agentId = id; if (bot) card.dataset.appId = bot.appId;
       const heading = node('div', undefined, 'wp-feishu-bot-heading');
       const title = node('h3', titleText); title.title = titleText;
-      const identity = node('div', undefined, 'wp-feishu-bot-identity'); identity.append(title, node('small', agent ? '子助手' : '主助手', 'wp-feishu-bot-tag'), bot ? state(bot)
-        : node('span', { waiting: '等待扫码', needs_identity: '待管理员完成连接' }[agent.setup] || '还没连接飞书', 'wp-feishu-bot-state'));
+      const setupText = bot ? '' : { waiting: '等待扫码', needs_identity: '待管理员完成连接' }[agent.setup] || '还没连接飞书';
+      const identity = node('div', undefined, 'wp-feishu-bot-identity'); identity.append(title);
+      if (subAgents.enabled) identity.append(node('small', agent ? '子助手' : '主助手', 'wp-feishu-bot-tag'));
+      identity.append(bot ? state(bot) : node('span', setupText, 'wp-feishu-bot-state'));
       heading.append(avatar(bot || agent), identity);
       const footer = node('div', undefined, 'wp-feishu-bot-footer');
-      const summary = node('p', bot ? (agent && bot.name && bot.name !== agent.name ? '飞书机器人：' + bot.name + ' · ' : '') + description(bot) : '', 'wp-feishu-bot-summary'); summary.title = summary.textContent;
+      if (!bot) footer.className += ' wp-feishu-bot-unconnected';
+      const summary = node('p', bot ? (agent && bot.name && bot.name !== agent.name ? '飞书机器人：' + bot.name + ' · ' : '') + description(bot) : setupText, 'wp-feishu-bot-summary'); summary.title = summary.textContent;
       const actions = node('div', undefined, 'wp-feishu-bot-actions');
       if (bot) {
         const chat = link('去对话', bot.openUrl, 'chat'); chat.className = 'wp-feishu-bot-chat';
         actions.append(chat, link('管理', 'https://open.feishu.cn/app/' + encodeURIComponent(bot.appId), 'manage'));
-      } else if (agent.setup !== 'needs_identity') actions.append(button('扫码连接', () => setupDialog(agent)));
+      } else if (agent.setup !== 'needs_identity') {
+        const connect = button('扫码连接', () => setupDialog(agent, undefined, true, connect));
+        connect.className = 'wp-feishu-bot-chat'; actions.append(connect);
+      }
       const more = button('…', () => {
         const existing = card.querySelector('.wp-feishu-bot-menu');
         if (existing) { closeMenu?.(); return; }
@@ -315,7 +331,7 @@ function installFeishuBot() {
           const reconnect = button('重新连接', () => { close(true); confirmReconnect(card, more, id); }); reconnect.disabled = reconnecting;
           menu.append(copyButton, reconnect);
         }
-        if (agent) menu.append(button('改名', () => { close(true); nameDialog(agent); }),
+        if (agent) menu.append(button('改名', () => { close(true); nameDialog(agent, more); }),
           button('删除', () => { close(true); confirmDelete(card, more, agent); }));
         card.append(menu); more.setAttribute('aria-expanded', 'true'); menu.querySelector('button')?.focus();
         menu.addEventListener('keydown', safe(event => { if (event.key === 'Escape') { event.preventDefault(); close(true); render(); } }));
@@ -458,6 +474,9 @@ html[data-theme=dark] .wp-feishu-bot-dot[data-state=offline] { background:#ffc17
 .wp-feishu-bot-actions .wp-feishu-bot-more { width:38px; height:38px; flex:none; padding:0; font-size:20px; }
 .wp-feishu-bot-card:hover .wp-feishu-bot-summary, .wp-feishu-bot-card:focus-within .wp-feishu-bot-summary { visibility:hidden; }
 .wp-feishu-bot-card:hover .wp-feishu-bot-footer > .wp-feishu-bot-actions, .wp-feishu-bot-card:focus-within .wp-feishu-bot-footer > .wp-feishu-bot-actions { opacity:1; pointer-events:auto; }
+.wp-feishu-bot-unconnected { display:flex; flex-direction:column; gap:12px; }
+.wp-feishu-bot-card .wp-feishu-bot-unconnected > .wp-feishu-bot-summary { visibility:visible; width:100%; min-height:0; }
+.wp-feishu-bot-card .wp-feishu-bot-unconnected > .wp-feishu-bot-actions { opacity:1; pointer-events:auto; width:100%; }
 .wp-feishu-bot-section .wp-feishu-bot-add { display:flex; flex-direction:column; gap:8px; color:var(--wp-ink-2, #666); }
 .wp-feishu-bot-plus { font-size:48px; line-height:1; color:var(--wp-ink, #222); }
 .wp-feishu-bot-menu { position:absolute; z-index:2; right:20px; bottom:64px; display:flex; flex-direction:column; padding:6px; border:1px solid var(--wp-line, #ddd); border-radius:12px; background:var(--wp-card, #fff); box-shadow:0 4px 16px var(--wp-shadow, rgba(0,0,0,.12)); }

@@ -323,21 +323,25 @@ test('all mutations check origin, JSON object size, exact id and main restrictio
 test('setup whitelists status/QR/expiry and starts only none, expired or failed', async t => {
   const f = await subFixture(t);
   for (const state of ['unconnected', 'none', 'preparing', 'waiting', 'needs_identity', 'expired', 'failed', 'connected']) {
-    f.execute(async (_slug, cmd) => cmd[2] === 'start' ? {} : result({ status: state,
+    f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [mainAgent, sub(1)] })
+      : cmd[2] === 'start' ? {} : result({ status: state,
       expiresAt: '2026-11-13T00:00:00Z', qr: 'data:image/png;base64,YQ==', token: 'private' }));
     const expected = { status: state === 'unconnected' ? 'none' : state, expiresAt: '2026-11-13T00:00:00Z',
       ...(state === 'waiting' ? { qr: 'data:image/png;base64,YQ==' } : {}) };
     assert.deepEqual((await f.request('/agents/s00000001/setup')).data, expected);
     const before = f.calls.length, starts = ['unconnected', 'none', 'expired', 'failed'].includes(state);
     assert.deepEqual((await f.request('/agents/s00000001/setup', post)).data, starts ? { status: 'preparing' } : expected);
-    assert.equal(f.calls.length, before + (starts ? 2 : 1));
-    assert.deepEqual(f.calls[before][1], ['python3', '/opt/workpartner/bin/feishu-onboard.py', 'status', '--agent', 's00000001']);
+    assert.equal(f.calls.length, before + (starts ? 3 : 2));
+    assert.deepEqual(f.calls[before][1], ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'info']);
+    assert.deepEqual(f.calls[before + 1][1], ['python3', '/opt/workpartner/bin/feishu-onboard.py', 'status', '--agent', 's00000001']);
   }
   for (const qr of ['https://private', 'data:image/svg+xml;base64,YQ==', 'data:image/png;base64,YQ==\n', {}]) {
-    f.reply({ status: 'waiting', qr, expiresAt: { token: 'private' } });
+    f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [] })
+      : result({ status: 'waiting', qr, expiresAt: { token: 'private' } }));
     assert.deepEqual((await f.request('/agents/s00000001/setup')).data, { status: 'waiting' });
   }
-  f.reply({ status: 'unknown', token: 'private' }); assert.equal((await f.request('/agents/s00000001/setup')).status, 503);
+  f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [] })
+    : result({ status: 'unknown', token: 'private' })); assert.equal((await f.request('/agents/s00000001/setup')).status, 503);
 });
 
 test('rename/delete/restart use exact commands and invalidate info after writes', async t => {
@@ -353,8 +357,8 @@ test('rename/delete/restart use exact commands and invalidate info after writes'
     ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'restart', '--agent', 's00000001'],
     ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'restart'], ['python3', '/opt/workpartner/bin/wp-feishu-bot.py', 'restart'],
     ['python3', '/opt/workpartner/bin/wp-agent', 'delete', 's00000001'] ]);
-  assert.equal(f.calls[0][2].stdin, '{"name":"新名字"}');
-  assert.ok(f.calls.slice(1).every(c => !('stdin' in c[2])));
+  assert.equal(f.calls.find(c => c[1][2] === 'rename')[2].stdin, '{"name":"新名字"}');
+  assert.ok(f.calls.filter(c => c[1][2] !== 'rename').every(c => !('stdin' in c[2])));
 });
 
 test('container errors on exit 1 map to fixed responses; failures remain opaque on every endpoint', async t => {
@@ -373,9 +377,6 @@ test('container errors on exit 1 map to fixed responses; failures remain opaque 
     for (const route of routes) assert.deepEqual((await f.request(route, named('名字'))).data, { error: 'unavailable' });
     assert.deepEqual((await f.request('/agents/s00000001/setup')).data, { error: 'unavailable' });
   }
-  f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [] })
-    : cmd[2] === 'create' ? result({ ok: true, agent: sub(1) }) : { exitCode: 1 });
-  assert.equal((await f.request('/agents', named('名字'))).status, 503);
 });
 
 
@@ -395,7 +396,8 @@ test('organization deep merge preserves disabled sub-agent defaults under a firs
 
 test('setup permits numeric expiry but never arbitrary objects or extra stdout fields', async t => {
   const f = await subFixture(t);
-  f.reply({ status: 'waiting', expiresAt: 1800000000, qr: 'data:image/png;base64,YQ==', app_secret: 'private' });
+  f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [] })
+    : result({ status: 'waiting', expiresAt: 1800000000, qr: 'data:image/png;base64,YQ==', app_secret: 'private' }));
   assert.deepEqual((await f.request('/agents/s00000001/setup')).data,
     { status: 'waiting', expiresAt: 1800000000, qr: 'data:image/png;base64,YQ==' });
 });
@@ -405,23 +407,65 @@ test('failed writes release the per-user queue; rename and delete never overlap'
   let release;
   const blocked = new Promise(resolve => { release = resolve; });
   f.execute(async (_slug, cmd) => {
+    if (cmd[2] === 'info') return result({ ok: true, bots: [], agents: [] });
     if (cmd[2] === 'rename') { await blocked; return result({ ok: false, error: 'name_taken' }, 1); }
     return result({ ok: true });
   });
   const rename = f.request('/agents/s00000001/rename', named('新名字'));
   const deletion = f.request('/agents/s00000001/delete', post);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(f.calls.map(c => c[1][2]), ['rename']);
+  assert.deepEqual(f.calls.map(c => c[1][2]), ['info', 'rename']);
   release(); assert.deepEqual((await Promise.all([rename, deletion])).map(r => r.status), [409, 200]);
-  assert.deepEqual(f.calls.map(c => c[1][2]), ['rename', 'delete']);
+  assert.deepEqual(f.calls.map(c => c[1][2]), ['info', 'rename', 'info', 'delete']);
 });
 
 
 test('worker error codes must be literal allowlisted strings', async t => {
   const f = await subFixture(t);
   for (const error of [['not_found'], { code: 'invalid_name' }, 'not_found\n', 'app_secret']) {
-    f.execute(async () => result({ ok: false, error }, 1));
+    f.execute(async (_slug, cmd) => cmd[2] === 'info' ? result({ ok: true, bots: [], agents: [] }) : result({ ok: false, error }, 1));
     const response = await f.request('/agents/s00000001/delete', post);
     assert.equal(response.status, 503); assert.deepEqual(response.data, { error: 'unavailable' });
+  }
+});
+
+test('created agent returns 201 with setup none when detached start fails and can be started later', async t => {
+  for (const throws of [false, true]) {
+    const f = await subFixture(t); let created, failStart = true;
+    f.execute(async (_slug, cmd) => {
+      if (cmd[2] === 'info') return result({ ok: true, bots: [], agents: [mainAgent, ...(created ? [created] : [])] });
+      if (cmd[2] === 'create') { created = sub(1, { name: '新助手' }); return result({ ok: true, agent: created }); }
+      if (cmd[2] === 'status') return result({ status: 'none' });
+      if (failStart) {
+        if (throws) throw new Error('timeout app_secret private');
+        return { exitCode: 1, stdout: 'token private' };
+      }
+      return {};
+    });
+    const response = await f.request('/agents', named('新助手'));
+    assert.equal(response.status, 201);
+    assert.deepEqual(response.data, { agent: { id: 's00000001', name: '新助手', kind: 'sub', setup: 'none' } });
+    const data = (await f.request()).data;
+    assert.equal(data.subAgents.count, 1); assert.equal(data.agents[1].setup, 'none');
+    failStart = false;
+    assert.deepEqual((await f.request('/agents/s00000001/setup', post)).data, { status: 'preparing' });
+    assert.equal(f.calls.filter(c => c[1][2] === 'create').length, 1);
+    assert.ok(f.calls.filter(c => c[1][2] === 'start').every(c => c[2].detached && !('stdin' in c[2])));
+  }
+});
+
+test('old images reject setup GET/POST, rename and delete before running agent commands', async t => {
+  const f = await subFixture(t);
+  for (const agents of [undefined, null, {}]) {
+    f.execute(async (_slug, cmd) => {
+      assert.equal(cmd[2], 'info', 'old onboard must never receive a sub-agent command');
+      return result({ ok: true, bots: [{ appId: 'cli_Main' }], ...(agents === undefined ? {} : { agents }) });
+    });
+    for (const [route, options] of [['setup', {}], ['setup', post], ['rename', named('新名字')], ['delete', post]]) {
+      const before = f.calls.length;
+      const response = await f.request('/agents/s00000001/' + route, options);
+      assert.equal(response.status, 404); assert.deepEqual(response.data, { error: 'not_found' });
+      assert.equal(f.calls.length, before + 1);
+    }
   }
 });
