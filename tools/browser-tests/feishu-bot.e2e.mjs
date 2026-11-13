@@ -70,6 +70,7 @@ for (const width of [1280, 390, 360]) {
       assert.equal(await page.locator('[class*="_guidContainer_"] > [class*="_guidInputCardWrap"] + ' + S).count(), 1);
       assert.ok(await page.locator(S).evaluate(section => section.getBoundingClientRect().top >= document.querySelector('[data-testid="guid-input"]').getBoundingClientRect().bottom));
       assert.equal(await page.locator(CARD).count(), 3);
+      assert.equal(await page.locator('.wp-feishu-bot-tag').count(), 0);
       assert.equal(await page.locator('.wp-feishu-bot-cards > :first-child').getAttribute('aria-label'), '连接飞书机器人');
       const first = page.locator(CARD).first();
       assert.equal(await first.locator('h3').innerText(), bot.name);

@@ -176,7 +176,8 @@
     "allow": []
   },
   "feishuBot": {
-    "allow": []
+    "allow": [],
+    "subAgents": { "allow": [] }
   },
   "myKey": {
     "allow": [],
