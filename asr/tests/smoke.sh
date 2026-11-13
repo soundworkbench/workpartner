@@ -52,7 +52,7 @@ for name in ('LICENSE', 'README.md', 'test_wavs/en.wav'):
 status, result = request('POST', '/v1/recognize', (model / 'test_wavs/zh.wav').read_bytes(),
                          {'Content-Type': 'audio/wav'})
 assert status == 200, f'Recognition status: {status}'
-assert '开放时间' in result['text'], 'Expected phrase missing from recognition'
+assert '早上9点至下午5点' in result['text'], f"Expected phrase missing from recognition: {result['text']!r}"
 assert result['seconds'] > 0 and result['elapsedMs'] >= 0
 print(f"ASR smoke: seconds={result['seconds']} elapsedMs={result['elapsedMs']}", flush=True)
 

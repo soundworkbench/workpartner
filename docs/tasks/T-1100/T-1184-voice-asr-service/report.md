@@ -35,3 +35,30 @@
 3. 构建环境需要 BuildKit Dockerfile 1.7、Python 3.12 Linux amd64 镜像与题述两个 wheel，以及可访问 GitHub 模型包和 PyPI；这些是已指定的构建输入，无新增 Python 依赖。
 4. 部署时填写 `runtime.k8s.deploy.asr.enabled/image/nodeName/threads`，核实 `srv2153109` 的 hostname 标签、可调度条件及资源，按文档先分发相同镜像引用再应用；T-1185 网关转发接口仍由下游任务实现。
 5. 无需超出允许范围的代码改动；模型作者归属、原名和来源已写入文档，镜像保留原 LICENSE/README，协调者需核对 Actions 下载得到的模型及其许可文件。
+
+## 第 2 轮（2026-11-13）
+
+### 1. 文件改动
+
+- `asr/tests/smoke.sh`：将中文样例断言改为包含「早上9点至下午5点」，短语断言失败时由 AssertionError 将实际样例识别文字输出到 stderr，成功路径仍只打印时长、耗时和状态检查结果。
+- `asr/server.py`：新增正整数环境变量 `ASR_MAX_PENDING`（默认 4）和非阻塞容量信号量，读取请求体、等待识别锁和执行中的请求共同占用名额，满载时在读体前返回 503 `{"error":"busy"}`，所有已占用名额均由 finally 释放；分段接缝仅在两侧都是 ASCII 字母或数字时加空格；只要存在 Transfer-Encoding 请求头就返回 413，包括空值。
+- `asr/tests/test_server.py`：测试总数从 10 增至 14，新增分段文字拼接、容量满载时不读体及恢复、空值 Transfer-Encoding 拒绝、容量环境配置校验，并加强排队超时和识别异常后的资源释放断言。
+- `docs/kubernetes.md`：更新 smoke 断言及失败诊断说明，补充容量限制、环境变量、分段拼接规则，并说明超限请求由 T-1185 网关先按 2 MiB 拦截，服务端不处理提前拒绝未读请求体导致的 RST。
+
+未新增依赖，未修改网关、镜像、部署模板、渲染器或工作流，未执行 git 提交。
+
+### 2. 验证命令和结果
+
+- `python3 -m unittest discover asr/tests`：执行 14 项，配置测试通过；13 项 HTTP 测试均在创建服务 socket 时被沙箱以 `PermissionError: [Errno 1] Operation not permitted` 阻断，尚不能声明正式单测全过。
+- `bash tools/check.sh > /tmp/t1184-round2-check.log 2>&1`：前置语法检查通过，既有 `tools/wp-seed.test.py` 创建 HTTPServer 时因相同 socket 权限错误停止，退出码 1。
+- `PYTHONPATH="$PWD" python3 /tmp/t1184-round2-http-memory-check.py`：14 项全部通过，日志为 `/tmp/t1184-round2-memory.log`；沿用第 1 轮的临时内存传输适配脚本并同步测试容量为 2，仍执行真实 Handler 的 HTTP 解析/响应序列化、原测试断言及实际线程锁，headers-only 请求禁止任何 body read；仅替换测试传输，不改产品实现，不替代正式 TCP 验收。
+- `node tools/k8s-render.test.mjs > /tmp/t1184-round2-render.log 2>&1`：66 tests、66 pass、0 fail、0 skipped，包含关闭开关的字节回归及开启后的清单校验。
+- `bash -n asr/tests/smoke.sh`，`asr/server.py`、`asr/tests/test_server.py` 和 smoke 内嵌 Python 的 `ast.parse`，`git diff --check`：均通过。
+- 临时 Python 校验提取 smoke 的实际短语断言，以子进程分别注入协调者提供的 `开饭时间早上9点至下午5点。` 和不匹配样例：前者退出码 0 且 stderr 为空，后者退出码非零且 stderr 包含实际识别文字；两条分支均符合预期。
+- 未运行 Docker 构建或真模型识别；未联网下载模型或安装 sherpa-onnx，真实 smoke 仍待 Actions 核对。
+
+### 3. 需要协调者处理的事项
+
+1. 在允许 TCP socket 的环境重跑 `python3 -m unittest discover asr/tests`（现为 14 项）及 `bash tools/check.sh`，并推分支核对 `ASR image` Actions 的真模型 smoke。
+2. T-1185 网关按 2 MiB 先行拦截超限请求；本轮仅补说明，没有增加服务端排空请求体或 RST 处理。
+3. 无新增依赖或其他需要跨范围处理的代码改动；不能以本轮内存传输验证或短语断言校验替代真实 TCP、Docker 与模型验收。

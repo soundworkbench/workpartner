@@ -25,6 +25,7 @@ class Config:
     max_bytes: int = 2097152
     max_seconds: float = 60
     queue_timeout: float = 10
+    max_pending: int = 4
     threads: int = 2
     model_dir: str = '/opt/model'
 
@@ -35,12 +36,14 @@ class Config:
             max_bytes=int(os.environ.get('ASR_MAX_BYTES', 2097152)),
             max_seconds=float(os.environ.get('ASR_MAX_SECONDS', 60)),
             queue_timeout=float(os.environ.get('ASR_QUEUE_TIMEOUT', 10)),
+            max_pending=int(os.environ.get('ASR_MAX_PENDING', 4)),
             threads=int(os.environ.get('ASR_THREADS', 2)),
             model_dir=os.environ.get('ASR_MODEL_DIR', '/opt/model'),
         )
         if not 1 <= config.port <= 65535 or any(
             not math.isfinite(value) or value <= 0 for value in
-            (config.max_bytes, config.max_seconds, config.queue_timeout, config.threads)
+            (config.max_bytes, config.max_seconds, config.queue_timeout,
+             config.max_pending, config.threads)
         ):
             raise ValueError('Invalid ASR configuration')
         return config
@@ -74,6 +77,7 @@ class Server(ThreadingHTTPServer):
         self.config = config
         self.recognizer = recognizer_factory(config)
         self.recognition_lock = threading.Lock()
+        self.pending = threading.BoundedSemaphore(config.max_pending)
         super().__init__(address, Handler)
 
     def handle_error(self, request, client_address):
@@ -123,6 +127,15 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(405, {'error': 'method_not_allowed'})
 
     def recognize(self):
+        if not self.server.pending.acquire(blocking=False):
+            self.reply(503, {'error': 'busy'})
+            return
+        try:
+            self.recognize_admitted()
+        finally:
+            self.server.pending.release()
+
+    def recognize_admitted(self):
         config = self.server.config
         content_type = self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
         if content_type not in ('audio/wav', 'audio/x-wav'):
@@ -130,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         lengths = self.headers.get_all('Content-Length', [])
         if (len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,20}', lengths[0])
-                or int(lengths[0]) > config.max_bytes or self.headers.get('Transfer-Encoding')):
+                or int(lengths[0]) > config.max_bytes or 'Transfer-Encoding' in self.headers):
             self.reply(413, {'error': 'too_large'})
             return
         length = int(lengths[0])
@@ -171,7 +184,15 @@ class Handler(BaseHTTPRequestHandler):
                 stream.accept_waveform(RATE, [value / 32768.0 for value in segment])
                 recognizer.decode_stream(stream)
                 texts.append(re.sub(r'<\|.*?\|>', '', stream.result.text, flags=re.DOTALL).strip())
-            result = {'text': ' '.join(text for text in texts if text).strip(), 'seconds': self.seconds}
+            text = ''
+            for part in texts:
+                if not part:
+                    continue
+                if (text and text[-1].isascii() and text[-1].isalnum()
+                        and part[0].isascii() and part[0].isalnum()):
+                    text += ' '
+                text += part
+            result = {'text': text, 'seconds': self.seconds}
         except Exception:
             result = {'error': 'recognition_failed'}
         finally:

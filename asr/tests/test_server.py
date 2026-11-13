@@ -3,12 +3,15 @@ import concurrent.futures
 import http.client
 import io
 import json
+import os
 import socket
 import sys
 import threading
 import unittest
 import wave
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from asr.server import Config, RATE, Server
 
@@ -26,6 +29,7 @@ def wav(seconds=1, channels=1, rate=RATE, width=2, samples=None):
 class FakeRecognizer:
     def __init__(self):
         self.text = '开放时间 private transcription'
+        self.texts = None
         self.calls = []
         self.entered = threading.Event()
         self.release = threading.Event()
@@ -43,7 +47,7 @@ class FakeRecognizer:
             raise RuntimeError('fake timed out')
         if self.fail:
             raise RuntimeError(self.text)
-        stream.result.text = self.text
+        stream.result.text = next(self.texts) if self.texts is not None else self.text
 
 
 class ServerTests(unittest.TestCase):
@@ -55,7 +59,7 @@ class ServerTests(unittest.TestCase):
             self.created += 1
             return self.fake
 
-        self.server = Server(('127.0.0.1', 0), Config(queue_timeout=0.05), factory)
+        self.server = Server(('127.0.0.1', 0), Config(queue_timeout=0.05, max_pending=2), factory)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.01})
         self.thread.start()
         self.addCleanup(self.stop)
@@ -121,6 +125,15 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(self.request(body), (400, {'error': 'bad_audio'}))
         self.assertEqual(self.fake.calls, [])
 
+    def test_transfer_encoding_rejected_without_reading_body(self):
+        for encoding in ('chunked', 'identity', '', ' '):
+            with self.subTest(encoding=encoding):
+                self.assertEqual(self.raw_request(
+                    f'Content-Length: 32044\r\nTransfer-Encoding: {encoding}\r\n'),
+                    (413, {'error': 'too_large'}))
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.request(wav())[0], 200)
+
     def test_duration(self):
         self.assertEqual(self.request(wav(60.1)), (400, {'error': 'too_long'}))
         self.assertEqual(self.request(wav(0.299)), (200, {'text': ''}))
@@ -133,13 +146,49 @@ class ServerTests(unittest.TestCase):
             first = executor.submit(self.request, wav())
             try:
                 self.assertTrue(self.fake.entered.wait(2))
-                self.assertEqual(self.request(wav()), (503, {'error': 'busy'}))
+                for _ in range(3):
+                    self.assertEqual(self.request(wav()), (503, {'error': 'busy'}))
                 self.assertEqual(self.request(method='GET', path='/healthz'), (200, {'ok': True}))
                 self.assertEqual(len(self.fake.calls), 1)
             finally:
                 self.fake.release.set()
             self.assertEqual(first.result()[0], 200)
         self.assertEqual(self.request(wav())[0], 200)
+        self.assertEqual(self.created, 1)
+
+    def test_pending_limit_rejects_before_reading_body_and_recovers(self):
+        self.server.config = replace(self.server.config, queue_timeout=3)
+        self.fake.release.clear()
+        waiting = threading.Event()
+        recognition_lock = self.server.recognition_lock
+
+        def acquire(*args, **kwargs):
+            waiting.set()
+            return recognition_lock.acquire(*args, **kwargs)
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            first = executor.submit(self.request, wav())
+            try:
+                self.assertTrue(self.fake.entered.wait(2))
+                with patch.object(self.server, 'recognition_lock', wraps=recognition_lock) as lock:
+                    lock.acquire.side_effect = acquire
+                    second = executor.submit(self.request, wav())
+                    try:
+                        self.assertTrue(waiting.wait(2))
+                        for _ in range(3):
+                            self.assertEqual(self.raw_request('Content-Length: 32044\r\n'),
+                                             (503, {'error': 'busy'}))
+                        self.assertEqual(self.request(method='GET', path='/healthz'),
+                                         (200, {'ok': True}))
+                        self.assertEqual(len(self.fake.calls), 1)
+                    finally:
+                        self.fake.release.set()
+                    self.assertEqual(first.result()[0], 200)
+                    self.assertEqual(second.result()[0], 200)
+            finally:
+                self.fake.release.set()
+        for _ in range(3):
+            self.assertEqual(self.request(wav())[0], 200)
         self.assertEqual(self.created, 1)
 
     def test_segmentation_uses_silence_and_preserves_samples(self):
@@ -157,7 +206,34 @@ class ServerTests(unittest.TestCase):
         self.assertLess(cut, 23 * RATE + RATE // 10)
         self.assertTrue(all(len(chunk) <= 25 * RATE for _, chunk in self.fake.calls))
         self.assertEqual([value for _, chunk in self.fake.calls for value in chunk], expected)
-        self.assertEqual(result['text'], ' '.join([self.fake.text] * 3))
+        self.assertEqual(result['text'], self.fake.text * 3)
+
+    def test_segment_text_joining(self):
+        cases = (
+            ([' 早上9点', '至下午5点 '], '早上9点至下午5点'),
+            (['Hello', 'World'], 'Hello World'),
+            (['Room', '9'], 'Room 9'),
+            (['9', 'Rooms'], '9 Rooms'),
+            (['9', '10'], '9 10'),
+            (['中文', 'English'], '中文English'),
+            (['English', '中文'], 'English中文'),
+            (['你好，', '世界。'], '你好，世界。'),
+            (['hello,', 'world'], 'hello,world'),
+            (['hello', '.'], 'hello.'),
+            (['café', 'time'], 'cafétime'),
+            (['room', '９'], 'room９'),
+            (['<|zh|>', ' 文字 <|withitn|>'], '文字'),
+            (['文字', ''], '文字'),
+            (['', ''], ''),
+            (['hello', '<|Speech|>', 'world'], 'hello world'),
+        )
+        for parts, expected in cases:
+            with self.subTest(parts=parts):
+                self.fake.calls.clear()
+                self.fake.texts = iter(parts)
+                status, result = self.request(wav(54 if len(parts) == 3 else 26))
+                self.assertEqual(status, 200)
+                self.assertEqual(result['text'], expected)
 
     def test_routes_and_methods(self):
         for method in ('GET', 'POST', 'PUT'):
@@ -171,7 +247,8 @@ class ServerTests(unittest.TestCase):
         with self.assertLogs('asr', level='INFO') as captured:
             self.assertEqual(self.request(wav())[0], 200)
             self.fake.fail = True
-            self.assertEqual(self.request(wav()), (500, {'error': 'recognition_failed'}))
+            for _ in range(3):
+                self.assertEqual(self.request(wav()), (500, {'error': 'recognition_failed'}))
             self.fake.fail = False
             self.assertEqual(self.request(wav())[0], 200)
             self.request(path='/' + self.fake.text.replace('开放时间 ', '').replace(' ', '-'))
@@ -180,6 +257,19 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn('private', logs)
         self.assertIn('status=200 seconds=1.0 elapsedMs=', logs)
         self.assertIn('status=500', logs)
+
+
+class ConfigTests(unittest.TestCase):
+    def test_max_pending_environment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(Config.from_env().max_pending, 4)
+            os.environ['ASR_MAX_PENDING'] = '2'
+            self.assertEqual(Config.from_env().max_pending, 2)
+            for value in ('0', '-1', '1.5', 'invalid'):
+                with self.subTest(value=value):
+                    os.environ['ASR_MAX_PENDING'] = value
+                    with self.assertRaises(ValueError):
+                        Config.from_env()
 
 
 if __name__ == '__main__':

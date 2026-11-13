@@ -109,7 +109,9 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 
 ### 集群内语音识别（可选）
 
-`asr/` 提供仅供网关调用的 CPU 语音识别服务，使用 `sherpa-onnx==2.0.1` 和 SenseVoice-Small int8；T-1185 的网关接口负责转发。系统命名空间中的地址为 `http://wp-asr:8080/v1/recognize`，POST 原始 PCM 16 位、16000Hz、单声道 WAV，Content-Type 为 `audio/wav` 或 `audio/x-wav`。成功返回 `text`、`seconds`、`elapsedMs`；短于 0.3 秒只返回 `{"text":""}`。默认上限为 2 MiB / 60 秒，识别串行执行，排队超过 10 秒返回 503；长于 25 秒在边界前 5 秒内寻找最低能量的 100ms 窗口分段。服务仅记录时长、耗时、状态码，不记录音频或文字。
+`asr/` 提供仅供网关调用的 CPU 语音识别服务，使用 `sherpa-onnx==2.0.1` 和 SenseVoice-Small int8；T-1185 的网关接口负责转发。系统命名空间中的地址为 `http://wp-asr:8080/v1/recognize`，POST 原始 PCM 16 位、16000Hz、单声道 WAV，Content-Type 为 `audio/wav` 或 `audio/x-wav`。成功返回 `text`、`seconds`、`elapsedMs`；短于 0.3 秒只返回 `{"text":""}`。默认上限为 2 MiB / 60 秒，识别串行执行，读取请求体、排队和执行中的请求合计默认最多 4 个，名额满时在读请求体前返回 503 `{"error":"busy"}`，排队超过 10 秒也返回相同错误；长于 25 秒在边界前 5 秒内寻找最低能量的 100ms 窗口分段，只有接缝两侧都是 ASCII 字母或数字时才加空格，否则直接拼接。服务仅记录时长、耗时、状态码，不记录音频或文字。
+
+超限请求由 T-1185 网关先按 2 MiB 拦截；服务端提前拒绝且不读完请求体可能导致连接 RST，本服务不增加排空请求体的处理。
 
 组织配置 `runtime.k8s.deploy.asr` 默认关闭，未配置或 `enabled: false` 时渲染输出不变。开启时必须提供镜像引用和节点名；`threads` 为正整数，默认 2。生产节点填写 `srv2153109`（须核实其 `kubernetes.io/hostname` 标签）：
 
@@ -146,11 +148,11 @@ kubectl --kubeconfig "$JSON_KUBECONFIG" apply -f "$MANIFEST_DIRECTORY"
 
 上述 `--only` 也会生成这些种类的现有对象，应用前审阅完整输出；不重写镜像登记 ConfigMap。`imagePullPolicy: Never` 要求组织配置、构建、分发使用相同镜像引用；若移到其他节点须先分发。关闭开关只停止生成 ASR 对象，已部署的三个对象需要部署方另行删除。
 
-服务支持 `ASR_PORT=8080`、`ASR_MODEL_DIR=/opt/model`、`ASR_THREADS=2`、`ASR_MAX_BYTES=2097152`、`ASR_MAX_SECONDS=60`、`ASR_QUEUE_TIMEOUT=10`；部署渲染器提供线程数配置，其余使用镜像默认值。健康检查为 `GET /healthz`，模型完成加载后才开始监听并返回 `{"ok":true}`。
+服务支持 `ASR_PORT=8080`、`ASR_MODEL_DIR=/opt/model`、`ASR_THREADS=2`、`ASR_MAX_BYTES=2097152`、`ASR_MAX_SECONDS=60`、`ASR_QUEUE_TIMEOUT=10`、`ASR_MAX_PENDING=4`（正整数）；部署渲染器提供线程数配置，其余使用镜像默认值。健康检查为 `GET /healthz`，模型完成加载后才开始监听并返回 `{"ok":true}`。
 
 模型作者为阿里巴巴通义实验室（FunAudioLLM / SenseVoice 团队），原模型为 [SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice)，ONNX int8 包由 [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 发布：[sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2)。包大小 163002883 字节，SHA-256 为 `7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e`。模型采用 FunASR MODEL_LICENSE 1.1，使用、复制、修改、分享时须注明出处和作者、保留模型名；镜像原样保留 `/opt/model/LICENSE` 和 `/opt/model/README.md`，再分发时须保留并遵循其条款。Dockerfile 使用校验值下载模型，pip 对两个固定版本 wheel 启用 `--require-hashes`，不安装额外 Python 依赖。
 
-`.github/workflows/asr-image.yml` 在相关 PR 和 main push 中运行假识别器单测、构建镜像及真模型 smoke，不推送镜像。`smoke.sh IMAGE` 在容器内调用自带中文样例并断言含「开放时间」，只打印时长、耗时和错误码检查结果；容器退出时自动清理。
+`.github/workflows/asr-image.yml` 在相关 PR 和 main push 中运行假识别器单测、构建镜像及真模型 smoke，不推送镜像。`smoke.sh IMAGE` 在容器内调用自带中文样例并断言含「早上9点至下午5点」，正常只打印时长、耗时和错误码检查结果，断言失败时将实际样例识别文字输出到 stderr（样例音频非用户数据）；容器退出时自动清理。
 
 <a id="model-egress-routing"></a>
 
