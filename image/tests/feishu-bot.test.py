@@ -99,7 +99,7 @@ class CommandFixture(unittest.TestCase):
 
 class CommandTest(CommandFixture):
     def test_empty_and_unreadable_config(self):
-        self.assertEqual(self.call('info'), {'ok': True, 'bots': []})
+        self.assertEqual(self.call('info'), {'ok': True, 'bots': [], 'agents': [], 'limit': 5})
         (self.base / 'config.toml').write_text('[[broken')
         self.assertEqual(self.call('info', code=1), {'ok': False, 'error': 'config_unreadable'})
         (self.base / 'config.toml').unlink()
@@ -202,8 +202,8 @@ class ApiTest(CommandFixture):
         expected = {'project': 'project-0', 'appId': 'cli_0', 'name': '测试机器人',
                     'avatar': 'data:image/png;base64,' + base64.b64encode(PNG).decode(),
                     'activate': True, 'online': 'offline', 'lastEvent': None,
-                    'lastEventAt': None, 'error': None}
-        self.assertEqual(self.call('info'), {'ok': True, 'bots': [expected]})
+                    'lastEventAt': None, 'error': None, 'agentId': 'main'}
+        self.assertEqual(self.call('info'), {'ok': True, 'bots': [expected], 'agents': [{'id': 'main', 'name': '主助手', 'kind': 'main', 'createdAt': None, 'setup': 'connected', 'appId': 'cli_0'}], 'limit': 5})
         self.assertEqual(self.server.calls, ['/open-apis/auth/v3/tenant_access_token/internal',
                                           '/open-apis/bot/v3/info', '/avatar'])
         self.assertEqual(self.call('info')['bots'][0], expected)

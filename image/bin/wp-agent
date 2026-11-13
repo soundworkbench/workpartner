@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+"""管理容器内的助手登记、说明名单和相互调用。"""
+import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import uuid
+import tomllib
+
+BASE = Path(os.environ.get('WP_CC_CONNECT_DIR', '/data/.cc-connect'))
+DATA = Path(os.environ.get('WP_DATA_DIR', '/data'))
+TEMPLATE = Path(os.environ.get('WP_INSTRUCTIONS_TEMPLATE', '/opt/workpartner/home/CLAUDE.md'))
+ID = re.compile(r's[0-9a-f]{8}')
+BEGIN = b'<!-- workpartner:agents:begin -->'
+END = b'<!-- workpartner:agents:end -->'
+STATES = ('none', 'preparing', 'waiting', 'needs_identity', 'expired', 'failed', 'connected')
+
+
+def read_json(path):
+    try:
+        value = json.loads(path.read_bytes())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def atomic(path, content, mode=0o600):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as pending:
+        name = Path(pending.name)
+        try:
+            pending.write(content)
+            pending.flush()
+            os.fchmod(pending.fileno(), mode)
+            os.replace(name, path)
+        finally:
+            name.unlink(missing_ok=True)
+
+
+def save(path, value):
+    atomic(path, json.dumps(value, ensure_ascii=False).encode())
+
+
+def registered():
+    result = []
+    for directory in (BASE / 'agents').glob('*'):
+        if ID.fullmatch(directory.name) and not directory.is_symlink():
+            record = read_json(directory / 'agent.json')
+            if (record.get('id') == directory.name and isinstance(record.get('name'), str)
+                    and isinstance(record.get('createdAt'), str)):
+                result.append(record)
+    return sorted(result, key=lambda item: (item['createdAt'], item['id']))
+
+
+def agent_base(agent_id):
+    return BASE if agent_id == 'main' else BASE / 'agents' / agent_id
+
+
+def workspace(agent_id):
+    return DATA / 'work' if agent_id == 'main' else DATA / 'agents' / agent_id
+
+
+def agent_object(record):
+    directory = agent_base(record['id'])
+    config = directory / 'config.toml'
+    state = read_json(directory / '.feishu-setup.json')
+    setup = state.get('status', 'failed') if (directory / '.feishu-setup.json').exists() else 'none'
+    if setup not in STATES:
+        setup = 'failed'
+    if setup == 'connected':
+        setup = 'none'
+    if setup in ('preparing', 'waiting'):
+        expires = state.get('expiresAt')
+        if isinstance(expires, (int, float)) and time.time() >= expires:
+            setup = 'expired'
+    app_id = None
+    if config.exists():
+        setup = 'connected'
+        try:
+            parsed = tomllib.loads(config.read_text())
+            options = next(platform.get('options', {}) for project in parsed.get('projects', [])
+                           for platform in project.get('platforms', []) if platform.get('type') == 'feishu')
+            app_id = options.get('app_id')
+            if not isinstance(app_id, str):
+                app_id = None
+        except (OSError, ValueError, StopIteration, AttributeError, TypeError):
+            pass
+    return {**{key: record[key] for key in ('id', 'name', 'createdAt')}, 'kind': 'main' if record['id'] == 'main' else 'sub', 'setup': setup, 'appId': app_id}
+
+
+def agents():
+    records = registered()
+    if (BASE / 'config.toml').exists():
+        records.insert(0, {'id': 'main', 'name': '主助手', 'createdAt': None})
+    return [agent_object(record) for record in records]
+
+
+def notify(message):
+    try:
+        fd = os.open(BASE / 'run/restart.fifo', os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+                return False
+            os.write(fd, (message + '\n').encode())
+            return True
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
+@contextmanager
+def locked(*, blocking=True):
+    BASE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with os.fdopen(os.open(BASE / 'agents.lock', os.O_CREAT | os.O_RDWR, 0o600), 'w') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        yield
+
+
+def valid_name(value):
+    if not isinstance(value, str):
+        raise ValueError('invalid_name')
+    value = unicodedata.normalize('NFC', value).strip()
+    if (not 1 <= len(value) <= 16 or value.casefold() in ('main', '主助手') or '  ' in value
+            or ID.fullmatch(value.casefold())
+            or not re.fullmatch(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaffA-Za-z0-9_· -]+', value)):
+        raise ValueError('invalid_name')
+    return value
+
+
+def roster_span(current):
+    if BEGIN not in current and END not in current:
+        return None
+    if (current.count(BEGIN) != 1 or current.count(END) != 1
+            or current.index(BEGIN) >= current.index(END)):
+        raise ValueError('invalid_roster')
+    return current.index(BEGIN), current.index(END) + len(END)
+
+
+def instructions(record):
+    target = workspace(record['id']) / 'CLAUDE.md'
+    try:
+        roster_span(target.read_bytes() if target.exists() else b'')
+    except ValueError:
+        print('警告：助手名单标记残缺或重复，未修改说明文件', file=sys.stderr)
+        return
+    helper = runpy.run_path(str(Path(__file__).with_name('wp-sync-instructions.py')))
+    helper['sync'](TEMPLATE, workspace(record['id']), os.environ.get('PARTNER_USER_NAME') or '同事')
+
+
+def roster(record, records):
+    target = (workspace(record['id']) / 'CLAUDE.md').resolve()
+    if record['id'] == 'main' and not target.exists():
+        return
+    current = target.read_bytes() if target.exists() else b''
+    try:
+        span = roster_span(current)
+    except ValueError:
+        print('警告：助手名单标记残缺或重复，未修改说明文件', file=sys.stderr)
+        return
+    start, stop = span if span else (None, None)
+    if record['id'] == 'main' and not records:
+        if start is None:
+            return
+        separator = re.search(rb'<!-- separator:(0|1|2) -->', current[start:stop])
+        count = int(separator[1]) if separator else 0
+        if count and current[max(0, start-count):start] == b'\n' * count:
+            start -= count
+        updated = current[:start] + current[stop:]
+    else:
+        separator = b'\n' if not current or current.endswith(b'\n') else b'\n\n'
+        count = len(separator)
+        if start is not None:
+            previous = re.search(rb'<!-- separator:(0|1|2) -->', current[start:stop])
+            count = int(previous[1]) if previous else 0
+        lines = ['你是主助手' if record['id'] == 'main' else f'你是子助手「{record["name"]}」',
+                 '其他助手：']
+        for other in [{'id': 'main', 'name': '主助手'}, *records]:
+            if other['id'] != record['id']:
+                lines.append(f'- {other["name"]}：{workspace(other["id"])}')
+        lines.append('需要别的助手帮忙时执行 `wp-agent ask <名字> "<要它做的事>"`，它在自己的目录里完成并把结果回给你；预计超过 2 分钟的请求放后台执行；被别的助手调用时不要再调用其他助手')
+        block = BEGIN + b'\n' + '\n'.join(lines).encode() + f'\n<!-- separator:{count} -->\n'.encode() + END
+        updated = current + separator + block if start is None else current[:start] + block + current[stop:]
+    if updated != current:
+        atomic(target, updated, stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644)
+
+
+def rosters(records):
+    for record in [{'id': 'main', 'name': '主助手'}, *records]:
+        roster(record, records)
+
+
+def stop_setup(directory):
+    with os.fdopen(os.open(directory / '.feishu-setup.lock', os.O_CREAT | os.O_RDWR, 0o600), 'w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            stop_active_setup(directory)
+        # 无扫码锁持有者时，状态中的 PID 可能已经被无关进程复用。
+
+
+def stop_active_setup(directory):
+    state = read_json(directory / '.feishu-setup.json')
+    expires = state.get('expiresAt')
+    if (state.get('status') not in ('preparing', 'waiting')
+            or type(expires) not in (int, float) or not expires > time.time()):
+        return
+    pids = []
+    for pid in (state.get('pid'), state.get('childPid')):
+        if type(pid) is not int or pid <= 1 or pid in pids:
+            continue
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGTERM)
+                pids.append(pid)
+        except ProcessLookupError:
+            pass
+    until = time.monotonic() + 2
+    while pids and time.monotonic() < until:
+        for pid in pids[:]:
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                pids.remove(pid)
+        if pids:
+            time.sleep(0.05)
+    for pid in pids:
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def manage(action, agent_id=None, name=None):
+    if action == 'list':
+        return {'ok': True, 'agents': agents(), 'limit': 5}
+    # 普通用户没有子助手时，启动同步不创建锁或任何说明块。
+    if action == 'sync' and not (BASE / 'agents').exists():
+        return {'ok': True}
+    with locked():
+        records = registered()
+        record = next((item for item in records if item['id'] == agent_id), None)
+        if action in ('rename', 'delete'):
+            if agent_id == 'main':
+                raise ValueError('main_agent')
+            if record is None:
+                raise ValueError('not_found')
+        if action in ('create', 'rename'):
+            name = valid_name(name)
+            if any(item['name'].casefold() == name.casefold() and item['id'] != agent_id for item in records):
+                raise ValueError('name_taken')
+        if action == 'create':
+            if len(records) >= 5:
+                raise ValueError('limit_reached')
+            parent = BASE / 'agents'
+            parent.mkdir(mode=0o700, exist_ok=True)
+            parent.chmod(0o700)
+            while True:
+                agent_id = 's' + uuid.uuid4().hex[:8]
+                if not agent_base(agent_id).exists() and not workspace(agent_id).exists():
+                    break
+            directory = agent_base(agent_id)
+            record = {'id': agent_id, 'name': name, 'createdAt': datetime.now(timezone.utc).isoformat()}
+            created = []
+            try:
+                directory.mkdir(mode=0o700)
+                created.append((directory, 'bridge'))
+                workspace(agent_id).parent.mkdir(parents=True, exist_ok=True)
+                workspace(agent_id).mkdir(mode=0o755)
+                created.append((workspace(agent_id), 'work'))
+                workspace(agent_id).chmod(0o755)
+                instructions(record)
+                save(directory / 'agent.json', record)
+                rosters([*records, record])
+                return {'ok': True, 'agent': agent_object(record)}
+            except Exception:
+                # 同步可能已写入部分说明；只回收本次创建的目录，不删除其中内容。
+                if created:
+                    trash = DATA / '.trash/agents' / (agent_id + '-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+                    trash.mkdir(mode=0o700, parents=True)
+                    for path, label in created:
+                        path.rename(trash / label)
+                try:
+                    rosters(records)
+                except Exception:
+                    pass
+                raise
+        elif action == 'rename':
+            record['name'] = name
+            save(agent_base(agent_id) / 'agent.json', record)
+        elif action == 'delete':
+            directory = agent_base(agent_id)
+            stop_setup(directory)
+            trash = DATA / '.trash/agents' / (agent_id + '-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+            trash.mkdir(mode=0o700, parents=True)
+            directory.rename(trash / 'bridge')
+            notify('rescan')
+            workspace(agent_id).rename(trash / 'work')
+            records.remove(record)
+        elif action == 'sync':
+            for item in records:
+                instructions(item)
+        rosters(records)
+        return {'ok': True, 'agent': agent_object(record)} if action in ('create', 'rename') else {'ok': True}
+
+
+def ask(args):
+    try:
+        depth = int(os.environ.get('WP_AGENT_DEPTH', '0'))
+    except ValueError:
+        depth = 1
+    if depth >= 1:
+        raise ValueError('depth_exceeded')
+    records = [{'id': 'main', 'name': '主助手'}, *registered()]
+    target = next((item for item in records if args.target == item['id']), None)
+    if target is None:
+        target = next((item for item in records if args.target.casefold() == item['name'].casefold()
+                       or args.target.casefold() == item['id']), None)
+    if target is None:
+        raise ValueError('not_found')
+    caller = records[0]
+    cwd = Path.cwd().resolve()
+    for item in records[1:]:
+        if cwd.is_relative_to(workspace(item['id']).resolve()):
+            caller = item
+            break
+    if caller['id'] == target['id']:
+        raise ValueError('self_call')
+    message = args.message
+    if message is None:
+        raw = sys.stdin.buffer.read(65537)
+        if len(raw) > 65536:
+            raise ValueError('failed')
+        message = raw.decode('utf-8')
+    if not 10 <= args.timeout <= 1800 or len(message.encode()) > 65536:
+        raise ValueError('failed')
+    run = BASE / 'run'
+    run.mkdir(mode=0o700, parents=True, exist_ok=True)
+    slot = None
+    for index in range(2):
+        fd = os.open(run / f'ask-slot-{index}.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            slot = fd
+            break
+        except BlockingIOError:
+            os.close(fd)
+    if slot is None:
+        raise ValueError('busy')
+    try:
+        prompt = f'你是「{target["name"]}」，正在被「{caller["name"]}」调用。直接完成并给出结果，不要再调用其他助手。'
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen([os.environ.get('WP_CLAUDE_BIN', 'claude'), '-p', '--output-format', 'json',
+                                        '--permission-mode', 'bypassPermissions', '--append-system-prompt', prompt],
+                                       cwd=workspace(target['id']), env=dict(os.environ, WP_AGENT_DEPTH='1'),
+                                       stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
+            try:
+                process.communicate(message.encode(), timeout=args.timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate(timeout=5)
+                raise ValueError('timeout') from None
+            output.seek(0)
+            try:
+                value = json.loads(output.read(4 * 1024 * 1024))
+                reply = value['result']
+                if process.returncode or value.get('is_error') or not isinstance(reply, str):
+                    raise ValueError
+            except (ValueError, KeyError, TypeError):
+                raise ValueError('failed') from None
+        return {'ok': True, 'agent': target['name'], 'reply': reply}
+    finally:
+        os.close(slot)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    for action in ('create', 'list', 'sync'):
+        commands.add_parser(action)
+    for action in ('rename', 'delete'):
+        commands.add_parser(action).add_argument('id')
+    query = commands.add_parser('ask')
+    query.add_argument('target')
+    query.add_argument('--timeout', type=int, default=300)
+    query.add_argument('--json', action='store_true')
+    query.add_argument('message', nargs='?')
+    # intermixed 不支持带子命令的解析器；先分派 ask，再解析它的交错选项和位置参数。
+    if sys.argv[1:2] == ['ask']:
+        args = query.parse_intermixed_args(sys.argv[2:])
+        args.command = 'ask'
+    else:
+        args = parser.parse_args()
+    try:
+        if args.command == 'ask':
+            result = ask(args)
+        else:
+            name = None
+            if args.command in ('create', 'rename'):
+                raw = sys.stdin.buffer.readline(4097)
+                try:
+                    value = json.loads(raw) if len(raw) <= 4096 else None
+                    name = value.get('name') if isinstance(value, dict) else None
+                except ValueError:
+                    pass
+            result = manage(args.command, getattr(args, 'id', None), name)
+    except Exception as error:
+        known = ('invalid_name', 'name_taken', 'limit_reached', 'not_found', 'main_agent',
+                 'self_call', 'depth_exceeded', 'busy', 'timeout', 'failed')
+        result = {'ok': False, 'error': str(error) if isinstance(error, ValueError) and str(error) in known else 'failed'}
+    if args.command == 'ask' and not args.json:
+        if result['ok']:
+            print(result['reply'])
+        else:
+            messages = {'not_found': '找不到助手', 'self_call': '不能调用自己', 'depth_exceeded': '被调用时不能再调用助手',
+                        'busy': '已有两个请求正在执行，请稍后再试', 'timeout': '助手调用超时', 'failed': '助手调用失败'}
+            print(messages[result['error']], file=sys.stderr)
+    else:
+        print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
+    return 0 if result['ok'] else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

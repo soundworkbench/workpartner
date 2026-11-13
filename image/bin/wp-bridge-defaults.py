@@ -139,6 +139,9 @@ def remove_provider(source, index):
 def template_upgrades(config, template, upgrades):
     """Yield template values for declared keys a person has not set or still has at a superseded default."""
     for entry in upgrades:
+        if entry['key'] == 'projects.agent.options.work_dir':
+            # 工作目录决定说明和项目记忆边界，不能由组织默认值覆盖。
+            continue
         *table, key = entry['key'].split('.')
         previous = entry.get('from', [])
         if table == ['projects', 'platforms', 'options']:

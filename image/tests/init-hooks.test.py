@@ -370,6 +370,7 @@ fi
 ''')
             relay = self.write(root / 'relay', service.replace('$SERVICE', 'relay'), 0o700)
             self.write(app / 'bin/wp-feishu-bot.py', (ROOT / 'bin/wp-feishu-bot.py').read_text())
+            self.write(app / 'bin/wp-agent', (ROOT / 'bin/wp-agent').read_text())
             self.executable('python3', f'if [[ "$*" == *wp-feishu-bot.py* ]]; then exec {sys.executable} "$@"; fi\nexit 0\n')
             self.executable('curl', 'exit 0\n')
             source = (ROOT / 'bin/start.sh').read_text()
