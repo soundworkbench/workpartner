@@ -1,0 +1,4 @@
+sherpa-onnx==2.0.1 \
+    --hash=sha256:c7780d8af6921c18e8e920376b32d7707294e5cd3838f4762cf746ab919bcc40
+sherpa-onnx-core==2.0.1 \
+    --hash=sha256:f4ee0ab91c4ae596e0e49d7de32522a946295e038a652f1c1884d89014ee4ec2
