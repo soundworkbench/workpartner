@@ -69,6 +69,7 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
         html.fixture-feishu-bot #root > main { padding:16px !important; }
       }
       html.fixture-feishu-bot [class*="_guidContainer_"] { display:flex; flex-direction:column; justify-content:center; height:100%; min-height:100%; overflow:hidden; }
+      html.fixture-feishu-bot[data-theme="dark"] #root > main { background:var(--wp-main, #111); }
     </style>
     ${voice ? `<style>
       #voice-composer { width:100%; max-width:680px; margin-top:32px; }

@@ -5,7 +5,8 @@ export function feishuBotClient() {
 
 function installFeishuBot() {
   const API = '/_wp/feishu-bot';
-  let bots = [], section, content, message, refreshButton, addButton, observer, style, mountFrame;
+  let bots = [], section, content, message, staleHint, refreshButton, addButton, observer, style, mountFrame, closeMenu;
+  let stale = false;
   let highlightTimer, messageTimer, revealHome = false, loaded = false;
   let pending, timer, reconnectTimer, revoked = false, reconnecting = false;
   const safe = fn => (...args) => { try { return Promise.resolve(fn(...args)).catch(() => {}); } catch {} };
@@ -51,6 +52,7 @@ function installFeishuBot() {
   }
   function revoke() {
     revoked = true; bots = []; clearTimeout(timer); clearTimeout(reconnectTimer); clearTimeout(highlightTimer); clearTimeout(messageTimer);
+    closeMenu?.();
     if (mountFrame != null) cancelAnimationFrame(mountFrame);
     mountFrame = null; observer?.disconnect();
     window.removeEventListener('resize', scheduleMount); window.removeEventListener('hashchange', onHashChange);
@@ -79,21 +81,24 @@ function installFeishuBot() {
       try {
         const data = await request('/bots' + (force ? '?refresh=1' : ''));
         if (revoked) return;
-        bots = data.bots; loaded = true; mount(); render();
+        bots = data.bots; loaded = true; stale = false; mount(); render();
       } catch {
-        notify('暂时无法读取机器人信息，请稍后刷新。');
+        if (revoked) return;
+        stale = true;
+        if (force) notify('暂时无法读取机器人信息，请稍后刷新。');
       } finally {
         pending = undefined;
+        if (staleHint) staleHint.hidden = !stale;
         if (refreshButton) refreshButton.disabled = false;
         schedule();
       }
     })();
     return pending;
   }
-  function notify(text) {
+  function notify(text, sticky = false) {
     if (!message || revoked) return;
     clearTimeout(messageTimer); message.textContent = text;
-    messageTimer = setTimeout(safe(() => { message.textContent = ''; }), 3000);
+    messageTimer = sticky ? undefined : setTimeout(safe(() => { message.textContent = ''; }), 3000);
   }
   async function copy(appId) {
     try { await navigator.clipboard.writeText(appId); notify('已复制 App ID'); }
@@ -108,7 +113,7 @@ function installFeishuBot() {
     const cancel = button('取消', () => { box.remove(); trigger.focus(); render(); });
     actions.append(cancel, button('确认重新连接', async () => {
       if (reconnecting) return;
-      reconnecting = true; box.remove(); trigger.focus(); render(); notify('正在重新连接…');
+      reconnecting = true; box.remove(); trigger.focus(); render(); notify('正在重新连接…', true);
       try {
         await request('/reconnect', true);
         if (revoked) return;
@@ -167,17 +172,28 @@ function installFeishuBot() {
       const manage = link('管理', 'https://open.feishu.cn/app/' + encodeURIComponent(bot.appId), 'manage');
       const more = button('…', () => {
         const existing = card.querySelector('.wp-feishu-bot-menu');
-        if (existing) { existing.remove(); more.setAttribute('aria-expanded', 'false'); return; }
+        if (existing) { closeMenu?.(); return; }
+        closeMenu?.();
         const menu = node('div', undefined, 'wp-feishu-bot-menu'); menu.setAttribute('role', 'group'); menu.setAttribute('aria-label', '机器人操作');
-        const close = () => { menu.remove(); more.setAttribute('aria-expanded', 'false'); more.focus(); };
-        const copyButton = button('复制 App ID', () => { close(); return copy(bot.appId); });
-        const reconnect = button('重新连接', () => { close(); confirmReconnect(card, more); }); reconnect.disabled = reconnecting;
+        let closed = false;
+        const close = (restoreFocus = false) => {
+          if (closed) return;
+          // Removing a focused menu synchronously fires focusout before detachment.
+          // Mark it closed first so that event cannot recursively remove it.
+          closed = true; document.removeEventListener('pointerdown', outside, true);
+          closeMenu = undefined; menu.remove(); more.setAttribute('aria-expanded', 'false');
+          if (restoreFocus) more.focus();
+        };
+        const outside = safe(event => { if (!card.contains(event.target)) close(); });
+        closeMenu = close; document.addEventListener('pointerdown', outside, true);
+        const copyButton = button('复制 App ID', () => { close(true); return copy(bot.appId); });
+        const reconnect = button('重新连接', () => { close(true); confirmReconnect(card, more); }); reconnect.disabled = reconnecting;
         menu.append(copyButton, reconnect); card.append(menu); more.setAttribute('aria-expanded', 'true'); copyButton.focus();
-        menu.addEventListener('keydown', safe(event => { if (event.key === 'Escape') { event.preventDefault(); close(); render(); } }));
-        // During native focusout, activeElement can still be body even in a microtask.
-        // Use the focus destination so moving from Copy to Reconnect keeps the menu alive until click.
+        menu.addEventListener('keydown', safe(event => { if (event.key === 'Escape') { event.preventDefault(); close(true); render(); } }));
+        // Safari may focus the containing section on mouse down instead of the button.
+        menu.addEventListener('mousedown', safe(event => event.preventDefault()));
         menu.addEventListener('focusout', safe(event => {
-          if (!card.contains(event.relatedTarget) && menu.isConnected) { menu.remove(); more.setAttribute('aria-expanded', 'false'); }
+          if (event.relatedTarget && !card.contains(event.relatedTarget)) close();
         }));
       }, '更多操作');
       more.className = 'wp-feishu-bot-more'; more.setAttribute('aria-expanded', 'false');
@@ -225,14 +241,15 @@ function installFeishuBot() {
       }
     }
     const home = document.querySelector('[data-testid="guid-input"]');
-    if (!home) { section?.remove(); return; }
+    if (!home) { closeMenu?.(); section?.remove(); return; }
     if (!section) {
       section = node('section', undefined, 'wp-feishu-bot-section'); section.tabIndex = -1;
       section.setAttribute('aria-labelledby', 'wp-feishu-bot-title');
       const header = node('div', undefined, 'wp-feishu-bot-header');
       const title = node('h2', '我的飞书机器人'); title.id = 'wp-feishu-bot-title';
       refreshButton = button('刷新', () => refresh(true)); refreshButton.disabled = Boolean(pending);
-      header.append(title, refreshButton);
+      staleHint = node('small', '数据可能已过期', 'wp-feishu-bot-stale'); staleHint.hidden = !stale;
+      header.append(title, staleHint, refreshButton);
       message = node('p', '', 'wp-feishu-bot-message'); message.setAttribute('role', 'status'); message.setAttribute('aria-live', 'polite');
       content = node('div', undefined, 'wp-feishu-bot-cards');
       section.append(header, message, content); render();
@@ -264,6 +281,7 @@ main [class*="_guidContainer_"]:has(.wp-feishu-bot-section) { height:auto; min-h
 .wp-feishu-bot-highlight { box-shadow:0 0 0 3px var(--wp-accent, #1f5ff0); }
 .wp-feishu-bot-header { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
 .wp-feishu-bot-header h2 { flex:1; margin:0; font-size:18px; }
+.wp-feishu-bot-stale { color:var(--wp-ink-2, #666); font-size:12px; }
 .wp-feishu-bot-section button, .wp-feishu-bot-section a { display:inline-flex; align-items:center; justify-content:center; gap:6px; cursor:pointer; border:1px solid var(--wp-line, #ddd); border-radius:10px; padding:7px 10px; font:inherit; color:var(--wp-ink, #222); background:var(--wp-card, #fff); text-decoration:none; }
 .wp-feishu-bot-header button { font-size:12px; padding:3px 10px; }
 .wp-feishu-bot-section button:hover, .wp-feishu-bot-section a:hover { background:var(--wp-hover, #f3f4f6); }

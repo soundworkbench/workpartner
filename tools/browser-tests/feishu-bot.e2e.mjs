@@ -5,7 +5,8 @@ import { openMenu, closeMenu } from './lib/browser.mjs';
 
 const API = '/_wp/feishu-bot', S = '.wp-feishu-bot-section', CARD = '.wp-feishu-bot-card';
 const bot = { appId: 'cli_Test123', name: '唐的飞书助手', avatar: null, online: 'online', activate: true, lastEventAt: null, error: null };
-const avatar = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+// Opaque blue RGB PNG, not the previous transparent tracking pixel.
+const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQj/8AAAIPAW823JCjAAAAAElFTkSuQmCC';
 const brokenAvatar = 'data:image/gif;base64,broken';
 const openUrl = 'https://applink.feishu.cn/client/bot/open?appId=cli_Test123';
 const suite = createSuite('feishu-bot', async s => {
@@ -76,6 +77,15 @@ for (const width of [1280, 390, 360]) {
       assert.match(await page.locator(CARD).nth(1).locator('.wp-feishu-bot-summary').innerText(), /最近消息 [56] 分钟前/);
       assert.equal(await first.locator('.wp-feishu-bot-avatar').innerText(), '唐');
       assert.equal(await page.locator(CARD).nth(1).locator('.wp-feishu-bot-avatar img').getAttribute('src'), avatar);
+      await page.waitForFunction(selector => {
+        const image = document.querySelectorAll(selector)[1].querySelector('img');
+        return image?.complete && image.naturalWidth > 0;
+      }, CARD + ' .wp-feishu-bot-avatar');
+      assert.deepEqual(await page.locator(CARD).nth(1).locator('.wp-feishu-bot-avatar img').evaluate(image => {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, 1, 1);
+        return [...context.getImageData(0, 0, 1, 1).data];
+      }), [31, 95, 240, 255], 'fixture avatar has visible opaque pixels');
       await page.waitForFunction(selector => document.querySelectorAll(selector)[2].textContent === '飞', CARD + ' .wp-feishu-bot-avatar');
       assert.equal(await page.locator(CARD).nth(2).locator('.wp-feishu-bot-avatar img').count(), 0);
       assert.equal(await page.locator(S).getByText('暂时拿不到机器人信息', { exact: true }).count(), 1);
@@ -127,12 +137,26 @@ for (const width of [1280, 390, 360]) {
         const summary = await first.locator('.wp-feishu-bot-summary').boundingBox(), actions = await first.locator('.wp-feishu-bot-actions').boundingBox();
         assert.ok(actions.y >= summary.y + summary.height);
       }
+      await more(first);
+      const header = page.locator('.wp-feishu-bot-header'); await header.scrollIntoViewIfNeeded();
+      const headerBox = await header.boundingBox();
+      await page.mouse.click(headerBox.x + 2, headerBox.y + headerBox.height + 7); // Blank gap above the cards.
+      assert.equal(await page.locator('.wp-feishu-bot-menu').count(), 0, 'clicking blank space outside the card closes the menu');
+      assert.equal(await first.getByRole('button', { name: '更多操作' }).getAttribute('aria-expanded'), 'false');
       // Regress the Actions sequence: copy, add hint, Escape (render), then reconnect.
       await more(first);
       const cardY = await first.evaluate(el => el.getBoundingClientRect().y);
       await first.getByRole('button', { name: '复制 App ID' }).click();
+      assert.deepEqual(await page.evaluate(() => window.__copied), [bot.appId], 'copy handler reaches the clipboard before showing the toast');
       await page.getByText('已复制 App ID', { exact: true }).waitFor();
-      assert.deepEqual(await page.evaluate(() => window.__copied), [bot.appId]);
+      const toast = await page.locator('.wp-feishu-bot-message').evaluate(el => {
+        const r = el.getBoundingClientRect(), css = getComputedStyle(el);
+        return { connected: el.isConnected, hidden: el.hidden, display: css.display, position: css.position,
+          width: r.width, height: r.height, top: r.top, bottom: r.bottom, viewport: innerHeight };
+      });
+      assert.equal(toast.connected, true); assert.equal(toast.hidden, false); assert.notEqual(toast.display, 'none');
+      assert.equal(toast.position, 'fixed'); assert.ok(toast.width > 0 && toast.height > 0);
+      assert.ok(toast.top >= 0 && toast.bottom <= toast.viewport, 'toast has a visible box inside the viewport');
       assert.equal(await first.evaluate(el => el.getBoundingClientRect().y), cardY, 'copy hint does not move cards');
       assert.equal(await page.locator('.wp-feishu-bot-message').getAttribute('aria-live'), 'polite');
       const count = log.requests.filter(url => url.includes(API)).length;
@@ -193,6 +217,15 @@ test('dark desktop cards remain readable', LONG, async () => {
     }));
     assert.notEqual(colors.background, colors.name);
     assert.notEqual(colors.background, colors.summary);
+    const headingColors = await page.locator('#wp-feishu-bot-title').evaluate(title => {
+      let backdrop = title;
+      while (backdrop.parentElement && getComputedStyle(backdrop).backgroundColor === 'rgba(0, 0, 0, 0)') backdrop = backdrop.parentElement;
+      return { foreground: getComputedStyle(title).color, background: getComputedStyle(backdrop).backgroundColor,
+        mainBackground: getComputedStyle(title.closest('main')).backgroundColor };
+    });
+    assert.equal(headingColors.background, headingColors.mainBackground, 'title sits on the themed main background');
+    assert.equal(headingColors.background, 'rgb(24, 24, 24)');
+    assert.notEqual(headingColors.foreground, headingColors.background);
     await page.locator(CARD).hover(); await fits(page); await suite.shot(page, 'home-dark-1280');
     assert.deepEqual(log.pageErrors, []);
   });
