@@ -205,7 +205,7 @@ test('microphone denial and unsupported browsers show the prescribed messages', 
   await session('unsupported', { init: [[() => { Object.defineProperty(navigator, 'mediaDevices', { value: undefined }); }]] }, async ({ page }) => {
     assert.equal(await page.getAttribute(BUTTON, 'aria-disabled'), 'true');
     assert.equal(await page.getAttribute(BUTTON, 'title'), '当前浏览器不支持语音输入');
-    await page.click(BUTTON); assert.equal(await page.textContent('.wp-voice-toast'), '当前浏览器不支持语音输入');
+    await page.click(BUTTON, { force: true }); assert.equal(await page.textContent('.wp-voice-toast'), '当前浏览器不支持语音输入');
   });
 });
 
@@ -304,7 +304,7 @@ test('admission hides button and disabled feature leaves client unchanged; previ
 
 for (const width of [1280, 390, 360]) {
   test(`home and chat at ${width}px: no overflow/overlap, reinsert after rendering, ignore transition clone`, LONG, async () => {
-    await session('layout-' + width, { viewport: { width, height: 844 } }, async ({ page }) => {
+    await session('layout-' + width, { viewport: { width, height: 844 }, avatar: width >= 768 }, async ({ page }) => {
       for (const route of ['#/conversation/fixture', '#/guid']) {
         await page.goto(ORIGIN + '/' + route); await page.waitForSelector(BUTTON);
         assert.equal(await page.locator(BUTTON).count(), 1); await noOverlap(page);

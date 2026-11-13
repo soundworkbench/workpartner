@@ -27,21 +27,29 @@ async function fixture(t, { timeoutMs = 1500 } = {}) {
     asrUrl: `http://127.0.0.1:${upstream.address().port}`, timeoutMs });
   const server = http.createServer(async (req, res) => {
     const seen = { bytes: 0, ended: false }; reads.push(seen);
+    const writeHead = res.writeHead;
+    res.writeHead = function (status, ...args) { seen.status = status; return writeHead.call(this, status, ...args); };
     req.on('data', chunk => { seen.bytes += chunk.length; }); req.on('end', () => { seen.ended = true; });
     if (!await handler(req, res, new URL(req.url, ORIGIN))) { res.writeHead(418); res.end(); }
   });
   await listen(server);
   for (const s of [upstream, server]) t.after(() => { s.closeAllConnections(); return new Promise(resolve => s.close(resolve)); });
-  function request({ method = 'POST', user = 'tang', headers = {}, body = Buffer.from('audio-private'), path = API, send } = {}) {
+  function request({ method = 'POST', user = 'tang', headers = {}, body = Buffer.from('audio-private'), path = API, send, allowDisconnect = () => false } = {}) {
     return new Promise((resolve, reject) => {
+      const onError = error => {
+        // Early rejection can close the socket before the client finishes writing or receives the response.
+        if (['ECONNRESET', 'EPIPE'].includes(error.code) && allowDisconnect()) resolve(null);
+        else reject(error);
+      };
       const req = http.request({ host: '127.0.0.1', port: server.address().port, path, method,
         headers: { 'x-user': user, origin: ORIGIN, 'content-type': 'audio/wav', ...headers } }, res => {
+        res.on('error', onError);
         const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => {
           const raw = Buffer.concat(chunks).toString();
           resolve({ status: res.statusCode, raw, data: raw ? JSON.parse(raw) : null, headers: res.headers });
         });
       });
-      req.on('error', reject); if (send) send(req); else req.end(body);
+      req.on('error', onError); if (send) send(req); else req.end(body);
     });
   }
   return { state, hits, reads, handler, upstream, request, set: value => { policy = value; }, break: () => { broken = true; } };
@@ -82,10 +90,12 @@ test('voice checks method, exact origin and WAV content type before forwarding',
 test('oversized declared and chunked uploads stop early, return 413, never reach ASR, and release the user', async t => {
   const f = await fixture(t);
   const max = 2 * 1024 * 1024;
-  assert.equal((await f.request({ headers: { 'content-length': max + 1 }, send: req => { req.write(Buffer.alloc(1)); } })).status, 413);
+  await f.request({ headers: { 'content-length': max + 1 }, send: req => { req.write(Buffer.alloc(1)); },
+    allowDisconnect: () => f.reads[0]?.status === 413 });
+  assert.equal(f.reads[0].status, 413);
   assert.equal(f.reads[0].bytes, 0); assert.equal(f.reads[0].ended, false);
-  const reply = await f.request({ send: req => { req.write(Buffer.alloc(max * 2)); } });
-  assert.equal(reply.status, 413); assert.ok(f.reads[1].bytes < max * 2); assert.equal(f.reads[1].ended, false);
+  await f.request({ send: req => { req.write(Buffer.alloc(max * 2)); }, allowDisconnect: () => f.reads[1]?.status === 413 });
+  assert.equal(f.reads[1].status, 413); assert.ok(f.reads[1].bytes < max * 2); assert.equal(f.reads[1].ended, false);
   assert.equal(f.hits.length, 0);
   assert.equal((await f.request({ body: Buffer.alloc(max) })).status, 200);
   assert.equal(f.hits[0].body.length, max);
@@ -105,16 +115,21 @@ test('one in-flight recognition per union ID, other users proceed, and completio
 test('slow uploads time out before ASR admission and release the user without reading the full body', async t => {
   const f = await fixture(t, { timeoutMs: 300 });
   let upload;
-  const pending = f.request({ send: req => { upload = req; req.write(Buffer.alloc(32)); } });
+  const pending = f.request({ send: req => { upload = req; req.write(Buffer.alloc(32)); }, allowDisconnect: () => f.reads[0]?.status === 408 });
   t.after(() => upload.destroy());
   while (!f.reads[0]?.bytes) await new Promise(resolve => setTimeout(resolve, 2));
   assert.equal(f.hits.length, 0, 'ASR receives nothing while upload is incomplete');
   assert.equal((await f.request()).status, 429, 'upload holds the gateway user slot');
   const trickle = setInterval(() => upload.write(Buffer.alloc(32)), 20);
+  upload.once('close', () => clearInterval(trickle));
   t.after(() => clearInterval(trickle));
   const started = Date.now(), reply = await pending; clearInterval(trickle);
-  assert.equal(reply.status, 408); assert.deepEqual(reply.data, { error: 'unavailable' });
-  assert.equal(reply.headers.connection, 'close'); assert.ok(Date.now() - started < 1500);
+  assert.equal(f.reads[0].status, 408);
+  if (reply) {
+    assert.equal(reply.status, 408); assert.deepEqual(reply.data, { error: 'unavailable' });
+    assert.equal(reply.headers.connection, 'close');
+  }
+  assert.ok(Date.now() - started < 1500);
   assert.equal(f.reads[0].ended, false); assert.equal(f.hits.length, 0);
   assert.equal((await f.request()).status, 200, 'timed-out upload releases the user slot');
 });

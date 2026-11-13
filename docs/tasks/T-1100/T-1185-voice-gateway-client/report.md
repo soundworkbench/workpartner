@@ -102,3 +102,36 @@
 ### 3. 需要协调者处理
 
 在允许本地监听的 CI/Actions 中准备仓库现有锁定依赖和 Chrome/Chromium，运行 `bash tools/check.sh`、voice 及 menu/flow/access/my-key 浏览器组并检查截图。尤其复核 GET 后连续 403/415 的 keep-alive 回归、新增真实 HTTP 慢速上传用例和浏览器生命周期/重渲染断言。本轮受环境限制不能确认这些集成验收通过；不需要新增依赖或越界改动。
+
+## 第 3 轮（2026-11-13）
+
+### 1. 改动文件与返工项
+
+- `gateway/tests/voice.test.mjs`：测试 HTTP 服务包装 `res.writeHead`，把 handler 实际返回的状态记入对应的 `reads[i].status`；Content-Length 超限和 chunked 超限都直接断言服务端记录为 413。请求辅助函数仅在用例显式允许、错误为 ECONNRESET/EPIPE 且对应请求已记录预期状态时接受断连，返回 null，不伪造客户端响应；其它错误继续拒绝。慢速上传同样以服务端记录断言 408，若客户端完整收到响应则继续校验状态、JSON 和 Connection 头，并在连接关闭时停止定时写入。保留未读完整请求体、未访问 ASR、上传期间 429、截止时间及释放名额的断言；普通请求不启用断连容忍。
+- `tools/browser-tests/voice.e2e.mjs`：不支持浏览器的用例保留 `aria-disabled="true"`、title 和点击提示断言，使用 `click({ force: true })`，符合 brief 的「按钮置灰，点了也给提示」要求。390px/360px 布局会话通过现有 `avatar: false` 跳过等待隐藏头像，1280px 保留头像等待；首页和对话页仍各自等待话筒按钮可见，再执行布局、截图、重渲染和录音断言。
+- `docs/tasks/T-1100/T-1185-voice-gateway-client/report.md`：追加本轮修改、验证结果与环境限制。
+
+仅修改上述两个测试文件和本报告，未改产品逻辑，未新增依赖，未改 `image/`、`asr/`、`deploy/` 或工作流，未执行 git 提交。
+
+### 2. 验证
+
+环境：Node v22.22.1。已执行并通过：
+
+- `node gateway/tests/voice-client.test.mjs`：4/4 通过；日志 `tools/browser-tests/output/T-1185-round3-client.log`。
+- `node gateway/tests/voice-upload.test.mjs`：3/3 通过；日志 `tools/browser-tests/output/T-1185-round3-upload.log`。这是已有的流和模拟 HTTP 测试，不代表本轮修改的真实 HTTP 用例已验证。
+- `node --check gateway/tests/voice.test.mjs`、`node --check tools/browser-tests/voice.e2e.mjs`：通过。
+- `git diff --check`：通过。
+
+已尝试但受环境阻断：
+
+- 修改前执行 `node --test --test-name-pattern='oversized|slow uploads' gateway/tests/voice.test.mjs` 返回 ERR_TEST_FAILURE；再用 `node --test-name-pattern='oversized|slow uploads' gateway/tests/voice.test.mjs` 直接执行，确认两项均在监听 `127.0.0.1` 时报 EPERM，尚未进入请求断言。
+- 修改后执行 `node gateway/tests/voice.test.mjs`：10 个用例均因 `listen EPERM: operation not permitted 127.0.0.1` 失败，未验证 HTTP 行为；日志 `tools/browser-tests/output/T-1185-round3-voice-api.log`。本机不能监听端口，因此没有进行 413 用例连跑 30 次；失败次数无有效统计，不能报告为 0/30。
+- `bash tools/check.sh`：前置语法检查完成，已有 `tools/wp-seed.test.py` 创建本地 HTTPServer 时遇到 `PermissionError: [Errno 1] Operation not permitted`，后续检查未执行；日志 `tools/browser-tests/output/T-1185-round3-check.log`。
+- `node tools/browser-tests/run.mjs voice`：缺少 `playwright-core`，ERR_MODULE_NOT_FOUND，未启动浏览器；日志 `tools/browser-tests/output/T-1185-round3-browser-voice.log`。
+- `node tools/browser-tests/run.mjs menu flow access my-key`：四组均因同一依赖缺失未启动；日志 `tools/browser-tests/output/T-1185-round3-browser-existing.log`。
+
+本轮未生成截图。预期路径仍为 `tools/browser-tests/output/shots/voice/{1280,390,360}-{home,chat}.png`，对应无横向溢出、无按钮遮挡断言保留。
+
+### 3. 需要协调者处理
+
+请在允许监听端口且已有仓库锁定依赖和 Chrome/Chromium 的 Actions 环境运行 `bash tools/check.sh`、voice 与 menu/flow/access/my-key 浏览器组，并检查六张布局截图。另将 `node --test --test-name-pattern='oversized' gateway/tests/voice.test.mjs` 连跑 30 次统计失败数，并复核慢速上传 408 用例。当前仅完成测试修正和本机可执行的检查，HTTP 稳定性及浏览器验收仍待 Actions 验证；不需要新增依赖或越界改动。
