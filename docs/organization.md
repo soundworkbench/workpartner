@@ -189,7 +189,7 @@ Feishu onboarding uses that same service restart for all users, independently of
 | `POST /agents/<id>/restart` | `{}`，重启该助手的消息桥；`main` 只要求第一步名单 |
 | `POST /reconnect` | 保留，等同于主助手 restart |
 
-`<id>` 必须匹配 `^(main|s[0-9a-f]{8})$`；main 不允许 setup、rename 或 delete。写请求必须同源、`application/json`、JSON 对象且不超过 1 KiB。名字 NFC 归一并去首尾空白后为 1–16 个 Unicode 字符，允许汉字 `[㐀-䶿一-鿿豈-﫿]`、ASCII 字母数字、`_ - ·` 和单个内部空格；保留「主助手」及不区分大小写的 main。前端即时校验，网关执行命令前复查，容器最终判断重名。
+`<id>` 必须匹配 `^(main|s[0-9a-f]{8})$`；main 不允许 setup、rename 或 delete。写请求必须同源、`application/json`、JSON 对象且不超过 1 KiB。名字比较前做 NFC 归一并去首尾空白，归一后为 1–16 个 Unicode 字符，允许汉字 `[㐀-䶿一-鿿豈-﫿]`、ASCII 字母数字、`_ - ·` 和单个内部空格；保留「主助手」、不区分大小写的 `main`，以及不区分大小写的 `s` + 8 位十六进制（如 `s1a2b3c4d`），后者留给系统生成的子助手编号。前端即时校验，网关执行命令前复查，容器最终判断重名。
 
 网关以 `runtime.uid` 调用 `python3 /opt/workpartner/bin/wp-agent create` / `rename <id>` / `delete <id>`（20 秒）；只有 create/rename 用 stdin 传 `{name}`。扫码为 `python3 /opt/workpartner/bin/feishu-onboard.py start --agent <id>`（detached，不带 stdin）和 `status --agent <id>`（10 秒）。子助手重启使用 `python3 /opt/workpartner/bin/wp-feishu-bot.py restart --agent <id>`，主助手不带 `--agent`。同一用户的创建、改名、删除和 setup POST 串行，成功后清掉运行中的 info 合并结果。并发隔离仅在单网关进程内，容器锁负责最终上限和重名约束。
 

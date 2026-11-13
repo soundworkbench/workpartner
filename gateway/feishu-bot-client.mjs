@@ -229,8 +229,14 @@ function installFeishuBot() {
       } catch (error) {
         if (modal === view.element) {
           stopped = error.message === 'not_found';
-          if (stopped) qr.hidden = true;
-          status.textContent = errorText(error); retry.hidden = false;
+          if (stopped) {
+            qr.hidden = true;
+            status.textContent = '这个子助手已不存在';
+            retry.hidden = true;
+            await refresh(false, true);
+          } else {
+            status.textContent = errorText(error); retry.hidden = false;
+          }
         }
       } finally {
         busy = false; retry.disabled = false;
