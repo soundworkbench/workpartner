@@ -144,7 +144,10 @@ def blocked_dns(*args, **kwargs):
     time.sleep(60)
 socket.getaddrinfo = blocked_dns
 sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name='__main__')
+module = runpy.run_path(sys.argv[0])
+resolver = socket.getaddrinfo
+module['main']()
+assert socket.getaddrinfo is resolver, 'DNS resolver changed after timeout'
 '''
         started = time.monotonic()
         bots = self.call('info', launcher=launcher)['bots']
@@ -152,6 +155,30 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         self.assertEqual(len(bots), 4)
         self.assertTrue(all(bot['error'] == 'feishu_unreachable' for bot in bots))
         self.assertEqual((self.base / 'dns-calls').read_text().splitlines(), ['resolve'] * 3)
+
+    def test_pending_alarm_during_dns_timeout_cleanup(self):
+        self.config()
+        self.env['WP_FEISHU_API_BASE'] = 'http://dns.test'
+        launcher = '''import runpy, signal, socket, sys, time
+def blocked_dns(*args, **kwargs):
+    time.sleep(60)
+socket.getaddrinfo = blocked_dns
+original = signal.setitimer
+def cancel_with_pending_alarm(which, seconds):
+    result = original(which, seconds)
+    if seconds == 0:
+        signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+    return result
+signal.setitimer = cancel_with_pending_alarm
+sys.argv = sys.argv[1:]
+module = runpy.run_path(sys.argv[0])
+resolver = socket.getaddrinfo
+module['main']()
+assert socket.getaddrinfo is resolver, 'DNS resolver changed after timeout'
+signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+'''
+        self.assertEqual(self.call('info', launcher=launcher)['bots'][0]['error'],
+                         'feishu_unreachable')
 
 
 class ApiTest(CommandFixture):
@@ -219,6 +246,40 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         self.assertEqual([(b['project'], b['appId']) for b in bots],
                          [('project-0', 'cli_0'), ('project-1', 'cli_1')])
         self.assertTrue(all(b['name'] == '测试机器人' for b in bots))
+
+    def test_blocked_first_bot_dns_does_not_poison_second_bot(self):
+        self.config(2)
+        launcher = '''import runpy, signal, socket, sys, time
+original_resolve = socket.getaddrinfo
+first = True
+def resolve(*args, **kwargs):
+    global first
+    if first:
+        first = False
+        time.sleep(60)
+    return original_resolve(*args, **kwargs)
+socket.getaddrinfo = resolve
+original_timer = signal.setitimer
+pending = True
+def cancel_with_pending_alarm(which, seconds):
+    global pending
+    result = original_timer(which, seconds)
+    if seconds == 0 and pending:
+        pending = False
+        signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+    return result
+signal.setitimer = cancel_with_pending_alarm
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+        started = time.monotonic()
+        bots = self.call('info', launcher=launcher)['bots']
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertEqual(bots[0]['error'], 'feishu_unreachable')
+        self.assertEqual((bots[1]['name'], bots[1]['activate'], bots[1]['error']),
+                         ('测试机器人', True, None))
+        self.assertEqual(bots[1]['avatar'], 'data:image/png;base64,' + base64.b64encode(PNG).decode())
+        self.assertEqual(len(self.server.calls), 3)
 
     def test_api_errors_do_not_escape_or_get_cached(self):
         self.config()

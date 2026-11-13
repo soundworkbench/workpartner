@@ -327,6 +327,160 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 ''')
         self.wait_for(lambda: self.event() == 'connected')
 
+    def check_preparation_failure(self, target):
+        blocked = self.run if target == 'run' else self.run / target
+        launcher = None
+        if target == 'run':
+            blocked.touch()
+        elif target == 'chmod':
+            launcher = '''import os, runpy, sys
+from pathlib import Path
+base = Path(os.environ['WP_CC_CONNECT_DIR'])
+original = Path.chmod
+def chmod(self, *args, **kwargs):
+    if self == base / 'run' and not (base / 'repaired').exists():
+        raise PermissionError('private preparation error')
+    return original(self, *args, **kwargs)
+Path.chmod = chmod
+sys.argv = [sys.argv[1], 'supervise']
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+        else:
+            self.run.mkdir()
+            blocked.mkdir()
+        self.fake('from pathlib import Path\n'
+                  'with (Path(os.environ["WP_CC_CONNECT_DIR"])/"starts").open("a") as f:\n'
+                  '    f.write(str(os.getpid())+"\\n")\n'
+                  'print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        self.start(launcher)
+
+        def pids():
+            path = self.base / 'starts'
+            return [int(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+        self.wait_for(lambda: len(pids()) == 1)
+        self.wait_for(lambda: self.output().count('控制通道准备失败') >= 2)
+        self.assertIsNone(self.process.poll())
+        result = subprocess.run([sys.executable, str(SCRIPT), 'restart'], env=self.env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'no_supervisor'})
+        os.kill(pids()[0], signal.SIGKILL)
+        self.wait_for(lambda: len(pids()) == 2)
+        os.kill(pids()[1], 0)
+        if target == 'run':
+            blocked.unlink()
+        elif target == 'chmod':
+            (self.base / 'repaired').touch()
+        else:
+            blocked.rmdir()
+        self.wait_for(lambda: (self.run / 'restart.fifo').is_fifo(), timeout=9)
+        self.restart()
+        self.wait_for(lambda: len(pids()) == 3, timeout=3)
+        self.wait_for(lambda: self.pid() == pids()[2] and self.event() == 'connected')
+        self.assertNotIn('Traceback', self.output())
+        self.assertNotIn('private preparation error', self.output())
+        self.stop()
+        self.assertEqual(self.process.returncode, 0)
+        for pid in pids():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_run_directory_preparation_failure_retries(self):
+        self.check_preparation_failure('run')
+
+    def test_run_chmod_failure_retries(self):
+        self.check_preparation_failure('chmod')
+
+    def test_lock_preparation_failure_retries(self):
+        self.check_preparation_failure('supervisor.lock')
+
+    def test_fifo_preparation_failure_retries(self):
+        self.check_preparation_failure('restart.fifo')
+
+    def test_loop_backoff_keeps_draining_both_pipes(self):
+        self.fake('from pathlib import Path\n'
+                  'base=Path(os.environ["WP_CC_CONNECT_DIR"])\n'
+                  'while not (base/"emit").exists(): time.sleep(0.02)\n'
+                  'for channel in (sys.stdout, sys.stderr):\n'
+                  '    channel.write("x" * 262144 + "\\n"); channel.flush()\n'
+                  '(base/"emitted").touch()\n'
+                  'time.sleep(60)\n')
+        self.config()
+        self.start('''import os, runpy, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+supervisor = module['Supervisor']
+original = supervisor.launch
+def launch(self):
+    original(self)
+    poll = self.child.poll
+    def fail_until_repaired():
+        if not Path(os.environ['WP_CC_CONNECT_DIR'], 'repaired').exists():
+            raise RuntimeError('private loop error')
+        return poll()
+    self.child.poll = fail_until_repaired
+supervisor.launch = launch
+sys.argv = [sys.argv[1], 'supervise']
+sys.exit(module['main']())
+''')
+        pid = self.wait_for(self.pid)
+        self.wait_for(lambda: self.output().count('守护循环异常') >= 4, timeout=10)
+        (self.base / 'emit').touch()
+        self.wait_for(lambda: (self.base / 'emitted').exists(), timeout=2)
+        data = b'x' * 262144 + b'\n'
+        self.wait_for(lambda: data in (self.base / 'error').read_bytes(), timeout=2)
+        self.assertEqual((self.base / 'output').read_bytes(), data)
+        self.assertEqual(self.pid(), pid)
+        self.assertNotIn('private loop error', self.output())
+        (self.base / 'repaired').touch()
+        self.stop()
+
+    def test_second_supervisor_does_not_launch_duplicate_bridge(self):
+        self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        self.start()
+        pid = self.wait_for(self.pid)
+        result = subprocess.run([sys.executable, str(SCRIPT), 'supervise'], env=self.env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.pid(), pid)
+        self.assertNotIn('bridge-started', result.stderr)
+        self.restart()
+        self.wait_for(lambda: self.pid() and self.pid() != pid)
+
+    def test_existing_lock_prevents_duplicate_even_when_chmod_fails(self):
+        self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        self.start()
+        pid = self.wait_for(self.pid)
+        launcher = '''import os, runpy, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+original_chmod = Path.chmod
+def chmod(self, *args, **kwargs):
+    if self == Path(os.environ['WP_CC_CONNECT_DIR'], 'run'):
+        raise PermissionError
+    return original_chmod(self, *args, **kwargs)
+Path.chmod = chmod
+supervisor = module['Supervisor']
+original_launch = supervisor.launch
+def launch(self):
+    original_launch(self)
+    self.stopping = True
+supervisor.launch = launch
+sys.argv = [sys.argv[1], 'supervise']
+sys.exit(module['main']())
+'''
+        result = subprocess.run([sys.executable, '-c', launcher, str(SCRIPT)], env=self.env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.pid(), pid)
+        self.assertNotIn('bridge-started', result.stderr)
+        self.restart()
+        self.wait_for(lambda: self.pid() and self.pid() != pid)
+
 
 if __name__ == '__main__':
     unittest.main()

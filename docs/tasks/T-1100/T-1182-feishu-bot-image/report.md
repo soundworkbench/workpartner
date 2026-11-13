@@ -99,3 +99,44 @@
 1. 在允许 socket 的环境运行 `python3 -I -B image/tests/feishu-bot.test.py`（应为 12 项，含 8 项真实 HTTP）和 `bash tools/check.sh`；如有 shellcheck，再运行 `shellcheck image/bin/start.sh`。
 2. 没有新增依赖、安装软件、越界改动或 git 提交。`gateway/`、`image/bin/feishu-onboard.py`、`image/rebrand/` 和 Dockerfile 均未改动；没有新增离线 HTTP 替身文件。
 3. 本轮未构建镜像或连接真实飞书；容器 uid 1001 与真实飞书端到端验收仍需部署环境执行。报告目录仍被既有 exclude 排除，报告已追加到磁盘。
+
+## 第 3 轮（2026-11-13）
+
+本轮完成 DNS 清理竞态修复及三项建议，未提交 git、未新增依赖。卡死 DNS 用例连续 20 次通过；真实 HTTP 和全仓检查仍受沙箱 socket 禁令阻断，不能标记完整验收通过。
+
+### 1. 改了哪些文件
+
+- `image/bin/wp-feishu-bot.py`：DNS 包装改为模块加载时安装一次、请求截止时间置于 thread-local；取消计时器前禁用处理函数；info 总预算降为 7 秒；控制通道准备失败独立退避重试；主循环异常退避期间继续读取两路日志。
+- `image/tests/feishu-bot.test.py`：加强四项目卡 DNS 测试，断言请求结束后解析入口未被替换；新增取消计时器时残留信号的确定性测试，以及第一个机器人 DNS 卡死、第二个机器人通过真实 HTTP 获得资料的测试，共 14 项（5 项命令级、9 项真实 HTTP）。
+- `image/tests/feishu-supervisor.test.py`：新增 run 路径被文件占用、chmod 失败、锁/FIFO 路径被目录占用的恢复测试，双管道大块输出测试，以及正常/权限故障下的重复守护互斥测试，共 17 项。
+- `docs/tasks/T-1100/T-1182-feishu-bot-image/report.md`：追加本轮报告；其他文件未改。
+
+逐条实现：
+
+1. **DNS 与残留 SIGALRM**：解析入口不再按请求替换/恢复 `socket.getaddrinfo`，模块加载时保存底层解析函数并安装固定包装；每次请求只设置当前线程的截止时间，解析守护线程按剩余预算等待。SIGALRM 处理函数仅在请求启用且截止时间已到时抛异常，并先关闭启用标志；finally 先关闭标志、清除线程局部截止时间，再取消计时器。残留信号不会在取消计时器时打断清理，也不会提前中断下一次请求。确定性测试在 `setitimer(..., 0)` 返回后主动投递处理函数，修复前稳定出现解析入口未恢复的断言失败，修复后通过；真实 HTTP 连续双机器人用例也注入该信号边界，但本沙箱无法运行 HTTP 部分。
+2. **8 秒总时限余量**：所有项目共用的 info 预算由 7.5 秒降至 7 秒，单次请求仍最多 3 秒；请求截止时间同时受总预算约束。四项目 DNS 全卡死测试只进入三次底层解析，第四项直接返回不可达。连续 20 次的整个测试进程耗时为 7.179～7.245 秒，均满足命令小于 8 秒的断言。
+3. **准备失败不终止桥**：目录创建/权限、锁文件打开及 FIFO 创建/打开的 OSError 只输出固定警告，准备流程按 1、2、4…最多 60 秒退避。桥的启动、异常退出重启、日志处理和 TERM 回收继续运行；控制通道不可用时 restart 返回 `no_supervisor`，准备恢复后可正常 restart。锁已取得但 FIFO 失败时保留锁。只读审查发现“chmod 失败发生在锁检查之前”可能绕过已有守护，已先写失败测试，再调整为先尝试打开/获取既有锁；仅路径不存在时创建目录，之后才处理 chmod。确认另一守护已持锁时仍拒绝启动重复桥，审查复核已通过。
+4. **异常退避继续排空日志**：主循环退避不再只 sleep；每 0.1 秒分别非阻塞读取 stdout/stderr 并按原通道转发、过滤事件，单路异常不阻止另一路读取。测试使主循环连续异常进入 8 秒退避，要求假桥在退避结束前完成两路各 256 KiB 输出，并验证完整内容和原 PID 保持不变。
+
+### 2. 怎么验证的
+
+| 命令/检查 | 结果 |
+| --- | --- |
+| `python3 -I -B image/tests/feishu-bot.test.py CommandTest` | 5 项通过，11.295 秒；包含四项目总预算、残留信号、原有配置/在线状态/restart 契约。 |
+| `python3 -I -B image/tests/feishu-bot.test.py CommandTest.test_blocked_dns_obeys_total_deadline`（由 Python subprocess 驱动连续执行 20 次，每次另设 12 秒外部超时） | 20 次退出码均为 0，0 失败；每次实际进入三个休眠 60 秒的 DNS 守护线程，非 socket 提前拒绝。日志 `/tmp/T-1182-r3-dns-repeat.log`。 |
+| `python3 -I -B image/tests/feishu-supervisor.test.py` | 最终 17 项通过，62.757 秒；覆盖准备失败期间桥存活、崩溃后重启、准备恢复后的 restart、互斥、两路排空、原有退避/权限/事件和 TERM 回收。 |
+| `python3 -I -B image/tests/init-hooks.test.py` | 20 项通过；原有网页/relay 退出语义、桥独立重启和入口 TERM 回收有效。 |
+| `python3 -I -B image/tests/feishu-bot.test.py ApiTest` | 9 项均在 setUp 创建本地服务 socket 时被 `PermissionError: [Errno 1] Operation not permitted` 阻断；包括新增连续双机器人测试，没有跳过或声称 HTTP 成功。 |
+| `bash tools/check.sh` | 前置 JavaScript/Python/Bash 语法检查通过；随后在已有 `tools/wp-seed.test.py::ModelDiscovery.test_model_permissions_are_read_with_an_identified_client` 创建 HTTP socket 时受同一 EPERM 阻断，退出 1，后续全仓用例未执行。 |
+| `python3 -I -B image/bin/wp-feishu-bot.py info` | 无配置时退出 0，stdout 一行为 `{"ok":true,"bots":[]}`。 |
+| `git diff --check`、三个改动 Python 文件的 AST 检查 | 通过。 |
+| 输出/落盘路径及 `start.sh` 审查 | 新增警告没有异常原文、密钥或 token；缓存字段保持不变；守护仍不在 `service_pids` 中，start.sh 本轮未修改。 |
+| `command -v shellcheck` | 未安装，未自行安装。 |
+
+修复前还实际运行了新增残留信号用例、四种准备失败及异常退避管道用例，分别得到预期失败；重复守护与 chmod 故障组合也先复现失败后修复。最终可运行的不同用例共 42 项通过（5 + 17 + 20，不重复计入压力循环）。日志位于 `/tmp/T-1182-r3-{command,dns-repeat,supervisor,init,http,check}.log`。
+
+### 3. 需要协调者处理的事
+
+1. 在允许本地 socket 的环境执行 `python3 -I -B image/tests/feishu-bot.test.py`（14 项）及 `bash tools/check.sh`；新增 `ApiTest.test_blocked_first_bot_dns_does_not_poison_second_bot` 必须实际验证第二个机器人获得名字、头像和启用状态。本轮仅 DNS 无 socket 用例完成了连续 20 次验证，不能替代该真实 HTTP 验收。
+2. 未新增依赖、未安装软件、未 git 提交；除约定报告外，只修改了 `image/` 内上述三个任务文件。报告已追加到磁盘，当前 `git status` 可见该报告的修改。
+3. 未构建镜像或连接真实飞书，也未进行容器 uid 1001 的端到端验证。准备失败期间写不出的 PID/state 仍按原有容错处理，后续桥重启可恢复；本轮未扩展为主动补写。异常退避期间 restart 可能仍延后处理；本轮修复的是该期间的日志管道阻塞。

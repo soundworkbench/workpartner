@@ -81,8 +81,45 @@ class AuthFailed(Exception):
     pass
 
 
+request_state = threading.local()
+system_resolver = socket.getaddrinfo
+
+
+def resolve(*args, **kwargs):
+    deadline = getattr(request_state, 'deadline', None)
+    if deadline is None:
+        return system_resolver(*args, **kwargs)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RequestTimeout
+    result, errors = [], []
+
+    def lookup():
+        try:
+            result.append(system_resolver(*args, **kwargs))
+        except Exception as error:
+            errors.append(error)
+
+    # libc 解析可能不响应 SIGALRM；退出不等待卡住的解析线程。
+    worker = threading.Thread(target=lookup, daemon=True)
+    worker.start()
+    worker.join(max(0, deadline - time.monotonic()))
+    if worker.is_alive():
+        raise RequestTimeout
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
+# 代理和重定向也走此入口；请求结束无需恢复全局解析函数。
+socket.getaddrinfo = resolve
+
+
 def alarm_timeout(signum, frame):
-    raise RequestTimeout
+    if (getattr(request_state, 'active', False) and
+            time.monotonic() >= request_state.deadline):
+        request_state.active = False
+        raise RequestTimeout
 
 
 def http_read(url, deadline, *, body=None, token=None, limit=256 * 1024):
@@ -90,7 +127,7 @@ def http_read(url, deadline, *, body=None, token=None, limit=256 * 1024):
     if remaining <= 0:
         raise RequestTimeout
     timeout = min(3, remaining)
-    request_deadline = time.monotonic() + timeout
+    request_deadline = min(deadline, time.monotonic() + timeout)
     headers = {}
     if body is not None:
         body = json.dumps(body).encode()
@@ -98,31 +135,10 @@ def http_read(url, deadline, *, body=None, token=None, limit=256 * 1024):
     if token:
         headers['Authorization'] = 'Bearer ' + token
     request = urllib.request.Request(url, data=body, headers=headers)
-    resolver = socket.getaddrinfo
-
-    def resolve(*args, **kwargs):
-        result, errors = [], []
-
-        def lookup():
-            try:
-                result.append(resolver(*args, **kwargs))
-            except Exception as error:
-                errors.append(error)
-
-        # libc 解析可能不响应 SIGALRM；只等待剩余预算，退出不等待解析线程。
-        worker = threading.Thread(target=lookup, daemon=True)
-        worker.start()
-        worker.join(max(0, request_deadline - time.monotonic()))
-        if worker.is_alive():
-            raise RequestTimeout
-        if errors:
-            raise errors[0]
-        return result[0]
-
-    # urllib 的代理和重定向也走此解析入口；计时器另限制连接及持续滴流。
-    socket.getaddrinfo = resolve
-    signal.setitimer(signal.ITIMER_REAL, timeout)
+    request_state.deadline = request_deadline
+    request_state.active = True
     try:
+        signal.setitimer(signal.ITIMER_REAL, timeout)
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read(limit + 1), response.headers.get_content_type()
     except urllib.error.HTTPError as error:
@@ -132,8 +148,10 @@ def http_read(url, deadline, *, body=None, token=None, limit=256 * 1024):
     except http.client.HTTPException:
         raise OSError from None
     finally:
+        # 先禁用处理函数，避免取消计时器时投递的残留信号打断清理。
+        request_state.active = False
+        request_state.deadline = None
         signal.setitimer(signal.ITIMER_REAL, 0)
-        socket.getaddrinfo = resolver
 
 
 def api_json(url, deadline, **kwargs):
@@ -193,7 +211,7 @@ def cached_bot(value):
 
 
 def info(refresh):
-    deadline = time.monotonic() + 7.5
+    deadline = time.monotonic() + 7
     try:
         with (BASE / 'config.toml').open('rb') as stream:
             config = tomllib.load(stream)
@@ -288,6 +306,8 @@ class Supervisor:
         self.backoff = 2
         self.pending = {'stdout': b'', 'stderr': b''}
         self.selector = selectors.DefaultSelector()
+        self.lock_fd = None
+        self.fifo_fd = None
 
     def terminate(self, signum, frame):
         self.stopping = True
@@ -389,63 +409,110 @@ class Supervisor:
             print(f'[startup] bridge-started +{elapsed}ms', file=sys.stderr, flush=True)
             self.marked = True
 
-    def run(self):
-        RUN.mkdir(mode=0o700, parents=True, exist_ok=True)
-        RUN.chmod(0o700)
-        with os.fdopen(os.open(RUN / 'supervisor.lock', os.O_CREAT | os.O_WRONLY, 0o600), 'w') as lock:
+    def prepare_control(self):
+        if self.lock_fd is None:
+            # 先检查既有锁，避免 chmod 失败绕过另一个正在运行的守护。
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fd = os.open(RUN / 'supervisor.lock', os.O_CREAT | os.O_WRONLY, 0o600)
+            except FileNotFoundError:
+                RUN.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fd = os.open(RUN / 'supervisor.lock', os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                return 1
-            fifo = RUN / 'restart.fifo'
-            fifo.unlink(missing_ok=True)
-            os.mkfifo(fifo, 0o600)
-            fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
-            self.selector.register(fd, selectors.EVENT_READ, 'restart')
-            remove_bridge_pid()
-            signal.signal(signal.SIGTERM, self.terminate)
-            signal.signal(signal.SIGINT, self.terminate)
-            error_backoff = 1
-            try:
-                while not self.stopping:
-                    try:
-                        now = time.monotonic()
-                        if self.requested:
-                            self.stop_child()
-                            self.next_start = 0
-                            self.backoff = 2
-                            self.requested = False
-                        if self.child and self.child.poll() is not None:
-                            stable = now - self.child_started >= 300
-                            self.stop_child()
-                            if stable:
-                                self.backoff = 2
-                            self.next_start = time.monotonic() + self.backoff
-                            self.backoff = min(60, self.backoff * 2)
-                        if self.child is None and now >= self.next_start:
-                            if (BASE / 'config.toml').is_file():
-                                self.launch()
-                            else:
-                                self.next_start = now + 3
-                        for key, _ in self.selector.select(timeout=0.1):
-                            if key.data == 'restart':
-                                if os.read(fd, 65536):
-                                    self.requested = True
-                            elif self.child:
-                                self.read_output(key.data)
-                        error_backoff = 1
-                    except Exception as error:
-                        # 不记录异常原文，避免桥日志或凭据进入额外诊断。
-                        warn(f'消息桥守护循环异常（{type(error).__name__}），稍后重试')
-                        until = time.monotonic() + error_backoff
-                        while not self.stopping and time.monotonic() < until:
-                            time.sleep(0.1)
-                        error_backoff = min(60, error_backoff * 2)
-            finally:
-                self.stop_child()
-                self.selector.close()
                 os.close(fd)
-                fifo.unlink(missing_ok=True)
+                return False
+            except OSError:
+                os.close(fd)
+                raise
+            self.lock_fd = fd
+            if self.child is None:
+                remove_bridge_pid()
+        RUN.chmod(0o700)
+        fifo = RUN / 'restart.fifo'
+        fifo.unlink(missing_ok=True)
+        os.mkfifo(fifo, 0o600)
+        fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            self.selector.register(fd, selectors.EVENT_READ, 'restart')
+        except Exception:
+            os.close(fd)
+            raise
+        self.fifo_fd = fd
+        return True
+
+    def wait_after_error(self, delay):
+        until = time.monotonic() + delay
+        while not self.stopping and time.monotonic() < until:
+            if self.child:
+                for channel in ('stdout', 'stderr'):
+                    try:
+                        self.read_output(channel)
+                    except Exception:
+                        # 单路读取/解析故障不妨碍另一路；主循环稍后重试并报警。
+                        pass
+            time.sleep(0.1)
+
+    def run(self):
+        signal.signal(signal.SIGTERM, self.terminate)
+        signal.signal(signal.SIGINT, self.terminate)
+        error_backoff = 1
+        prepare_backoff = 1
+        next_prepare = 0
+        try:
+            while not self.stopping:
+                try:
+                    now = time.monotonic()
+                    if self.fifo_fd is None and now >= next_prepare:
+                        try:
+                            if not self.prepare_control():
+                                return 1
+                        except OSError:
+                            warn('消息桥控制通道准备失败，稍后重试；消息桥继续运行')
+                            next_prepare = now + prepare_backoff
+                            prepare_backoff = min(60, prepare_backoff * 2)
+                    if self.requested:
+                        self.stop_child()
+                        self.next_start = 0
+                        self.backoff = 2
+                        self.requested = False
+                    if self.child and self.child.poll() is not None:
+                        stable = now - self.child_started >= 300
+                        self.stop_child()
+                        if stable:
+                            self.backoff = 2
+                        self.next_start = time.monotonic() + self.backoff
+                        self.backoff = min(60, self.backoff * 2)
+                    if self.child is None and now >= self.next_start:
+                        if (BASE / 'config.toml').is_file():
+                            self.launch()
+                        else:
+                            self.next_start = now + 3
+                    for key, _ in self.selector.select(timeout=0.1):
+                        if key.data == 'restart':
+                            if os.read(self.fifo_fd, 65536):
+                                self.requested = True
+                        elif self.child:
+                            self.read_output(key.data)
+                    error_backoff = 1
+                except Exception as error:
+                    # 不记录异常原文，避免桥日志或凭据进入额外诊断。
+                    warn(f'消息桥守护循环异常（{type(error).__name__}），稍后重试')
+                    self.wait_after_error(error_backoff)
+                    error_backoff = min(60, error_backoff * 2)
+        finally:
+            try:
+                self.stop_child()
+            finally:
+                self.selector.close()
+                if self.fifo_fd is not None:
+                    os.close(self.fifo_fd)
+                    try:
+                        (RUN / 'restart.fifo').unlink(missing_ok=True)
+                    except OSError:
+                        warn('无法删除消息桥控制通道')
+                if self.lock_fd is not None:
+                    os.close(self.lock_fd)
         return 0
 
 
