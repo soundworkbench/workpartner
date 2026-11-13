@@ -137,27 +137,28 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       html.fixture-feishu-bot[data-theme="dark"] #root > main { background:var(--wp-main, #111); }
     </style>
     ${voice ? `<style>
-      #voice-composer { width:100%; max-width:680px; margin-top:32px; }
-      #voice-composer textarea { box-sizing:border-box; display:block; width:100%; min-width:0; height:80px; }
-      #voice-composer .flex { display:flex; }
-      #voice-composer .items-center { align-items:center; }
-      #voice-composer .gap-2 { gap:8px; }
-      #voice-composer .w-full { width:100%; }
-      #voice-composer .min-w-0 { min-width:0; }
-      #voice-composer .overflow-hidden { overflow:hidden; }
-      #voice-composer .justify-between { justify-content:space-between; }
-      #voice-composer .sendbox-highlight-container { flex:1; min-width:0; }
-      #voice-composer .sendbox-panel > .flex > .sendbox-highlight-container textarea { height:36px; }
-      #voice-composer .sendbox-tools { display:flex; flex-shrink:0; }
-      #voice-composer .send-button-custom, #voice-composer .sendbox-stop-button,
-      #voice-composer [data-testid="file-upload-btn"], #voice-composer [data-testid="sendbox-mobile-plus-btn"] { flex:0 0 auto; width:32px; height:32px; }
-      #voice-composer .fixture-token { flex:0 0 20px; width:20px; text-align:center; }
-      #voice-composer [class*="_actionRow_"] { display:flex; justify-content:space-between; align-items:flex-end; gap:8px; }
-      #voice-composer [class*="_actionTools_"] { display:inline-flex; overflow-x:auto; }
-      #voice-composer [class*="_actionSubmit_"] { display:flex; gap:6px; margin-left:auto; }
+      /* Transition clones retain the upstream class-based layout after their id is removed. */
+      :is(#voice-composer, .wp-transition-composer) { width:100%; max-width:680px; margin-top:32px; }
+      :is(#voice-composer, .wp-transition-composer) textarea { box-sizing:border-box; display:block; width:100%; min-width:0; height:80px; }
+      :is(#voice-composer, .wp-transition-composer) .flex { display:flex; }
+      :is(#voice-composer, .wp-transition-composer) .items-center { align-items:center; }
+      :is(#voice-composer, .wp-transition-composer) .gap-2 { gap:8px; }
+      :is(#voice-composer, .wp-transition-composer) .w-full { width:100%; }
+      :is(#voice-composer, .wp-transition-composer) .min-w-0 { min-width:0; }
+      :is(#voice-composer, .wp-transition-composer) .overflow-hidden { overflow:hidden; }
+      :is(#voice-composer, .wp-transition-composer) .justify-between { justify-content:space-between; }
+      :is(#voice-composer, .wp-transition-composer) .sendbox-highlight-container { flex:1; min-width:0; }
+      :is(#voice-composer, .wp-transition-composer) .sendbox-panel > .flex > .sendbox-highlight-container textarea { height:36px; }
+      :is(#voice-composer, .wp-transition-composer) .sendbox-tools { display:flex; flex-shrink:0; }
+      :is(#voice-composer, .wp-transition-composer) .send-button-custom, :is(#voice-composer, .wp-transition-composer) .sendbox-stop-button,
+      :is(#voice-composer, .wp-transition-composer) [data-testid="file-upload-btn"], :is(#voice-composer, .wp-transition-composer) [data-testid="sendbox-mobile-plus-btn"] { flex:0 0 auto; width:32px; height:32px; }
+      :is(#voice-composer, .wp-transition-composer) .fixture-token { flex:0 0 20px; width:20px; text-align:center; }
+      :is(#voice-composer, .wp-transition-composer) [class*="_actionRow_"] { display:flex; justify-content:space-between; align-items:flex-end; gap:8px; }
+      :is(#voice-composer, .wp-transition-composer) [class*="_actionTools_"] { display:inline-flex; overflow-x:auto; }
+      :is(#voice-composer, .wp-transition-composer) [class*="_actionSubmit_"] { display:flex; gap:6px; margin-left:auto; }
       @media(max-width:768px) {
-        #voice-composer [class*="_actionTools_"] { flex:1 1 auto; }
-        #voice-composer [class*="_actionSubmit_"] { flex-shrink:0; margin-left:8px; }
+        :is(#voice-composer, .wp-transition-composer) [class*="_actionTools_"] { flex:1 1 auto; }
+        :is(#voice-composer, .wp-transition-composer) [class*="_actionSubmit_"] { flex-shrink:0; margin-left:8px; }
       }
       @media(max-width:767px) {
         #root > aside { display:none !important; }

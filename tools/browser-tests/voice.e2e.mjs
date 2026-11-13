@@ -402,7 +402,16 @@ for (const width of [1280, 390, 360]) {
         await placement(page, singleLine);
         await page.evaluate(() => window.__renderComposer()); await page.waitForSelector(BUTTON);
         await placement(page, singleLine);
-        await page.evaluate(() => { const clone = document.querySelector('#voice-composer').cloneNode(true); clone.id = ''; clone.className = 'wp-transition-composer'; document.body.append(clone); });
+        await page.evaluate(() => {
+          const source = document.querySelector('#voice-composer'), rect = source.getBoundingClientRect();
+          const clone = source.cloneNode(true);
+          clone.id = ''; clone.classList.add('wp-transition-composer');
+          clone.setAttribute('aria-hidden', 'true'); clone.inert = true;
+          // Match wp-overlay.js ghostShow(): preserve layout at the source rectangle outside normal flow.
+          Object.assign(clone.style, { position: 'fixed', zIndex: '41', margin: '0', pointerEvents: 'none', transition: 'none',
+            left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+          document.body.append(clone);
+        });
         await page.waitForFunction(() => !document.querySelector('.wp-transition-composer .wp-voice'));
         await placement(page, singleLine);
         await page.evaluate(() => document.querySelector('.wp-transition-composer').remove());

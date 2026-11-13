@@ -27,3 +27,22 @@
 - `tools/browser-tests/lib/site.mjs` 在语音夹具替换 `modelPicker` 前检查 `function modelPicker() {` 是否存在；若签名变化则抛错，提示同步夹具。
 
 本轮验证：运行 `node --check gateway/voice-client.mjs`、`node --check tools/browser-tests/lib/site.mjs`、`node --check tools/browser-tests/voice.e2e.mjs`，以及 `git diff --check`。以上检查通过。单测命令在沙箱内受 `listen EPERM` 限制；宿主机实跑结果为 17/17 通过。浏览器 E2E 依 GitHub Actions，未在本地运行；未提交 git。
+
+## 第 3 轮
+
+### 根因
+
+源码核查支持协调者判断：布局用例将 `#voice-composer` 克隆后清空 id，追加到 body；语音夹具的宽度、textarea、flex、按钮和手机断点规则却全部依赖该 id。克隆因此丢失布局约束，并参与普通文档流，与 CI 中仅克隆后的 390/360 页面 overflow 失败吻合。真实 `image/rebrand/overlay/wp-overlay.js` 的 `ghostShow()` 保留克隆的类名样式，并按源元素矩形设置固定定位；本轮修正夹具模拟，不修改产品逻辑。
+
+### 改动
+
+- `tools/browser-tests/lib/site.mjs`：语音布局规则统一以 `:is(#voice-composer, .wp-transition-composer)` 为前缀，包括手机断点，让克隆在移除 id 后仍保留相同布局，模拟真实上游类名样式。规则仍仅在 voice 模式生成。
+- `tools/browser-tests/voice.e2e.mjs`：克隆按源输入框的 left/top/width/height 固定定位，设置零 margin、禁用指针事件、`aria-hidden` 和 `inert`，对应真实 `ghostShow()` 的初始克隆行为。保留可见克隆及其布局，不通过隐藏或裁剪溢出来绕过检查。
+- 所有 overflow、位置及唯一性断言保持不变；未修改 `gateway/voice-client.mjs`。
+- 已核对截图调用链：每个宽度先测试 conversation，再测试 guid；之前 conversation 的克隆断言失败会提前退出，无法到达首页截图。该阶段通过并继续到首页位置检查后，现有 `suite.shot()` 会生成 `tools/browser-tests/output/shots/voice/390-home.png` 和 `360-home.png`（可由 `BROWSER_TESTS_OUTPUT` 改写输出根目录）；现有 Actions 上传该输出目录，无需修改截图逻辑。
+
+### 验证
+
+- `node --check tools/browser-tests/lib/site.mjs`、`node --check tools/browser-tests/voice.e2e.mjs`：通过。
+- `git diff --check`：通过。
+- 按要求未在本地运行浏览器 E2E，未生成本地截图；390/360 用例通过及两张首页截图的实际产出需以 GitHub Actions 的 voice 组结果确认。本轮未提交 git。
