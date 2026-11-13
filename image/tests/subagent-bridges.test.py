@@ -21,6 +21,70 @@ SCRIPT = HERE.parent / 'bin/wp-feishu-bot.py'
 
 
 class MultiBridgeTest(BaseSupervisor):
+    def test_subbridge_pid_repaired_after_control_preparation(self):
+        self.fake('from pathlib import Path\n'
+                  'base=Path(sys.argv[sys.argv.index("--config")+1]).parent\n'
+                  'with (base/"starts").open("a") as f: f.write(str(os.getpid())+"\\n")\n'
+                  'print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        sub = self.sub('s11111111')
+        blocked_fifo = self.run / 'restart.fifo'
+        blocked_fifo.mkdir(parents=True)
+        blocked_run = sub / 'run'
+        blocked_run.touch()
+        self.start()
+        self.wait_for(self.pid)
+        def sub_pid():
+            path = sub / 'starts'
+            return int(path.read_text().splitlines()[-1]) if path.exists() else None
+        sub_child = self.wait_for(sub_pid)
+        self.assertIsNone(self.subpid(sub))
+        self.wait_for(lambda: self.output().count('控制通道准备失败') >= 2)
+        blocked_run.unlink()
+        blocked_run.mkdir()
+        blocked_fifo.rmdir()
+        self.wait_for(lambda: self.run.joinpath('restart.fifo').is_fifo(), timeout=9)
+        self.wait_for(lambda: self.subpid(sub) == sub_child, timeout=3)
+        self.assertNotEqual(self.bridge_status(sub / 'run')['online'], 'offline')
+
+    def test_restart_subbridge_interrupts_long_loop_error_backoff(self):
+        self.fake('from pathlib import Path\n'
+                  'base=Path(sys.argv[sys.argv.index("--config")+1]).parent\n'
+                  'with (base/"starts").open("a") as f: f.write(str(os.getpid())+"\\n")\n'
+                  'print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        sub = self.sub('s11111111')
+        launcher = '''import os, runpy, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+real_monotonic = module['time'].monotonic
+origin = real_monotonic()
+module['time'].monotonic = lambda: origin + (real_monotonic() - origin) * 4
+base = module['selectors'].DefaultSelector
+class FailingSelector(base):
+    def select(self, timeout=None):
+        if Path(os.environ['WP_CC_CONNECT_DIR'], 'fail').exists():
+            raise RuntimeError('private loop failure')
+        return super().select(timeout)
+module['selectors'].DefaultSelector = FailingSelector
+sys.argv = [sys.argv[1], 'supervise']
+sys.exit(module['main']())
+'''
+        self.start(launcher)
+        main = self.wait_for(self.pid)
+        first = self.wait_for(lambda: self.subpid(sub))
+        (self.base / 'fail').touch()
+        self.wait_for(lambda: self.output().count('守护循环异常') >= 5, timeout=8)
+        started = time.monotonic()
+        self.send('restart s11111111')
+        second = self.wait_for(lambda: self.subpid(sub) if self.subpid(sub) != first else None,
+                               timeout=3)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.pid(), main)
+        self.assertNotEqual(first, second)
+        self.assertNotIn('private loop failure', self.output())
+        (self.base / 'fail').unlink()
+
     def test_subbridge_output_error_does_not_pause_other_bridges(self):
         self.fake('from pathlib import Path\n'
                   'base=Path(sys.argv[sys.argv.index("--config")+1]).parent\n'

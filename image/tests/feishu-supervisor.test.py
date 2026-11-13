@@ -75,6 +75,17 @@ class SupervisorTest(unittest.TestCase):
         except (OSError, ValueError):
             return None
 
+    def bridge_status(self, run=None):
+        run = run or self.run
+        code = ('import json, runpy, sys\n'
+                'from pathlib import Path\n'
+                'module = runpy.run_path(sys.argv[1])\n'
+                'print(json.dumps(module[\'bridge_status\'](Path(sys.argv[2]))))\n')
+        result = subprocess.run([sys.executable, '-c', code, str(SCRIPT), str(run)],
+                                env=self.env, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
     def event(self):
         try:
             return json.loads((self.run / 'bridge-state.json').read_text()).get('event')
@@ -310,6 +321,61 @@ sys.exit(module['main']())
         self.restart()
         self.wait_for(lambda: self.pid() and self.pid() != first)
 
+    def test_restart_interrupts_long_loop_error_backoff(self):
+        self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        launcher = '''import os, runpy, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+real_monotonic = module['time'].monotonic
+origin = real_monotonic()
+module['time'].monotonic = lambda: origin + (real_monotonic() - origin) * 4
+base = module['selectors'].DefaultSelector
+class FailingSelector(base):
+    def select(self, timeout=None):
+        if Path(os.environ['WP_CC_CONNECT_DIR'], 'fail').exists():
+            raise RuntimeError('private loop failure')
+        return super().select(timeout)
+module['selectors'].DefaultSelector = FailingSelector
+sys.argv = [sys.argv[1], 'supervise']
+sys.exit(module['main']())
+'''
+        self.start(launcher)
+        first = self.wait_for(self.pid)
+        self.wait_for(lambda: self.event() == 'connected')
+        (self.base / 'fail').touch()
+        self.wait_for(lambda: self.output().count('守护循环异常') >= 5, timeout=8)
+        started = time.monotonic()
+        self.restart()
+        second = self.wait_for(lambda: self.pid() if self.pid() != first else None, timeout=3)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertNotIn('private loop failure', self.output())
+        (self.base / 'fail').unlink()
+        self.assertNotEqual(first, second)
+
+    def test_loop_error_backoff_without_fifo_is_safe(self):
+        self.run.touch()
+        self.fake('time.sleep(60)\n')
+        self.config()
+        launcher = '''import os, runpy, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+base = module['selectors'].DefaultSelector
+class FailingSelector(base):
+    def select(self, timeout=None):
+        raise RuntimeError('private loop failure')
+module['selectors'].DefaultSelector = FailingSelector
+sys.argv = [sys.argv[1], 'supervise']
+sys.exit(module['main']())
+'''
+        self.start(launcher)
+        self.wait_for(lambda: self.output().count('守护循环异常') >= 1, timeout=3)
+        time.sleep(3)
+        self.assertIsNone(self.process.poll())
+        self.assertNotIn('Traceback', self.output())
+        self.assertLessEqual(self.output().count('守护循环异常'), 3)
+        self.assertNotIn('private loop failure', self.output())
+
     def test_default_binary_ignores_path(self):
         self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
         del self.env['WP_CC_CONNECT_BIN']
@@ -376,6 +442,8 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         else:
             blocked.rmdir()
         self.wait_for(lambda: (self.run / 'restart.fifo').is_fifo(), timeout=9)
+        self.wait_for(lambda: self.pid() == pids()[1], timeout=3)
+        self.assertNotEqual(self.bridge_status()['online'], 'offline')
         self.restart()
         self.wait_for(lambda: len(pids()) == 3, timeout=3)
         self.wait_for(lambda: self.pid() == pids()[2] and self.event() == 'connected')
