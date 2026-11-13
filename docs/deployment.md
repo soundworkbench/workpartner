@@ -98,6 +98,43 @@ Official skills use the same upstream commits as the private bundle and verified
 
 `extensions.gatewayModule` optionally names a trusted local module relative to the organization directory. The public default leaves it empty and has no legacy backend or desktop implementation. When extension loading is enabled, a configured but missing or broken extension is a startup error. Kubernetes skips extensions by default (`runtime.k8s.loadGatewayExtension` defaults to false); legacy users continue through the Docker peer. Set this flag to true when organization-provided routes are needed; the extension must not depend on Docker transport. Keep extension code outside the public snapshot.
 
+### 同一容器内的子助手
+
+容器保留主助手 `main`（「主助手」）：工作目录 `/data/work`，配置 `/data/.cc-connect/config.toml`，桥数据 `/data/.cc-connect/data`，运行文件 `/data/.cc-connect/run`。最多登记 5 个子助手，尚未扫码成功的也计入上限。子助手 ID 固定为随机 `s` 加 8 位十六进制，改名不会改变目录或项目记忆。
+
+| 子助手文件 | 位置 |
+| --- | --- |
+| 工作目录、CLAUDE.md、AGENTS.md | `/data/agents/<id>`（目录 755） |
+| 登记姓名和创建时间 | `/data/.cc-connect/agents/<id>/agent.json` |
+| 独立机器人配置 | `/data/.cc-connect/agents/<id>/config.toml`（600） |
+| 会话、cron/timer、API socket | `/data/.cc-connect/agents/<id>/data`，socket 在其 `run/api.sock` |
+| 桥 pid、连接状态、按 appId 的缓存 | `/data/.cc-connect/agents/<id>/run` |
+| 扫码状态、锁和 pending 配置 | `/data/.cc-connect/agents/<id>/` 下的 `.feishu-setup.json`、`.feishu-setup.lock`、`pending-feishu.toml` |
+
+`/data/.cc-connect/agents` 及其子目录为 700。每个助手使用自己的 cc-connect 进程和 data_dir，统一由 `wp-feishu-bot.py supervise` 管理；守护每 3 秒扫描，也接受主 `run/restart.fifo` 的 `rescan`。新增、删除、重启子助手不重启容器或其他桥。主桥日志保持原样，子桥每行带 `[agent <id>] `。容器启动先执行 `wp-agent sync`，更新子助手的公司统一说明与所有助手的名单块；没有子助手时不新增名单块或登记锁。
+
+```sh
+printf '%s\n' '{"name":"研究员"}' | wp-agent create
+wp-agent list
+printf '%s\n' '{"name":"资料员"}' | wp-agent rename s12345678
+python3 /opt/workpartner/bin/feishu-onboard.py start --agent s12345678
+python3 /opt/workpartner/bin/feishu-onboard.py status --agent s12345678
+python3 /opt/workpartner/bin/wp-feishu-bot.py info --refresh
+python3 /opt/workpartner/bin/wp-feishu-bot.py restart --agent s12345678
+wp-agent ask 资料员 --timeout 300 --json "整理本周资料"
+wp-agent delete s12345678
+```
+
+将示例 ID 替换为 create 返回的 ID。create/rename 从 stdin 接受不超过 4KB 的一行 JSON；管理命令 stdout 为一行 JSON。姓名先 NFC 归一并去首尾空白，限 1–16 字，允许汉字、ASCII 字母数字、`_`、`-`、`·` 和单个内部空格；`main`/「主助手」保留，大小写折叠后不得重名。create/rename/delete 使用同一个 `agents.lock` 串行处理。
+
+子助手扫码命令应由网关作为后台任务运行，status 轮询 QR 和进度。成功即 `connected`，立即通知守护启动 `agent-<id>` 项目的独立桥，不经过主助手的 `needs_restart` 流程。飞书机器人在扫码时命名，容器内助手的名字不会修改飞书应用名。info 同时返回机器人与助手清单，单个子助手配置损坏不影响其余助手；所有飞书请求共享 7 秒期限。机器人缓存分别放在各助手自己的 `run/bot-cache.json`。
+
+`ask` 接受姓名或 ID，不带消息时从 stdin 读最多 64KB；它在目标工作目录调用 Claude，默认仅输出结果文本，`--json` 返回结构化结果。默认超时 300 秒，允许 10–1800 秒，超时杀掉整个调用进程组。最多同时执行两个调用；禁止调用自己，调用过程携带 `WP_AGENT_DEPTH=1`，被调用助手不能继续调用其他助手。预计超过 2 分钟的请求应放后台执行。
+
+删除只解绑容器内助手，不删除飞书中的应用。它先停止进行中的扫码，把配置目录和工作目录分别 rename 到 `/data/.trash/agents/<id>-<YYYYmmddTHHMMSSZ>/bridge` 与 `work`，通知守护停止该桥，再更新名单；本任务不清理回收目录。删掉最后一个子助手时，主助手名单块及其新增分隔换行被移除，个人说明原字节保留。
+
+子助手目录不在 `/data/work` 下，避免继承主助手的 CLAUDE.md；Claude 项目记忆按工作目录区分。它们仍共享 HOME=/data、用户权限和容器资源，属于工作上下文隔离。**用桥的 `/dir` 切换工作目录后，不再保证说明和项目记忆隔离**；调用方身份也按当前实际目录判定。组织模板升级不会覆盖 `projects.agent.options.work_dir`。
+
 When upgrading the bridge, check `cc-connect --version` inside the built user image and require `v2.2.2`. Start it with the rendered template configuration and inspect the complete startup log for unknown-key or deprecation warnings. The template uses Claude Code; source inspection and a downloaded binary version check do not replace image startup or real Feishu acceptance.
 
 For quick-line acceptance, configure `model.quickLineModel`, replace an idle personal container and verify that its environment contains `QUICK_LINE_MODEL` and the bridge startup log reports quick line enabled. During a real turn, check the temporary line is at most 30 characters and absent from the final reply. Remove the field, replace the container and require the variable to be absent and the log to report quick line off. Test without an explicit `[stream_preview.quick_line]` section, which takes precedence over environment auto-configuration.

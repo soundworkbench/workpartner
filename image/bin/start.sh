@@ -79,6 +79,7 @@ AIONUI_PORT=${AIONUI_PORT:-25808}
 mark configured
 /opt/aionui/aionui-web start --static-dir /opt/aionui/static-wp --remote --port "$AIONUI_PORT" --no-open --data-dir /data/aionui-data &
 service_pids=("$!")
+python3 -I /opt/workpartner/bin/wp-agent sync || echo "警告：未同步助手说明，继续启动" >&2
 # 守护进程等待扫码配置落盘；消息桥退出只触发局部重启。
 python3 -I /opt/workpartner/bin/wp-feishu-bot.py supervise --started "${started:0:-6}.${started: -6}" &
 bridge_supervisor_pid=$!

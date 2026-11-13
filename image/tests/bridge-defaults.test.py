@@ -27,6 +27,15 @@ ENV = {'PARTNER_BRIDGE_MODEL': 'fixture-claude', 'PARTNER_DEFAULT_EFFORT': 'high
 
 
 class BridgeDefaultsTest(unittest.TestCase):
+    def test_work_dir_upgrade_is_always_ignored(self):
+        for current in ({}, {'work_dir': '/data/agents/s12345678'}):
+            config = {'projects': [{'agent': {'options': current}}]}
+            template = {'projects': [{'agent': {'options': {'work_dir': '/data/work', 'other': 'new'}}}]}
+            upgrades = [{'key': 'projects.agent.options.work_dir', 'from': ['/data/agents/s12345678']},
+                        {'key': 'projects.agent.options.other', 'from': []}]
+            self.assertEqual(list(bridge.template_upgrades(config, template, upgrades)),
+                             [(('projects', 0, 'agent', 'options'), 'other', 'new')])
+
     def template(self):
         return (ROOT / 'home/cc-connect-feishu.toml').read_bytes()
 
