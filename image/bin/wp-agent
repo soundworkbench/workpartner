@@ -78,6 +78,8 @@ def agent_object(record):
     setup = state.get('status', 'failed') if (directory / '.feishu-setup.json').exists() else 'none'
     if setup not in STATES:
         setup = 'failed'
+    if setup == 'connected':
+        setup = 'none'
     if setup in ('preparing', 'waiting'):
         expires = state.get('expiresAt')
         if isinstance(expires, (int, float)) and time.time() >= expires:
@@ -131,6 +133,7 @@ def valid_name(value):
         raise ValueError('invalid_name')
     value = unicodedata.normalize('NFC', value).strip()
     if (not 1 <= len(value) <= 16 or value.casefold() in ('main', '主助手') or '  ' in value
+            or ID.fullmatch(value.casefold())
             or not re.fullmatch(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaffA-Za-z0-9_· -]+', value)):
         raise ValueError('invalid_name')
     return value
@@ -158,6 +161,8 @@ def instructions(record):
 
 def roster(record, records):
     target = (workspace(record['id']) / 'CLAUDE.md').resolve()
+    if record['id'] == 'main' and not target.exists():
+        return
     current = target.read_bytes() if target.exists() else b''
     try:
         span = roster_span(current)
@@ -197,7 +202,20 @@ def rosters(records):
 
 
 def stop_setup(directory):
+    with os.fdopen(os.open(directory / '.feishu-setup.lock', os.O_CREAT | os.O_RDWR, 0o600), 'w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            stop_active_setup(directory)
+        # 无扫码锁持有者时，状态中的 PID 可能已经被无关进程复用。
+
+
+def stop_active_setup(directory):
     state = read_json(directory / '.feishu-setup.json')
+    expires = state.get('expiresAt')
+    if (state.get('status') not in ('preparing', 'waiting')
+            or type(expires) not in (int, float) or not expires > time.time()):
+        return
     pids = [pid for pid in (state.get('pid'), state.get('childPid')) if type(pid) is int and pid > 1]
     for pid in pids:
         try:
@@ -249,13 +267,31 @@ def manage(action, agent_id=None, name=None):
                 if not agent_base(agent_id).exists() and not workspace(agent_id).exists():
                     break
             directory = agent_base(agent_id)
-            directory.mkdir(mode=0o700)
-            workspace(agent_id).mkdir(mode=0o755, parents=True)
-            workspace(agent_id).chmod(0o755)
             record = {'id': agent_id, 'name': name, 'createdAt': datetime.now(timezone.utc).isoformat()}
-            instructions(record)
-            save(directory / 'agent.json', record)
-            records.append(record)
+            created = []
+            try:
+                directory.mkdir(mode=0o700)
+                created.append((directory, 'bridge'))
+                workspace(agent_id).parent.mkdir(parents=True, exist_ok=True)
+                workspace(agent_id).mkdir(mode=0o755)
+                created.append((workspace(agent_id), 'work'))
+                workspace(agent_id).chmod(0o755)
+                instructions(record)
+                save(directory / 'agent.json', record)
+                rosters([*records, record])
+                return {'ok': True, 'agent': agent_object(record)}
+            except Exception:
+                # 同步可能已写入部分说明；只回收本次创建的目录，不删除其中内容。
+                if created:
+                    trash = DATA / '.trash/agents' / (agent_id + '-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+                    trash.mkdir(mode=0o700, parents=True)
+                    for path, label in created:
+                        path.rename(trash / label)
+                try:
+                    rosters(records)
+                except Exception:
+                    pass
+                raise
         elif action == 'rename':
             record['name'] = name
             save(agent_base(agent_id) / 'agent.json', record)
@@ -283,7 +319,10 @@ def ask(args):
     if depth >= 1:
         raise ValueError('depth_exceeded')
     records = [{'id': 'main', 'name': '主助手'}, *registered()]
-    target = next((item for item in records if args.target.casefold() in (item['id'], item['name'].casefold())), None)
+    target = next((item for item in records if args.target == item['id']), None)
+    if target is None:
+        target = next((item for item in records if args.target.casefold() == item['name'].casefold()
+                       or args.target.casefold() == item['id']), None)
     if target is None:
         raise ValueError('not_found')
     caller = records[0]
@@ -326,7 +365,10 @@ def ask(args):
             try:
                 process.communicate(message.encode(), timeout=args.timeout)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.communicate(timeout=5)
                 raise ValueError('timeout') from None
             output.seek(0)
@@ -368,10 +410,13 @@ def main():
                 except ValueError:
                     pass
             result = manage(args.command, getattr(args, 'id', None), name)
-    except (ValueError, OSError) as error:
+    except Exception as error:
         known = ('invalid_name', 'name_taken', 'limit_reached', 'not_found', 'main_agent',
                  'self_call', 'depth_exceeded', 'busy', 'timeout', 'failed')
-        result = {'ok': False, 'error': str(error) if isinstance(error, ValueError) and str(error) in known else 'failed'}
+        if not isinstance(error, ValueError) or str(error) not in known:
+            print('{"ok":false,"error":"failed"}')
+            return 1
+        result = {'ok': False, 'error': str(error)}
     if args.command == 'ask' and not args.json:
         if result['ok']:
             print(result['reply'])

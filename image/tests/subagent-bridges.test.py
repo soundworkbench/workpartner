@@ -20,6 +20,41 @@ SCRIPT = HERE.parent / 'bin/wp-feishu-bot.py'
 
 
 class MultiBridgeTest(BaseSupervisor):
+    def test_subbridge_output_error_does_not_pause_other_bridges(self):
+        self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.config()
+        bad, good = self.sub('s11111111'), self.sub('s22222222')
+        launcher = '''import runpy, sys, time
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+cls = module['Supervisor']
+original = cls.read_output
+def read_output(self, channel):
+    if self.agent_id == 's11111111' and not getattr(self, 'injected', False):
+        self.injected = True
+        raise OSError('private-secret')
+    return original(self, channel)
+def wait_after_error(self, delay):
+    (self.base / 'global-wait').touch()
+cls.read_output = read_output
+cls.wait_after_error = wait_after_error
+sys.exit(cls(time.time()).run())
+'''
+        self.start(launcher=launcher)
+        main = self.wait_for(self.pid)
+        bad_pid = self.wait_for(lambda: self.subpid(bad))
+        good_pid = self.wait_for(lambda: self.subpid(good))
+        self.wait_for(lambda: 's11111111 消息桥输出异常' in self.output())
+        self.wait_for(lambda: self.event() == 'connected')
+        self.wait_for(lambda: json.loads((good / 'run/bridge-state.json').read_text()).get('event') == 'connected')
+        self.send('restart s22222222')
+        self.wait_for(lambda: self.subpid(good) and self.subpid(good) != good_pid, timeout=2)
+        self.assertEqual(self.pid(), main)
+        self.assertEqual(self.subpid(bad), bad_pid)
+        self.stop()
+        self.assertFalse((self.base / 'global-wait').exists())
+        self.assertNotIn('private-secret', self.output())
+
     def sub(self, agent_id):
         base = self.base / 'agents' / agent_id
         base.mkdir(parents=True)
@@ -152,6 +187,30 @@ class MultiBridgeTest(BaseSupervisor):
 
 
 class InfoTest(FIXTURE):
+    def test_cache_fetch_racing_delete_does_not_recreate_registration(self):
+        item = self.create()
+        self.config(self.directory(item), 'cli_sub')
+        launcher = '''import os, runpy, subprocess, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+def fetch(*args):
+    agent_id = module['AGENTS']['registered']()[0]['id']
+    deleted = subprocess.run([sys.executable, '-I', str(Path(sys.argv[0]).with_name('wp-agent')),
+                              'delete', agent_id], capture_output=True, text=True, timeout=5)
+    if deleted.returncode: raise RuntimeError('delete failed')
+    return {'name': 'fetched', 'avatar': None, 'activate': True}
+module['info'].__globals__['fetch_bot'] = fetch
+sys.argv = sys.argv[1:]
+sys.exit(module['main']())
+'''
+        result = self.command('wp-feishu-bot.py', 'info', '--refresh', launcher=launcher)
+        info = json.loads(result.stdout)
+        self.assertEqual(info['agents'], [])
+        self.assertEqual(info['bots'][0]['name'], 'fetched')
+        self.assertFalse(self.directory(item).exists())
+        self.assertFalse(self.work(item).exists())
+        self.assertTrue(list((self.data / '.trash/agents').glob(item['id'] + '-*/bridge/agent.json')))
+
     def config(self, directory, app_id):
         (directory / 'config.toml').write_text('[[projects]]\nname="test"\n[[projects.platforms]]\ntype="feishu"\n'
                                                 f'[projects.platforms.options]\napp_id="{app_id}"\napp_secret="private-secret"\n')
@@ -204,7 +263,8 @@ class InfoTest(FIXTURE):
                               ({'status':'preparing','expiresAt':0},'expired'),
                               ({'status':'waiting','expiresAt':0},'expired'),
                               ({'status':'needs_identity'},'needs_identity'), ({'status':'failed'},'failed'),
-                              ({'status':'expired'},'expired'), ({'status':'unknown'},'failed')]:
+                              ({'status':'expired'},'expired'), ({'status':'unknown'},'failed'),
+                              ({'status':'connected'},'none')]:
             if state:
                 path.write_text(json.dumps(state))
             result = self.info()

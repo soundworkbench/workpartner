@@ -180,10 +180,10 @@ def run(project, *, base=BASE, command='/opt/workpartner/bin/cc-connect',
 
 def assert_sub_config(content, project, base):
     data = tomllib.loads(content)
-    assert data['data_dir'] == str(base / 'data')
-    assert len(data['projects']) == 1
-    assert data['projects'][0]['name'] == project
-    assert data['projects'][0]['agent']['options']['work_dir'] == str(AGENTS['workspace'](AGENT_ID))
+    if (data['data_dir'] != str(base / 'data') or len(data['projects']) != 1
+            or data['projects'][0]['name'] != project
+            or data['projects'][0]['agent']['options']['work_dir'] != str(AGENTS['workspace'](AGENT_ID))):
+        raise ValueError('invalid agent config')
 
 
 def sub_status():
@@ -224,6 +224,9 @@ def main():
         AGENT_ID = sys.argv[index + 1]
         AGENTS = runpy.run_path(str(Path(__file__).with_name('wp-agent')))
         if not any(item['id'] == AGENT_ID for item in AGENTS['registered']()):
+            if sys.argv[1] == 'status':
+                print(json.dumps({'status': 'failed'}))
+                return 0
             return 1
         BASE = AGENTS['agent_base'](AGENT_ID)
         CONFIG = BASE / 'config.toml'

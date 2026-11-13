@@ -31,8 +31,11 @@ class Fixture(unittest.TestCase):
                         WP_INSTRUCTIONS_TEMPLATE=str(self.template), PARTNER_BRIDGE_MODEL='test-model',
                         PARTNER_DEFAULT_EFFORT='high', WP_FEISHU_TEMPLATE=str(HOME / 'cc-connect-feishu.toml'))
 
-    def command(self, script, *args, payload=None, code=0, cwd=None, timeout=9):
-        result = subprocess.run([sys.executable, '-I', '-B', str(BIN / script), *args], env=self.env,
+    def command(self, script, *args, payload=None, code=0, cwd=None, timeout=9, launcher=None, optimize=False):
+        command = [sys.executable, '-I', '-B', *(['-O'] if optimize else [])]
+        if launcher:
+            command += ['-c', launcher]
+        result = subprocess.run([*command, str(BIN / script), *args], env=self.env,
                                 input=payload, capture_output=True, text=True, cwd=cwd, timeout=timeout)
         self.assertEqual(result.returncode, code, result.stderr + result.stdout)
         self.assertNotIn('private-secret', result.stdout + result.stderr)
@@ -64,6 +67,96 @@ class Fixture(unittest.TestCase):
 
 
 class AgentTest(Fixture):
+    def test_missing_main_instructions_stay_absent(self):
+        main = self.data / 'work/CLAUDE.md'
+        main.unlink()
+        item = self.create()
+        self.assertFalse(main.exists())
+        self.assertIn('你是子助手', (self.work(item) / 'CLAUDE.md').read_text())
+        self.agent('sync')
+        self.assertFalse(main.exists())
+        self.agent('delete', item['id'])
+        self.assertFalse(main.exists())
+
+    def test_failed_create_rolls_back_directories_and_hides_exceptions(self):
+        original = self.template.read_bytes()
+        partial_failure = '''import pathlib, runpy, sys
+def fail(*args, **kwargs): raise RuntimeError('private-secret')
+pathlib.Path.symlink_to = fail
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+        roster_failure = '''import runpy, sys
+module = runpy.run_path(sys.argv[1])
+original = module['roster']
+def roster(record, records):
+    original(record, records)
+    if record['id'] != 'main': raise RuntimeError('private-secret')
+module['manage'].__globals__['roster'] = roster
+sys.argv = sys.argv[1:]
+sys.exit(module['main']())
+'''
+        for failure in ('missing_template', 'missing_memory', 'partial_sync', 'partial_rosters'):
+            with self.subTest(failure=failure):
+                self.template.write_bytes(original)
+                if failure == 'missing_template':
+                    self.template.unlink()
+                elif failure == 'missing_memory':
+                    self.template.write_bytes(original + b'__MEMORY_MIB__')
+                    self.env.pop('PARTNER_MEMORY_BYTES', None)
+                result = self.command('wp-agent', 'create', payload='{"name":"研究员"}', code=1,
+                                      launcher={'partial_sync': partial_failure,
+                                                'partial_rosters': roster_failure}.get(failure))
+                self.assertEqual(result.stdout, '{"ok":false,"error":"failed"}\n')
+                self.assertEqual(result.stderr, '')
+                self.assertEqual(list((self.base / 'agents').iterdir()), [])
+                self.assertEqual(list((self.data / 'agents').iterdir()), [])
+                self.assertEqual(self.agent('list')['agents'], [])
+                self.assertEqual((self.data / 'work/CLAUDE.md').read_bytes(), self.original)
+        self.assertTrue(list((self.data / '.trash/agents').glob('*/work/CLAUDE.md')))
+        self.assertTrue(list((self.data / '.trash/agents').glob('*/bridge/agent.json')))
+
+    def test_all_commands_hide_unexpected_exceptions(self):
+        launcher = '''import runpy, sys
+module = runpy.run_path(sys.argv[1])
+def fail(*args, **kwargs): raise RuntimeError('private-secret')
+module['main'].__globals__.update(manage=fail, ask=fail)
+sys.argv = sys.argv[1:]
+sys.exit(module['main']())
+'''
+        for args in (('create',), ('rename', 's00000000'), ('delete', 's00000000'),
+                     ('list',), ('sync',), ('ask', 'main', '--json'), ('ask', 'main')):
+            with self.subTest(args=args):
+                result = self.command('wp-agent', *args, launcher=launcher, code=1)
+                self.assertEqual(result.stdout, '{"ok":false,"error":"failed"}\n')
+                self.assertEqual(result.stderr, '')
+
+    def test_delete_does_not_signal_stale_or_inactive_setup_pids(self):
+        process = subprocess.Popen(['sleep', '60'], start_new_session=True)
+        try:
+            cases = [(False, 'preparing', 60), (False, 'waiting', 60),
+                     (True, 'preparing', -1), (True, 'waiting', -1),
+                     (True, 'connected', 60), (True, 'failed', 60),
+                     (True, 'waiting', None)]
+            for held, status, expires in cases:
+                with self.subTest(held=held, status=status, expires=expires):
+                    item = self.create()
+                    directory = self.directory(item)
+                    state = {'status': status, 'pid': process.pid, 'childPid': process.pid}
+                    if expires is not None:
+                        state['expiresAt'] = time.time() + expires
+                    (directory / '.feishu-setup.json').write_text(json.dumps(state))
+                    with (directory / '.feishu-setup.lock').open('w') as lock:
+                        if held:
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self.agent('delete', item['id'], timeout=5)
+                    self.assertIsNone(process.poll())
+                    os.killpg(process.pid, 0)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
+
     def test_empty_sync_and_list_leave_all_files_unchanged(self):
         before = self.snapshot()
         self.assertEqual(self.agent('sync'), {'ok': True})
@@ -74,11 +167,14 @@ class AgentTest(Fixture):
         self.assertFalse((self.base / 'agents.lock').exists())
 
     def test_names_limits_and_metadata(self):
-        for value in ['', '主助手', 'MAIN', 'Main', 'a  b', 'a/b', 'a.b', 'a\tb', '😀', '中' * 17]:
+        for value in ['', '主助手', 'MAIN', 'Main', 's0123abcd', 'S0123ABCD', ' sABCDEF12 ',
+                      'a  b', 'a/b', 'a.b', 'a\tb', '😀', '中' * 17]:
             self.assertEqual(self.agent('create', name=value, code=1), {'ok': False, 'error': 'invalid_name'})
         values = ['  研究员  ', 'AbC', '中' * 16, 'Agent 二-·_9', '\u3400\uf900']
         created = [self.create(name) for name in values]
         self.assertEqual(created[0]['name'], '研究员')
+        self.assertEqual(self.agent('rename', created[0]['id'], name='S1234AbCd', code=1),
+                         {'ok': False, 'error': 'invalid_name'})
         self.assertEqual(created[4]['name'], '㐀豈')
         self.assertEqual(self.agent('create', name='㐀豈', code=1)['error'], 'name_taken')
         self.assertEqual(set(created[0]), {'id', 'name', 'kind', 'createdAt', 'setup', 'appId'})
@@ -211,6 +307,32 @@ class AskTest(Fixture):
         result = self.command('wp-agent', 'ask', self.item['id'], '消息', cwd=self.data / 'work')
         self.assertEqual(json.loads(result.stdout)['message'], '消息')
 
+    def test_exact_id_wins_over_legacy_conflicting_name(self):
+        target = self.create('编辑')
+        path = self.directory(self.item) / 'agent.json'
+        record = json.loads(path.read_text())
+        record['name'] = target['id']
+        path.write_text(json.dumps(record))
+        result = self.agent('ask', target['id'], '--json', cwd=self.data / 'work')
+        self.assertEqual(result['agent'], '编辑')
+        self.assertEqual(json.loads(result['reply'])['cwd'], str(self.work(target)))
+
+    def test_timeout_remains_timeout_if_process_group_already_exited(self):
+        launcher = '''import runpy, subprocess, sys
+original = subprocess.Popen.communicate
+def communicate(process, *args, **kwargs):
+    result = original(process, *args, **kwargs)
+    if not getattr(process, 'timeout_injected', False):
+        process.timeout_injected = True
+        raise subprocess.TimeoutExpired(process.args, 10)
+    return result
+subprocess.Popen.communicate = communicate
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+        self.assertEqual(self.agent('ask', self.item['id'], '--json', '--timeout', '10',
+                                    code=1, launcher=launcher), {'ok': False, 'error': 'timeout'})
+
     def test_errors_and_realpath_caller(self):
         self.assertEqual(self.agent('ask', '不存在', '--json', code=1)['error'], 'not_found')
         self.assertEqual(self.agent('ask', 'main', '--json', code=1)['error'], 'self_call')
@@ -297,6 +419,39 @@ class OnboardTest(Fixture):
         self.assertEqual(path.read_bytes(), before)
         self.command('feishu-onboard.py', 'start', '--agent', 's00000000', code=1)
         self.assertFalse((self.base / 'agents/s00000000').exists())
+
+    def test_missing_agent_status_is_failed(self):
+        for agent_id in ('s00000000', '../main'):
+            result = self.command('feishu-onboard.py', 'status', '--agent', agent_id)
+            self.assertEqual(result.stdout.strip(), '{"status": "failed"}')
+        self.assertFalse((self.base / 'agents/s00000000').exists())
+
+    def test_connected_state_without_config_is_unconnected(self):
+        for directory, args in ((self.base, ()), (self.directory(self.item), ('--agent', self.item['id']))):
+            (directory / '.feishu-setup.json').write_text('{"status":"connected"}')
+            self.assertEqual(json.loads(self.command('feishu-onboard.py', 'status', *args).stdout),
+                             {'status': 'unconnected'})
+        self.assertEqual(self.agent('list')['agents'][0]['setup'], 'none')
+        self.assertEqual(json.loads(self.command('wp-feishu-bot.py', 'info').stdout)['agents'],
+                         self.agent('list')['agents'])
+
+    def test_optimized_onboard_rejects_each_isolation_violation(self):
+        for field in ('data_dir', 'project_count', 'name', 'work_dir'):
+            with self.subTest(field=field):
+                self.env['BROKEN_FIELD'] = field
+                self.env['WP_CC_CONNECT_BIN'] = self.fake('bad-config',
+                    'import os, re, sys\nfrom pathlib import Path\n'
+                    'p=Path(sys.argv[sys.argv.index("--config")+1])\n'
+                    'text=p.read_text().replace("__APP_ID__","cli_sub").replace("__APP_SECRET__","private-secret").replace(\'allow_from = ""\',\'allow_from = "ou_user"\')\n'
+                    'field=os.environ["BROKEN_FIELD"]\n'
+                    'if field == "project_count": text += \'\\n[[projects]]\\nname="extra"\\n\'\n'
+                    'else: text=re.sub(r"(?m)^"+field+r"\\s*=.*$",field+\' = "wrong"\',text)\n'
+                    'p.write_text(text)\n')
+                self.command('feishu-onboard.py', 'start', '--agent', self.item['id'], optimize=True)
+                self.assertFalse((self.directory(self.item) / 'config.toml').exists())
+                self.assertFalse((self.directory(self.item) / 'pending-feishu.toml').exists())
+                self.assertEqual(json.loads(self.command('feishu-onboard.py', 'status', '--agent', self.item['id']).stdout),
+                                 {'status': 'failed'})
 
     def test_pending_identity_failed_and_status(self):
         directory = self.directory(self.item)

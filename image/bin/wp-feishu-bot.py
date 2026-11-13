@@ -265,7 +265,9 @@ def info(refresh):
             bots.append(bot)
         if fetched:
             try:
-                atomic_json(run / 'bot-cache.json', clean_cache)
+                with AGENTS['locked']() if agent_id != 'main' else nullcontext():
+                    if agent_id == 'main' or (run.parent / 'agent.json').is_file():
+                        atomic_json(run / 'bot-cache.json', clean_cache)
             except OSError:
                 pass
     return {'ok': True, 'bots': bots, 'agents': AGENTS['agents'](), 'limit': 5}
@@ -569,7 +571,12 @@ class Supervisor:
                         else:
                             bridge, channel = key.data
                             if bridge.child:
-                                bridge.read_output(channel)
+                                try:
+                                    bridge.read_output(channel)
+                                except Exception as error:
+                                    if bridge is self:
+                                        raise
+                                    warn(f'子助手 {bridge.agent_id} 消息桥输出异常（{type(error).__name__}）')
                     error_backoff = 1
                 except Exception as error:
                     # 不记录异常原文，避免桥日志或凭据进入额外诊断。
