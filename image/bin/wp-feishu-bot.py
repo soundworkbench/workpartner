@@ -543,7 +543,7 @@ class Supervisor:
             if self.fifo_fd is not None:
                 try:
                     chunk = os.read(self.fifo_fd, 65536)
-                except (BlockingIOError, OSError):
+                except OSError:
                     chunk = None
                 if chunk:
                     handled = self.control(chunk)

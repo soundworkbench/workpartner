@@ -327,6 +327,9 @@ sys.exit(module['main']())
         launcher = '''import os, runpy, sys
 from pathlib import Path
 module = runpy.run_path(sys.argv[1])
+real_monotonic = module['time'].monotonic
+origin = real_monotonic()
+module['time'].monotonic = lambda: origin + (real_monotonic() - origin) * 4
 base = module['selectors'].DefaultSelector
 class FailingSelector(base):
     def select(self, timeout=None):
@@ -341,11 +344,12 @@ sys.exit(module['main']())
         first = self.wait_for(self.pid)
         self.wait_for(lambda: self.event() == 'connected')
         (self.base / 'fail').touch()
-        self.wait_for(lambda: self.output().count('守护循环异常') >= 3, timeout=8)
+        self.wait_for(lambda: self.output().count('守护循环异常') >= 5, timeout=8)
         started = time.monotonic()
         self.restart()
         second = self.wait_for(lambda: self.pid() if self.pid() != first else None, timeout=3)
         self.assertLess(time.monotonic() - started, 3)
+        self.assertNotIn('private loop failure', self.output())
         (self.base / 'fail').unlink()
         self.assertNotEqual(first, second)
 
@@ -366,9 +370,11 @@ sys.exit(module['main']())
 '''
         self.start(launcher)
         self.wait_for(lambda: self.output().count('守护循环异常') >= 1, timeout=3)
-        time.sleep(0.3)
+        time.sleep(3)
         self.assertIsNone(self.process.poll())
         self.assertNotIn('Traceback', self.output())
+        self.assertLessEqual(self.output().count('守护循环异常'), 3)
+        self.assertNotIn('private loop failure', self.output())
 
     def test_default_binary_ignores_path(self):
         self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')

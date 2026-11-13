@@ -57,6 +57,9 @@ class MultiBridgeTest(BaseSupervisor):
         launcher = '''import os, runpy, sys
 from pathlib import Path
 module = runpy.run_path(sys.argv[1])
+real_monotonic = module['time'].monotonic
+origin = real_monotonic()
+module['time'].monotonic = lambda: origin + (real_monotonic() - origin) * 4
 base = module['selectors'].DefaultSelector
 class FailingSelector(base):
     def select(self, timeout=None):
@@ -71,7 +74,7 @@ sys.exit(module['main']())
         main = self.wait_for(self.pid)
         first = self.wait_for(lambda: self.subpid(sub))
         (self.base / 'fail').touch()
-        self.wait_for(lambda: self.output().count('守护循环异常') >= 3, timeout=8)
+        self.wait_for(lambda: self.output().count('守护循环异常') >= 5, timeout=8)
         started = time.monotonic()
         self.send('restart s11111111')
         second = self.wait_for(lambda: self.subpid(sub) if self.subpid(sub) != first else None,
@@ -79,6 +82,7 @@ sys.exit(module['main']())
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(self.pid(), main)
         self.assertNotEqual(first, second)
+        self.assertNotIn('private loop failure', self.output())
         (self.base / 'fail').unlink()
 
     def test_subbridge_output_error_does_not_pause_other_bridges(self):
