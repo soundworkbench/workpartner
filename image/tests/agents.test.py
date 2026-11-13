@@ -128,8 +128,42 @@ sys.exit(module['main']())
                      ('list',), ('sync',), ('ask', 'main', '--json'), ('ask', 'main')):
             with self.subTest(args=args):
                 result = self.command('wp-agent', *args, launcher=launcher, code=1)
-                self.assertEqual(result.stdout, '{"ok":false,"error":"failed"}\n')
-                self.assertEqual(result.stderr, '')
+                if args == ('ask', 'main'):
+                    self.assertEqual(result.stdout, '')
+                    self.assertEqual(result.stderr, '助手调用失败\n')
+                else:
+                    self.assertEqual(result.stdout, '{"ok":false,"error":"failed"}\n')
+                    self.assertEqual(result.stderr, '')
+
+    def test_delete_checks_group_leader_before_each_signal(self):
+        launcher = '''import json, os, runpy, signal, sys
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+checks = []
+signals = []
+def getpgid(pid):
+    checks.append(pid)
+    return pid if os.environ['GROUP_CASE'] == 'changed' and len(checks) == 1 else pid + 1
+def killpg(pid, sig):
+    if sig: signals.append([pid, sig])
+os.getpgid = getpgid
+os.killpg = killpg
+sys.argv = sys.argv[1:]
+code = module['main']()
+Path(os.environ['WP_DATA_DIR'], 'signals').write_text(json.dumps(signals))
+sys.exit(code)
+'''
+        for case, expected in (('member', []), ('changed', [[4242, signal.SIGTERM]])):
+            with self.subTest(case=case):
+                item = self.create()
+                directory = self.directory(item)
+                (directory / '.feishu-setup.json').write_text(json.dumps(
+                    {'status': 'preparing', 'expiresAt': time.time() + 60, 'pid': 4242}))
+                self.env['GROUP_CASE'] = case
+                with (directory / '.feishu-setup.lock').open('w') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.agent('delete', item['id'], launcher=launcher, timeout=5)
+                self.assertEqual(json.loads((self.data / 'signals').read_text()), expected)
 
     def test_delete_does_not_signal_stale_or_inactive_setup_pids(self):
         process = subprocess.Popen(['sleep', '60'], start_new_session=True)
@@ -317,6 +351,39 @@ class AskTest(Fixture):
         self.assertEqual(result['agent'], '编辑')
         self.assertEqual(json.loads(result['reply'])['cwd'], str(self.work(target)))
 
+    def test_intermixed_message_and_options(self):
+        for args in (('--json', '参数消息'), ('参数消息', '--json'),
+                     ('--timeout', '60', '参数消息'),
+                     ('--json', '--timeout', '60', '参数消息'),
+                     ('--timeout', '60', '参数消息', '--json'),
+                     ('参数消息', '--timeout', '60', '--json')):
+            with self.subTest(args=args):
+                result = self.command('wp-agent', 'ask', self.item['id'], *args,
+                                      payload='不应使用 stdin', cwd=self.data / 'work')
+                reply = json.loads(result.stdout)
+                if '--json' in args:
+                    self.assertTrue(reply['ok'])
+                    reply = json.loads(reply['reply'])
+                self.assertEqual(reply['message'], '参数消息')
+                self.assertEqual(reply['cwd'], str(self.work(self.item)))
+        result = self.command('wp-agent', 'ask', self.item['id'], '--timeout', '60', '--json',
+                              payload='来自 stdin', cwd=self.data / 'work')
+        self.assertEqual(json.loads(json.loads(result.stdout)['reply'])['message'], '来自 stdin')
+        result = self.command('wp-agent', 'ask', self.item['id'], '--json', '--', '-参数消息')
+        self.assertEqual(json.loads(json.loads(result.stdout)['reply'])['message'], '-参数消息')
+
+    def test_missing_claude_and_invalid_utf8_use_failure_output_mode(self):
+        self.env['WP_CLAUDE_BIN'] = str(self.data / 'missing-claude')
+        for payload in ('正常消息'.encode(), b'\xff\xfeprivate-secret'):
+            for options in ((), ('--json',)):
+                with self.subTest(payload=payload, options=options):
+                    result = subprocess.run([sys.executable, '-I', '-B', str(BIN / 'wp-agent'),
+                                             'ask', self.item['id'], *options],
+                                            env=self.env, input=payload, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, b'{"ok":false,"error":"failed"}\n' if options else b'')
+                    self.assertEqual(result.stderr, b'' if options else '助手调用失败\n'.encode())
+
     def test_timeout_remains_timeout_if_process_group_already_exited(self):
         launcher = '''import runpy, subprocess, sys
 original = subprocess.Popen.communicate
@@ -425,6 +492,77 @@ class OnboardTest(Fixture):
             result = self.command('feishu-onboard.py', 'status', '--agent', agent_id)
             self.assertEqual(result.stdout.strip(), '{"status": "failed"}')
         self.assertFalse((self.base / 'agents/s00000000').exists())
+
+    def test_delete_during_first_state_save_never_uses_previous_worker_pids(self):
+        directory = self.directory(self.item)
+        stale = subprocess.Popen(['sleep', '60'], start_new_session=True)
+        worker = deleting = None
+        launcher = '''import json, os, runpy, sys, time
+from pathlib import Path
+module = runpy.run_path(sys.argv[1])
+data = Path(os.environ['WP_DATA_DIR'])
+original = module['save']
+def save(state):
+    (data / 'before-save').touch()
+    deadline = time.monotonic() + 5
+    while not (data / 'allow-save').exists():
+        if time.monotonic() >= deadline: raise RuntimeError('save timeout')
+        time.sleep(0.01)
+    original(state)
+    (data / 'first-state').write_text(json.dumps(state))
+def refresh(config):
+    time.sleep(60)
+module['run'].__globals__.update(save=save, refresh_agent=refresh)
+sys.argv = sys.argv[1:]
+sys.exit(module['main']())
+'''
+        try:
+            (directory / '.feishu-setup.json').write_text(json.dumps(
+                {'status': 'waiting', 'expiresAt': time.time() + 60,
+                 'pid': stale.pid, 'childPid': stale.pid, 'directory': 'old-directory'}))
+            worker = subprocess.Popen([sys.executable, '-I', '-B', '-c', launcher,
+                                       str(BIN / 'feishu-onboard.py'), 'start', '--agent', self.item['id']],
+                                      env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      start_new_session=True)
+            deadline = time.monotonic() + 5
+            while not (self.data / 'before-save').exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue((self.data / 'before-save').exists())
+            with (directory / '.feishu-setup.lock').open('w') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deleting = subprocess.Popen([sys.executable, '-I', '-B', str(BIN / 'wp-agent'),
+                                         'delete', self.item['id']], env=self.env,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                deleting.communicate(timeout=0.2)
+            self.assertIsNone(stale.poll())
+            (self.data / 'allow-save').touch()
+            stdout, stderr = deleting.communicate(timeout=5)
+            self.assertEqual(deleting.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout), {'ok': True})
+            worker.communicate(timeout=3)
+            state = json.loads((self.data / 'first-state').read_text())
+            self.assertEqual(set(state), {'status', 'expiresAt', 'pid'})
+            self.assertEqual(state['status'], 'preparing')
+            self.assertEqual(state['pid'], worker.pid)
+            self.assertGreater(state['expiresAt'], time.time())
+            self.assertEqual(worker.returncode, -signal.SIGTERM)
+            self.assertIsNone(stale.poll())
+            os.killpg(stale.pid, 0)
+            self.assertFalse(directory.exists())
+        finally:
+            if deleting:
+                if deleting.poll() is None:
+                    deleting.kill()
+                deleting.communicate(timeout=3)
+            if worker:
+                if worker.poll() is None:
+                    os.killpg(worker.pid, signal.SIGKILL)
+                worker.communicate(timeout=3)
+            if stale.poll() is None:
+                os.killpg(stale.pid, signal.SIGKILL)
+            stale.wait(timeout=3)
 
     def test_connected_state_without_config_is_unconnected(self):
         for directory, args in ((self.base, ()), (self.directory(self.item), ('--agent', self.item['id']))):

@@ -125,7 +125,7 @@ wp-agent ask 资料员 --timeout 300 --json "整理本周资料"
 wp-agent delete s12345678
 ```
 
-将示例 ID 替换为 create 返回的 ID。create/rename 从 stdin 接受不超过 4KB 的一行 JSON；管理命令 stdout 为一行 JSON。姓名先 NFC 归一并去首尾空白，限 1–16 字，允许汉字、ASCII 字母数字、`_`、`-`、`·` 和单个内部空格；`main`/「主助手」保留，大小写折叠后不得重名。create/rename/delete 使用同一个 `agents.lock` 串行处理。
+将示例 ID 替换为 create 返回的 ID。create/rename 从 stdin 接受不超过 4KB 的一行 JSON；管理命令 stdout 为一行 JSON。姓名先 NFC 归一并去首尾空白，限 1–16 字，允许汉字、ASCII 字母数字、`_`、`-`、`·` 和单个内部空格；`main`/「主助手」保留，大小写折叠后不得重名。名字也不能是 `s` 加 8 位十六进制的形状（不区分大小写）。create/rename/delete 使用同一个 `agents.lock` 串行处理。
 
 子助手扫码命令应由网关作为后台任务运行，status 轮询 QR 和进度。成功即 `connected`，立即通知守护启动 `agent-<id>` 项目的独立桥，不经过主助手的 `needs_restart` 流程。飞书机器人在扫码时命名，容器内助手的名字不会修改飞书应用名。info 同时返回机器人与助手清单，单个子助手配置损坏不影响其余助手；所有飞书请求共享 7 秒期限。机器人缓存分别放在各助手自己的 `run/bot-cache.json`。
 

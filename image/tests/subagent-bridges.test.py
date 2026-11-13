@@ -1,4 +1,5 @@
 """多桥进程隔离、查询状态与共享期限的命令级回归。"""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,10 @@ SCRIPT = HERE.parent / 'bin/wp-feishu-bot.py'
 
 class MultiBridgeTest(BaseSupervisor):
     def test_subbridge_output_error_does_not_pause_other_bridges(self):
-        self.fake('print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
+        self.fake('from pathlib import Path\n'
+                  'base=Path(sys.argv[sys.argv.index("--config")+1]).parent\n'
+                  'with (base/"starts").open("a") as f: f.write(str(time.monotonic())+" "+str(os.getpid())+"\\n")\n'
+                  'print("connected to wss://x", flush=True)\ntime.sleep(60)\n')
         self.config()
         bad, good = self.sub('s11111111'), self.sub('s22222222')
         launcher = '''import runpy, sys, time
@@ -30,8 +34,7 @@ module = runpy.run_path(sys.argv[1])
 cls = module['Supervisor']
 original = cls.read_output
 def read_output(self, channel):
-    if self.agent_id == 's11111111' and not getattr(self, 'injected', False):
-        self.injected = True
+    if self.agent_id == 's11111111':
         raise OSError('private-secret')
     return original(self, channel)
 def wait_after_error(self, delay):
@@ -42,15 +45,26 @@ sys.exit(cls(time.time()).run())
 '''
         self.start(launcher=launcher)
         main = self.wait_for(self.pid)
-        bad_pid = self.wait_for(lambda: self.subpid(bad))
         good_pid = self.wait_for(lambda: self.subpid(good))
         self.wait_for(lambda: 's11111111 消息桥输出异常' in self.output())
         self.wait_for(lambda: self.event() == 'connected')
         self.wait_for(lambda: json.loads((good / 'run/bridge-state.json').read_text()).get('event') == 'connected')
         self.send('restart s22222222')
-        self.wait_for(lambda: self.subpid(good) and self.subpid(good) != good_pid, timeout=2)
+        changed = self.wait_for(lambda: self.subpid(good) if self.subpid(good) != good_pid else None, timeout=2)
+        def starts():
+            return [line.split() for line in (bad / 'starts').read_text().splitlines()] if (bad / 'starts').exists() else []
+        self.wait_for(lambda: len(starts()) >= 3 and self.subpid(bad) is None, timeout=9)
+        attempts = starts()
+        self.assertEqual(len(attempts), 3)
+        self.assertGreaterEqual(float(attempts[1][0]) - float(attempts[0][0]), 1.9)
+        self.assertGreaterEqual(float(attempts[2][0]) - float(attempts[1][0]), 3.9)
+        for _, pid in attempts:
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid), 0)
         self.assertEqual(self.pid(), main)
-        self.assertEqual(self.subpid(bad), bad_pid)
+        self.assertEqual(self.subpid(good), changed)
+        self.assertEqual(self.output().count('s11111111 消息桥输出异常'), 3)
+        self.assertEqual(self.process.poll(), None)
         self.stop()
         self.assertFalse((self.base / 'global-wait').exists())
         self.assertNotIn('private-secret', self.output())
@@ -187,6 +201,42 @@ sys.exit(cls(time.time()).run())
 
 
 class InfoTest(FIXTURE):
+    def test_cache_lock_contention_skips_write_without_delaying_info(self):
+        item = self.create()
+        directory = self.directory(item)
+        self.config(directory, 'cli_sub')
+        cache = directory / 'run/bot-cache.json'
+        original = cache.read_bytes()
+        launcher = '''import runpy, sys
+module = runpy.run_path(sys.argv[1])
+def fetch(*args):
+    return {'name': 'fresh', 'avatar': None, 'activate': True}
+module['info'].__globals__['fetch_bot'] = fetch
+sys.argv = sys.argv[1:]
+sys.exit(module['main']())
+'''
+        for existing in (True, False):
+            with self.subTest(existing=existing):
+                if not existing:
+                    cache.unlink()
+                with (self.base / 'agents.lock').open('w') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    start = time.monotonic()
+                    result = self.command('wp-feishu-bot.py', 'info', '--refresh', launcher=launcher, timeout=2)
+                    self.assertLess(time.monotonic() - start, 2)
+                info = json.loads(result.stdout)
+                self.assertTrue(info['ok'])
+                self.assertEqual(info['bots'][0]['name'], 'fresh')
+                self.assertIsNone(info['bots'][0]['error'])
+                self.assertEqual(info['agents'][0]['id'], item['id'])
+                if existing:
+                    self.assertEqual(cache.read_bytes(), original)
+                else:
+                    self.assertFalse(cache.exists())
+        self.command('wp-feishu-bot.py', 'info', '--refresh', launcher=launcher)
+        self.assertEqual(json.loads(cache.read_text())['cli_sub']['name'], 'fresh')
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
     def test_cache_fetch_racing_delete_does_not_recreate_registration(self):
         item = self.create()
         self.config(self.directory(item), 'cli_sub')

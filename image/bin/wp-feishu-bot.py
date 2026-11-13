@@ -265,7 +265,7 @@ def info(refresh):
             bots.append(bot)
         if fetched:
             try:
-                with AGENTS['locked']() if agent_id != 'main' else nullcontext():
+                with AGENTS['locked'](blocking=False) if agent_id != 'main' else nullcontext():
                     if agent_id == 'main' or (run.parent / 'agent.json').is_file():
                         atomic_json(run / 'bot-cache.json', clean_cache)
             except OSError:
@@ -402,10 +402,15 @@ class Supervisor:
             pass
         self.child.wait()
         for channel in ('stdout', 'stderr'):
-            while self.read_output(channel):
-                pass
-            if self.pending[channel]:
-                self.parse_output(b'\n', channel)
+            try:
+                while self.read_output(channel):
+                    pass
+                if self.pending[channel]:
+                    self.parse_output(b'\n', channel)
+            except Exception:
+                # 子桥输出已坏时仍须关闭两个通道并回收进程，不能卡住独立退避。
+                if self.agent_id == 'main':
+                    raise
             stream = getattr(self.child, channel)
             try:
                 self.selector.unregister(stream)
@@ -577,6 +582,9 @@ class Supervisor:
                                     if bridge is self:
                                         raise
                                     warn(f'子助手 {bridge.agent_id} 消息桥输出异常（{type(error).__name__}）')
+                                    bridge.stop_child()
+                                    bridge.next_start = time.monotonic() + bridge.backoff
+                                    bridge.backoff = min(60, bridge.backoff * 2)
                     error_backoff = 1
                 except Exception as error:
                     # 不记录异常原文，避免桥日志或凭据进入额外诊断。

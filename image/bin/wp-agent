@@ -121,10 +121,10 @@ def notify(message):
 
 
 @contextmanager
-def locked():
+def locked(*, blocking=True):
     BASE.mkdir(mode=0o700, parents=True, exist_ok=True)
     with os.fdopen(os.open(BASE / 'agents.lock', os.O_CREAT | os.O_RDWR, 0o600), 'w') as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield
 
 
@@ -216,10 +216,14 @@ def stop_active_setup(directory):
     if (state.get('status') not in ('preparing', 'waiting')
             or type(expires) not in (int, float) or not expires > time.time()):
         return
-    pids = [pid for pid in (state.get('pid'), state.get('childPid')) if type(pid) is int and pid > 1]
-    for pid in pids:
+    pids = []
+    for pid in (state.get('pid'), state.get('childPid')):
+        if type(pid) is not int or pid <= 1 or pid in pids:
+            continue
         try:
-            os.killpg(pid, signal.SIGTERM)
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGTERM)
+                pids.append(pid)
         except ProcessLookupError:
             pass
     until = time.monotonic() + 2
@@ -233,7 +237,8 @@ def stop_active_setup(directory):
             time.sleep(0.05)
     for pid in pids:
         try:
-            os.killpg(pid, signal.SIGKILL)
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
 
@@ -396,7 +401,12 @@ def main():
     query.add_argument('--timeout', type=int, default=300)
     query.add_argument('--json', action='store_true')
     query.add_argument('message', nargs='?')
-    args = parser.parse_args()
+    # intermixed 不支持带子命令的解析器；先分派 ask，再解析它的交错选项和位置参数。
+    if sys.argv[1:2] == ['ask']:
+        args = query.parse_intermixed_args(sys.argv[2:])
+        args.command = 'ask'
+    else:
+        args = parser.parse_args()
     try:
         if args.command == 'ask':
             result = ask(args)
@@ -413,10 +423,7 @@ def main():
     except Exception as error:
         known = ('invalid_name', 'name_taken', 'limit_reached', 'not_found', 'main_agent',
                  'self_call', 'depth_exceeded', 'busy', 'timeout', 'failed')
-        if not isinstance(error, ValueError) or str(error) not in known:
-            print('{"ok":false,"error":"failed"}')
-            return 1
-        result = {'ok': False, 'error': str(error)}
+        result = {'ok': False, 'error': str(error) if isinstance(error, ValueError) and str(error) in known else 'failed'}
     if args.command == 'ask' and not args.json:
         if result['ok']:
             print(result['reply'])

@@ -93,10 +93,16 @@ def run(project, *, base=BASE, command='/opt/workpartner/bin/cc-connect',
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock = os.open(base / '.feishu-setup.lock', os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(lock, 'w') as locked:
-        try:
-            fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return
+        # 与 delete 串行化拿锁和首次登记，避免新 worker 持锁时仍暴露旧 PID。
+        with AGENTS['locked']() if AGENT_ID else nullcontext():
+            try:
+                fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            if AGENT_ID:
+                if not (base / 'agent.json').is_file() or CONFIG.is_file() or (base / 'pending-feishu.toml').exists():
+                    return
+                save({'status': 'preparing', 'expiresAt': time.time() + lifetime, 'pid': os.getpid()})
         refresh_agent(CONFIG)
         if CONFIG.is_file() or (base / 'pending-feishu.toml').exists():
             return
