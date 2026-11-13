@@ -66,18 +66,22 @@ wp_ensure_srv_directory
 wp_init_hooks
 
 cd /data/work
-trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
+bridge_supervisor_pid=''
+cleanup() {
+  local -a pids
+  mapfile -t pids < <(jobs -p)
+  if [ "${#pids[@]}" -gt 0 ]; then kill "${pids[@]}" 2>/dev/null || true; fi
+  if [ -n "$bridge_supervisor_pid" ]; then wait "$bridge_supervisor_pid" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
 AIONUI_PORT=${AIONUI_PORT:-25808}
 mark configured
 /opt/aionui/aionui-web start --static-dir /opt/aionui/static-wp --remote --port "$AIONUI_PORT" --no-open --data-dir /data/aionui-data &
 service_pids=("$!")
-# 消息桥：本人扫码建好机器人（生成 config.toml）之后才启动；没有就只跑网页版。
-# 它不依赖网页版，和网页版同时启动，更新重启时飞书尽早重新连上。
-if [ -f /data/.cc-connect/config.toml ]; then
-  /opt/workpartner/bin/cc-connect --config /data/.cc-connect/config.toml &
-  service_pids+=("$!")
-  mark bridge-started
-fi
+# 守护进程等待扫码配置落盘；消息桥退出只触发局部重启。
+python3 -I /opt/workpartner/bin/wp-feishu-bot.py supervise --started "${started:0:-6}.${started: -6}" &
+bridge_supervisor_pid=$!
 
 # 每次启动校正助手（只开 ChatGPT 和 Claude，ChatGPT 排第一；没有 Claude 权限就只开 ChatGPT），第一次还写中文和默认助手。
 # 失败不影响启动，下次启动重试。
