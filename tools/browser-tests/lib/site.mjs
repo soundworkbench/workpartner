@@ -5,6 +5,63 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// AionUI 2.1.47 composer shapes. Only the voice group installs this fixture.
+function voiceComposerFixture() {
+  window.__sent = 0; window.__voiceInputs = [];
+  const form = document.querySelector('#voice-composer');
+  form.addEventListener('submit', event => { event.preventDefault(); window.__sent++; });
+  const model = '<button type="button" class="wp-pick-btn">GPT-6.1 Sol Medium ▾</button>';
+  let multiline = false, stopping = false;
+  const sendSelector = '[data-testid="sendbox-send-btn"], [data-testid="guid-send-btn"], .sendbox-stop-button';
+  function sendMarkup(home) {
+    return stopping ? '<button type="button" class="sendbox-stop-button" aria-label="停止">■</button>'
+      : '<button type="submit" class="send-button-custom" data-testid="' + (home ? 'guid-send-btn' : 'sendbox-send-btn') + '" aria-label="发送">↑</button>';
+  }
+  function composer(preserveArea = false) {
+    const home = location.hash === '#/guid', mobile = innerWidth < 768;
+    const previous = preserveArea && form.querySelector('textarea');
+    const highlight = '<div class="sendbox-highlight-container"><textarea data-testid="sendbox-input" aria-label="消息"></textarea></div>';
+    const tools = '<div class="' + (mobile ? 'sendbox-tools sendbox-tools-mobile-compact' : 'sendbox-tools')
+      + '"><button type="button" data-testid="' + (mobile ? 'sendbox-mobile-plus-btn' : 'file-upload-btn') + '">+</button></div>';
+    if (home) {
+      form.innerHTML = '<div class="_guidInputInner_a19f2"><textarea data-testid="guid-input" aria-label="消息"></textarea>'
+        + '<div class="_actionRow_a19f2"><div class="_actionTools_a19f2"><div class="_actionEntry_a19f2">'
+        + '<button type="button" data-testid="file-upload-btn">+</button></div></div>'
+        + '<div class="_actionSubmit_a19f2">' + model + '<div class="_actionConfigGroup_a19f2"></div>' + sendMarkup(true) + '</div></div></div>';
+    } else if (mobile && !multiline) {
+      form.innerHTML = '<div class="sendbox-panel"><div class="flex items-center gap-2 w-full min-w-0 overflow-hidden">'
+        + tools + highlight + '<div class="flex items-center gap-2">' + sendMarkup(false) + '</div></div>'
+        + '<div class="wp-pick-row">' + model + '</div></div>';
+    } else {
+      form.innerHTML = '<div class="sendbox-panel"><div class="w-full overflow-hidden">' + highlight + '</div>'
+        + '<div class="flex items-center justify-between gap-2 w-full">' + tools
+        + '<div class="sendbox-actions flex items-center gap-2">' + model
+        + (mobile ? '' : '<button type="button" class="fixture-permission">权限</button>') + sendMarkup(false) + '</div></div></div>';
+    }
+    if (previous) { form.querySelector('textarea').replaceWith(previous); return; }
+    const area = form.querySelector('textarea'), native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+    let tracked = '';
+    Object.defineProperty(area, 'value', { get() { return native.get.call(this); }, set(value) { tracked = value; native.set.call(this, value); } });
+    area.addEventListener('input', () => { if (area.value !== tracked) { tracked = area.value; window.__voiceInputs.push(tracked); } });
+  }
+  window.__renderComposer = () => composer();
+  // Rebuild the send parent as React does; retain the textarea to exercise remounting for the same area.
+  window.__setComposerMultiline = value => { multiline = value; composer(true); };
+  window.__setComposerStopping = value => {
+    stopping = value;
+    form.querySelector(sendSelector).outerHTML = sendMarkup(location.hash === '#/guid');
+  };
+  // Deliberately insert after the microphone to exercise observer-driven order repair.
+  window.__insertComposerToken = () => {
+    const send = form.querySelector(sendSelector), token = document.createElement('span');
+    token.className = 'fixture-token'; token.textContent = '◔'; token.setAttribute('aria-label', 'Token 用量');
+    send.before(token);
+  };
+  addEventListener('hashchange', () => { multiline = false; stopping = false; composer(); });
+  addEventListener('resize', () => composer(true));
+  composer();
+}
+
 export function buildSite(repo, out, { voice = false } = {}) {
   const overlay = path.join(repo, 'image/rebrand/overlay');
   const brand = path.join(out, 'brand');
@@ -23,6 +80,14 @@ export function buildSite(repo, out, { voice = false } = {}) {
     .replace('  /* __WP_COPY__ */', read(brand, 'copy.js').trimEnd());
   // Fixture: the real chat module and styles come from the upstream bundle.
   js = js.replaceAll('__WP_CHAT_MODULE__', './assets/fixture-chat.js').replaceAll('__WP_CHAT_STYLES__', '[]');
+  // Voice layout tests supply a static long model label without upstream model APIs.
+  if (voice) {
+    const modelPickerSignature = 'function modelPicker() {';
+    if (!js.includes(modelPickerSignature)) {
+      throw new Error('wp-overlay.js 的 modelPicker 签名变了，语音夹具需要同步');
+    }
+    js = js.replace(modelPickerSignature, `${modelPickerSignature} if (document.querySelector("#voice-composer")) return;`);
+  }
   for (const file of ['wp-skills.js', 'wp-tools.js', 'wp-data-tools.js', 'wp-mcp-tools.js']) js += '\n' + read(overlay, file);
   js += '\n' + read(overlay, 'wp-slash-skills.js')
     .replace('__WP_SKILLS_ZH__', JSON.stringify(JSON.parse(read(repo, 'image/skills-zh.json'))));
@@ -72,14 +137,30 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       html.fixture-feishu-bot[data-theme="dark"] #root > main { background:var(--wp-main, #111); }
     </style>
     ${voice ? `<style>
-      #voice-composer { width:100%; max-width:680px; margin-top:32px; }
-      #voice-composer textarea { box-sizing:border-box; width:100%; min-height:80px; }
-      #voice-composer .sendbox-actions, #voice-composer .fixture-home-actions { display:flex; align-items:center; justify-content:flex-end; }
-      #voice-composer .sendbox-tools-mobile-compact { display:none; }
-      #voice-composer [data-testid="send"] { flex:0 0 auto; width:48px; height:32px; }
+      /* Transition clones retain the upstream class-based layout after their id is removed. */
+      :is(#voice-composer, .wp-transition-composer) { width:100%; max-width:680px; margin-top:32px; }
+      :is(#voice-composer, .wp-transition-composer) textarea { box-sizing:border-box; display:block; width:100%; min-width:0; height:80px; }
+      :is(#voice-composer, .wp-transition-composer) .flex { display:flex; }
+      :is(#voice-composer, .wp-transition-composer) .items-center { align-items:center; }
+      :is(#voice-composer, .wp-transition-composer) .gap-2 { gap:8px; }
+      :is(#voice-composer, .wp-transition-composer) .w-full { width:100%; }
+      :is(#voice-composer, .wp-transition-composer) .min-w-0 { min-width:0; }
+      :is(#voice-composer, .wp-transition-composer) .overflow-hidden { overflow:hidden; }
+      :is(#voice-composer, .wp-transition-composer) .justify-between { justify-content:space-between; }
+      :is(#voice-composer, .wp-transition-composer) .sendbox-highlight-container { flex:1; min-width:0; }
+      :is(#voice-composer, .wp-transition-composer) .sendbox-panel > .flex > .sendbox-highlight-container textarea { height:36px; }
+      :is(#voice-composer, .wp-transition-composer) .sendbox-tools { display:flex; flex-shrink:0; }
+      :is(#voice-composer, .wp-transition-composer) .send-button-custom, :is(#voice-composer, .wp-transition-composer) .sendbox-stop-button,
+      :is(#voice-composer, .wp-transition-composer) [data-testid="file-upload-btn"], :is(#voice-composer, .wp-transition-composer) [data-testid="sendbox-mobile-plus-btn"] { flex:0 0 auto; width:32px; height:32px; }
+      :is(#voice-composer, .wp-transition-composer) .fixture-token { flex:0 0 20px; width:20px; text-align:center; }
+      :is(#voice-composer, .wp-transition-composer) [class*="_actionRow_"] { display:flex; justify-content:space-between; align-items:flex-end; gap:8px; }
+      :is(#voice-composer, .wp-transition-composer) [class*="_actionTools_"] { display:inline-flex; overflow-x:auto; }
+      :is(#voice-composer, .wp-transition-composer) [class*="_actionSubmit_"] { display:flex; gap:6px; margin-left:auto; }
+      @media(max-width:768px) {
+        :is(#voice-composer, .wp-transition-composer) [class*="_actionTools_"] { flex:1 1 auto; }
+        :is(#voice-composer, .wp-transition-composer) [class*="_actionSubmit_"] { flex-shrink:0; margin-left:8px; }
+      }
       @media(max-width:767px) {
-        #voice-composer .sendbox-actions { display:none; }
-        #voice-composer .sendbox-tools-mobile-compact { display:flex; justify-content:flex-end; align-items:center; }
         #root > aside { display:none !important; }
         #root > main { padding:16px !important; }
       }
@@ -107,11 +188,7 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
           <input id="fixture-input" type="text" placeholder="state probe" style="box-sizing:border-box;max-width:100%" />
         </div>
         <a id="fixture-market" href="#/market">market</a>
-        ${voice ? `<form id="voice-composer"><div class="sendbox-panel">
-          <textarea data-testid="sendbox-input" aria-label="消息"></textarea>
-          <div class="sendbox-actions"><button type="submit" data-testid="send">发送</button></div>
-          <div class="sendbox-tools-mobile-compact"></div>
-        </div></form>` : ''}
+        ${voice ? '<form id="voice-composer"></form>' : ''}
       </main>
     </div>
     <script>
@@ -119,24 +196,7 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       window.__routes = [];
       function showRoute() { document.getElementById('fixture-route').textContent = 'route=' + location.hash; window.__routes.push(location.href); }
       addEventListener('hashchange', showRoute); showRoute();
-      ${voice ? `
-      window.__sent = 0; window.__voiceInputs = [];
-      const form = document.querySelector('#voice-composer');
-      form.addEventListener('submit', event => { event.preventDefault(); window.__sent++; });
-      function composer() {
-        const home = location.hash === '#/guid';
-        form.innerHTML = home
-          ? '<div class="fixture_guidInputInner"><textarea data-testid="guid-input" aria-label="消息"></textarea><div class="fixture-home-actions"><button class="fixture_actionSubmit" type="submit" data-testid="send">发送</button></div></div>'
-          : '<div class="sendbox-panel"><textarea data-testid="sendbox-input" aria-label="消息"></textarea><div class="sendbox-actions"><button type="submit" data-testid="send">发送</button></div><div class="sendbox-tools-mobile-compact"></div></div>';
-        const area = form.querySelector('textarea'), native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
-        let tracked = '';
-        Object.defineProperty(area, 'value', { get() { return native.get.call(this); }, set(value) { tracked = value; native.set.call(this, value); } });
-        area.addEventListener('input', () => { if (area.value !== tracked) { tracked = area.value; window.__voiceInputs.push(tracked); } });
-        if (!home && innerWidth < 768) form.querySelector('.sendbox-tools-mobile-compact').append(form.querySelector('[data-testid="send"]'));
-      }
-      window.__renderComposer = composer;
-      addEventListener('hashchange', composer); composer();
-      ` : ''}
+      ${voice ? '(' + voiceComposerFixture.toString() + ')();' : ''}
     </script>
   </body>
 </html>
