@@ -62,7 +62,7 @@ function voiceComposerFixture() {
   composer();
 }
 
-export function buildSite(repo, out, { voice = false } = {}) {
+export function buildSite(repo, out, { voice = false, feishuNav = false } = {}) {
   const overlay = path.join(repo, 'image/rebrand/overlay');
   const brand = path.join(out, 'brand');
   const site = path.join(out, 'static');
@@ -129,8 +129,12 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Fixture</title>
     <style>
+      .fixture-titlebar { display:none; }
       @media(max-width:767px) {
-        html.fixture-feishu-bot #root > aside { display:none !important; }
+        html.fixture-feishu-bot #root > aside { position:fixed; z-index:100; top:44px; bottom:0; height:calc(100dvh - 44px); transform:translateX(-100%); background:var(--wp-main, #fff); }
+        html.fixture-feishu-bot.fixture-drawer-open #root > aside { transform:translateX(0); }
+        html.fixture-feishu-bot .fixture-titlebar { display:flex; height:44px; }
+        html.fixture-feishu-bot #root { height:calc(100dvh - 44px) !important; }
         html.fixture-feishu-bot #root > main { padding:16px !important; }
       }
       html.fixture-feishu-bot [class*="_guidContainer_"] { display:flex; flex-direction:column; justify-content:center; height:100%; min-height:100%; overflow:hidden; }
@@ -175,14 +179,18 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
     <script src="./wp-feishu.js?v=test"></script>
   </head>
   <body style="margin:0">
+    ${feishuNav ? '<header class="fixture-titlebar app-titlebar--mobile"><div class="app-titlebar__menu"><button class="app-titlebar__button" aria-label="展开侧栏">☰</button></div></header>' : ''}
     <div id="root" style="display:flex;height:100vh;overflow:hidden">
       <aside class="arco-layout-sider layout-sider" style="width:240px;flex:none;display:flex;flex-direction:column">
         <div class="arco-layout-sider-children" style="display:flex;flex-direction:column;height:100%">
           <header class="arco-layout-header" style="height:40px"></header>
-          <div class="fixture-scroll-area" style="flex:1;overflow:auto"></div>
+          ${feishuNav ? '<main class="arco-layout-content layout-sider-content" style="display:flex;flex-direction:column;flex:1;min-height:0">' : ''}
+          ${feishuNav ? '<div class="fixture-new-row"><button class="_newChatTrigger_fixture_" type="button">新对话</button></div>' : ''}
+          <div class="fixture-scroll-area" style="flex:1;overflow:auto">${feishuNav ? '<a class="chat-history__item" href="#/conversation/fixture">测试会话</a>' : ''}</div>
+          ${feishuNav ? '</main>' : ''}
         </div>
       </aside>
-      <main style="flex:1;min-width:0;box-sizing:border-box;padding:24px;overflow:hidden">
+      <main class="layout-content" style="flex:1;min-width:0;box-sizing:border-box;padding:24px;overflow:hidden">
         <h1 id="fixture-route" style="font-size:16px;overflow-wrap:anywhere">route</h1>
         <div id="fixture-input-container" style="box-sizing:border-box;max-width:100%;padding:12px;border:1px solid #ddd;border-radius:12px">
           <input id="fixture-input" type="text" placeholder="state probe" style="box-sizing:border-box;max-width:100%" />
@@ -194,8 +202,19 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
     <script>
       // Fixture router: shows the current hash and records every URL it is asked to route.
       window.__routes = [];
-      function showRoute() { document.getElementById('fixture-route').textContent = 'route=' + location.hash; window.__routes.push(location.href); }
-      addEventListener('hashchange', showRoute); showRoute();
+      function showRoute() {
+        ${feishuNav ? `// Match the real HashRouter: queries do not participate in path matching; '*' replaces unknown routes.
+        const pathname = location.hash.slice(1).split('?')[0];
+        if (!/^\\/(guid|market|scheduled(?:\\/[^/]+)?|conversation\\/[^/]+)$/.test(pathname)) location.replace('#/guid');` : ''}
+        document.getElementById('fixture-route').textContent = 'route=' + location.hash; window.__routes.push(location.href);
+      }
+      ${feishuNav ? `
+      document.documentElement.classList.add('fixture-feishu-bot');
+      document.querySelector('.app-titlebar__button').onclick = () => document.documentElement.classList.toggle('fixture-drawer-open');
+      document.querySelector('._newChatTrigger_fixture_').onclick = () => { history.pushState(null, '', '#/guid'); dispatchEvent(new PopStateEvent('popstate')); };
+      window.wpConversationSearch = async () => ({ items: [], total: 0 });
+      ` : ''}
+      addEventListener('hashchange', showRoute); ${feishuNav ? "addEventListener('popstate', showRoute);" : ''} showRoute();
       ${voice ? '(' + voiceComposerFixture.toString() + ')();' : ''}
     </script>
   </body>

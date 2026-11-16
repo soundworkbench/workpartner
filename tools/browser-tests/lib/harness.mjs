@@ -172,7 +172,7 @@ export async function createHarness(group) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-browser-tests-'));
   const logs = path.join(outputRoot, 'logs');
   fs.mkdirSync(logs, { recursive: true });
-  const staticDir = buildSite(repo, path.join(work, 'site'), { voice: group === 'voice' });
+  const staticDir = buildSite(repo, path.join(work, 'site'), { voice: group === 'voice', feishuNav: group === 'feishu-bot' || group === 'feishu-subagents' });
   const { organizationData, nextModelConfig } = await import(pathToFileURL(path.join(repo, 'gateway/organization/resolve.mjs')).href);
   const sessionKey = crypto.randomBytes(24).toString('hex');
   const gateways = [];
