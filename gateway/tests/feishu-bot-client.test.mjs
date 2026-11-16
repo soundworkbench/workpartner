@@ -8,12 +8,19 @@ function homeDocument() {
   let document;
   class Element {
     constructor(tag) {
-      this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {}; this.dataset = {};
+      this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {};
+      this.dataset = new Proxy({}, { set: (target, key, value) => { target[key] = String(value); this.attributes['data-' + String(key).replace(/[A-Z]/g, letter => '-' + letter.toLowerCase())] = String(value); return true; } });
       this.listeners = {}; this.className = ''; this.style = {};
+      this.classList = { contains: name => this.className.split(' ').includes(name),
+        toggle: (name, force) => { const has = this.classList.contains(name), next = force === undefined ? !has : force;
+          if (next && !has) this.className = (this.className + ' ' + name).trim();
+          if (!next && has) this.className = this.className.split(' ').filter(value => value !== name).join(' '); return next; } };
     }
     setAttribute(key, value) { this.attributes[key] = value; }
+    getAttribute(key) { return this.attributes[key] ?? null; }
     removeAttribute(key) { delete this.attributes[key]; }
     get isConnected() { return this === document.body || Boolean(this.parentElement?.isConnected); }
+    get previousElementSibling() { const siblings = this.parentElement?.children || []; return siblings[siblings.indexOf(this) - 1]; }
     get nextElementSibling() { const siblings = this.parentElement?.children || []; return siblings[siblings.indexOf(this) + 1]; }
     get textContent() { return this.text || this.children.map(child => child.textContent).join(''); }
     set textContent(value) { this.text = value; this.replaceChildren(); }
@@ -42,6 +49,10 @@ function homeDocument() {
     matches(selectors) {
       return selectors.split(',').some(value => {
         const selector = value.trim();
+        const descendant = selector.match(/^(.+) ([^ ]+)$/);
+        if (descendant) return this.matches(descendant[2]) && Boolean(this.parentElement?.closest(descendant[1]));
+        const compound = selector.match(/^([a-z][a-z0-9-]*)\.([\w-]+)$/i);
+        if (compound) return this.tagName === compound[1].toUpperCase() && this.classList.contains(compound[2]);
         if (selector.startsWith('.')) return this.className.split(' ').includes(selector.slice(1));
         if (selector.startsWith('[')) {
           const match = selector.match(/^\[([^=\]]+)(?:="([^"]*)")?\]$/);
@@ -56,6 +67,8 @@ function homeDocument() {
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
     closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector); }
     addEventListener(type, callback) { (this.listeners[type] ??= []).push(callback); }
+    click() { return this.fire('click'); }
+    getBoundingClientRect() { return { right: 240 }; }
     focus() { document.activeElement = this; }
     showModal() { this.open = true; }
     close() { this.open = false; this.fire('close'); }
@@ -71,16 +84,41 @@ function homeDocument() {
   return document;
 }
 
-function page({ home = false, clipboardFails = false, reconnectResponse, responseData, handleRequest } = {}) {
-  const timers = new Map(), frames = new Map(), listeners = {}, requests = [], tags = [], copied = [];
+function page({ home = false, agentsNav = false, route = '#/guid', width = 390, mobileTitlebar = false, clipboardFails = false, reconnectResponse, responseData, handleRequest } = {}) {
+  const timers = new Map(), frames = new Map(), listeners = {}, windowListeners = {}, requests = [], tags = [], copied = [];
   let mutation, disconnected = false;
   let nextTimer = 0, status = 200;
-  const document = home ? homeDocument() : { head: { append() {} }, body: {},
+  const document = home || agentsNav ? homeDocument() : { head: { append() {} }, body: {},
     createElement: tag => { tags.push(tag); return { remove() {} }; }, querySelector: () => null, querySelectorAll: () => [] };
   Object.assign(document, { hidden: false, readyState: 'complete',
     addEventListener: (name, callback) => { listeners[name] = callback; },
     removeEventListener: name => { delete listeners[name]; } });
-  const context = vm.createContext({ document, window: { addEventListener() {}, removeEventListener() {} },
+  if (agentsNav) {
+    const aside = document.createElement('aside'); aside.className = 'layout-sider';
+    const siderContent = document.createElement('main'); siderContent.className = 'arco-layout-content layout-sider-content';
+    const nav = document.createElement('div'); nav.className = 'wp-nav';
+    const market = document.createElement('div'); market.className = 'wp-nav-row'; market.dataset.wpNav = 'market';
+    nav.append(document.createElement('div'), document.createElement('div'), market);
+    siderContent.append(nav); aside.append(siderContent); document.body.append(aside);
+  }
+  if (home || agentsNav) {
+    const main = document.createElement('main'); main.className = 'layout-content'; document.body.append(main);
+  }
+  let drawerClicks = 0;
+  if (mobileTitlebar) {
+    const titlebar = document.createElement('header'); titlebar.className = 'app-titlebar--mobile';
+    const menu = document.createElement('div'); menu.className = 'app-titlebar__menu';
+    const toggle = document.createElement('button'); toggle.className = 'app-titlebar__button';
+    toggle.addEventListener('click', () => { drawerClicks++; }); menu.append(toggle); titlebar.append(menu); document.body.append(titlebar);
+  }
+  const historyEntries = [route];
+  const location = { get hash() { return historyEntries.at(-1); }, set hash(hash) { historyEntries.push(hash); },
+    replace(hash) { historyEntries[historyEntries.length - 1] = hash; } };
+  const history = { state: { idx: 1 }, replaceState(state, _, hash) { this.state = state; location.replace(hash); },
+    pushState(state, _, hash) { this.state = state; location.hash = hash; } };
+  const context = vm.createContext({ document, URLSearchParams, location, history, innerWidth: width, innerHeight: 844,
+    window: { location, addEventListener: (name, callback) => { windowListeners[name] = callback; },
+      removeEventListener: name => { delete windowListeners[name]; } },
     MutationObserver: class { constructor(callback) { mutation = callback; } observe() {} disconnect() { disconnected = true; } },
     requestAnimationFrame: callback => { const id = ++nextTimer; frames.set(id, callback); return id; },
     cancelAnimationFrame: id => frames.delete(id),
@@ -94,10 +132,11 @@ function page({ home = false, clipboardFails = false, reconnectResponse, respons
       if (handleRequest) { const response = await handleRequest(url, options); if (response) return response; }
       if (url.endsWith('/reconnect') && reconnectResponse) return reconnectResponse;
       return { status, ok: status === 200,
-      json: async () => responseData || ({ bots: home ? [{ appId: 'cli_Test', name: '助手', online: 'online', openUrl: '#' }] : [] }) }; },
+      json: async () => responseData || ({ bots: home ? [{ appId: 'cli_Test', name: '智能体', online: 'online', openUrl: '#' }] : [] }) }; },
   });
   vm.runInContext(feishuBotClient(), context);
-  return { timers, frames, requests, tags, copied, document, listeners, mutate: () => mutation(), disconnected: () => disconnected, status: value => { status = value; } };
+  return { timers, frames, requests, tags, copied, document, location, history, historyEntries, listeners, windowListeners,
+    drawerClicks: () => drawerClicks, mutate: () => mutation(), disconnected: () => disconnected, status: value => { status = value; } };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 async function tick(p, delay) {
@@ -148,8 +187,89 @@ test('mutation bursts coalesce to one frame and revocation cancels queued mounts
   assert.equal(p.frames.size, 0); assert.equal(p.disconnected(), true);
 });
 
+test('agents nav follows market, opens the cards page and is removed on revocation', async () => {
+  const p = page({ home: true, agentsNav: true, route: '#/guid' }); await settle();
+  const nav = p.document.querySelector('.wp-nav');
+  assert.deepEqual(nav.children.map(child => child.dataset.wpNav || null), [null, null, 'market', 'agents']);
+  const row = nav.querySelector('[data-wp-nav="agents"]');
+  assert.equal(row.textContent, '智能体');
+  assert.equal(row.querySelector('svg').attributes['stroke-width'], '1.3');
+  await row.fire('click'); await settle();
+  assert.equal(p.location?.hash, '#/guid?wp=agents');
+  assert.equal(row.className.includes('wp-active'), true);
+  assert.equal(row.attributes['aria-current'], 'page');
+  assert.equal(p.document.querySelector('main').className, 'arco-layout-content layout-sider-content');
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section').parentElement, p.document.querySelector('main.layout-content'));
+  assert.equal(p.document.querySelector('main.layout-sider-content').querySelector('.wp-feishu-bot-section'), null);
+  assert.equal(nav.isConnected, true);
+  const css = p.document.head.querySelector('style').textContent;
+  assert.match(css, /main\.layout-content:has\(> \.wp-feishu-bot-section\) > :not\(\.wp-feishu-bot-section\) \{ visibility:hidden; \}/);
+  assert.doesNotMatch(css, /(?:^|\n)main:has/);
+  await p.mutate(); const callback = [...p.frames.values()][0]; p.frames.clear(); await callback();
+  assert.equal(nav.querySelectorAll('[data-wp-nav="agents"]').length, 1);
+  p.status(404); await tick(p, 60000);
+  assert.equal(p.document.querySelector('[data-wp-nav="agents"]'), null);
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section'), null);
+  assert.equal(p.location.hash, '#/guid');
+  assert.equal(p.windowListeners.popstate, undefined);
+});
+
+for (const route of ['#/guid', '#/conversation/example']) test(`no cards on ${route}`, async () => {
+  const p = page({ home: true, route }); await settle();
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section'), null);
+});
+
+test('sidebar rebuild restores one entry, and entering by keyboard opens the panel', async () => {
+  const p = page({ home: true, agentsNav: true }); await settle();
+  p.document.querySelector('.wp-nav').remove();
+  const nav = p.document.createElement('div'); nav.className = 'wp-nav';
+  const market = p.document.createElement('div'); market.dataset.wpNav = 'market';
+  nav.append(market); p.document.body.append(nav);
+  await p.mutate(); const mount = [...p.frames.values()][0]; p.frames.clear(); await mount();
+  const row = nav.querySelector('[data-wp-nav="agents"]');
+  assert.equal(row.previousElementSibling, market);
+  assert.equal(nav.querySelectorAll('[data-wp-nav="agents"]').length, 1);
+  await row.fire('keydown', { key: 'Enter' });
+  assert.equal(p.location.hash, '#/guid?wp=agents');
+  assert.ok(p.document.querySelector('.wp-feishu-bot-section'));
+});
+
+for (const [type, key] of [['click'], ['keydown', 'Enter']]) test(`sidebar ${type} closes panel and modal for in-place search`, async () => {
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload() }); await settle();
+  await p.document.querySelector('.wp-feishu-bot-add').fire('click');
+  assert.ok(p.document.querySelector('dialog'));
+  await p.listeners[type]({ type, key, target: { closest: () => ({ dataset: { wpNav: 'search' } }) } });
+  assert.equal(p.location.hash, '#/guid');
+  assert.deepEqual(p.historyEntries, ['#/guid'], 'dismissal replaces the agents entry without pushing an intermediate route');
+  assert.deepEqual(p.history.state, { idx: 1 }, 'router history state is preserved');
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section'), null);
+  assert.equal(p.document.querySelector('dialog'), null);
+  assert.equal([...p.timers.values()].some(timer => timer.delay === 2000), false);
+});
+
+for (const width of [390, 1024]) test(`mobile titlebar closes the drawer at ${width}px`, async () => {
+  const p = page({ home: true, agentsNav: true, mobileTitlebar: true, width }); await settle();
+  await p.document.querySelector('[data-wp-nav="agents"]').fire('click');
+  assert.equal(p.drawerClicks(), 1);
+  assert.ok(p.document.querySelector('.wp-feishu-bot-section'));
+});
+
+for (const event of ['popstate', 'mutation']) test(`${event} mounts against the current hash after pushState`, async () => {
+  const p = page({ home: true, agentsNav: true, route: '#/guid?wp=agents' }); await settle();
+  const schedule = () => event === 'popstate' ? p.windowListeners.popstate() : p.mutate();
+  const frame = async () => { const callbacks = [...p.frames.values()]; p.frames.clear(); for (const callback of callbacks) await callback(); };
+  p.history.pushState(null, '', '#/guid'); await schedule(); await frame();
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section'), null);
+  assert.equal(p.document.querySelector('[data-wp-nav="agents"]').getAttribute('aria-current'), null);
+  p.history.pushState(null, '', '#/guid?wp=agents'); await schedule(); await frame();
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section').parentElement, p.document.querySelector('main.layout-content'));
+  // Coalesced frames must use the latest URL, not the one at scheduling time.
+  await schedule(); p.history.pushState(null, '', '#/conversation/example'); await frame();
+  assert.equal(p.document.querySelector('.wp-feishu-bot-section'), null);
+});
+
 test('copy then Escape then reconnect survives native focusout before the next button receives focus', async () => {
-  const p = page({ home: true }); await settle();
+  const p = page({ home: true, route: '#/guid?wp=agents' }); await settle();
   const find = text => p.document.querySelectorAll('button').find(button => button.textContent === text);
   const click = text => find(text).fire('click');
   await click('…'); await click('复制 App ID');
@@ -198,7 +318,7 @@ test('copy then Escape then reconnect survives native focusout before the next b
 });
 
 test('closing with the trigger or revoking admission removes the outside pointer listener', async () => {
-  const p = page({ home: true }); await settle();
+  const p = page({ home: true, route: '#/guid?wp=agents' }); await settle();
   const more = p.document.querySelector('.wp-feishu-bot-more');
   await more.fire('click'); assert.equal(typeof p.listeners.pointerdown, 'function');
   await more.fire('click'); assert.equal(p.listeners.pointerdown, undefined);
@@ -209,7 +329,7 @@ test('closing with the trigger or revoking admission removes the outside pointer
 });
 
 test('clipboard rejection shows the failure toast and expires after three seconds', async () => {
-  const p = page({ home: true, clipboardFails: true }); await settle();
+  const p = page({ home: true, route: '#/guid?wp=agents', clipboardFails: true }); await settle();
   await p.document.querySelector('.wp-feishu-bot-more').fire('click');
   await p.document.querySelector('.wp-feishu-bot-menu').querySelector('button').fire('click');
   assert.deepEqual(p.copied, []);
@@ -219,7 +339,7 @@ test('clipboard rejection shows the failure toast and expires after three second
 });
 
 test('background failures mark data stale silently; only manual refresh failure notifies', async () => {
-  const p = page({ home: true }); await settle();
+  const p = page({ home: true, route: '#/guid?wp=agents' }); await settle();
   const stale = p.document.querySelector('.wp-feishu-bot-stale'), message = p.document.querySelector('.wp-feishu-bot-message');
   assert.equal(stale.hidden, true);
   p.status(503); await tick(p, 60000);
@@ -228,7 +348,7 @@ test('background failures mark data stale silently; only manual refresh failure 
   assert.equal(stale.hidden, false); assert.equal(message.textContent, '');
   assert.equal([...p.timers.values()].some(timer => timer.delay === 3000), false);
   await p.document.querySelector('.wp-feishu-bot-header').querySelector('button').fire('click');
-  assert.equal(message.textContent, '暂时无法读取机器人信息，请稍后刷新。');
+  assert.equal(message.textContent, '暂时无法读取飞书应用信息，请稍后刷新。');
   assert.equal(p.requests.at(-1).url, '/_wp/feishu-bot/bots?refresh=1');
   await tick(p, 3000); assert.equal(message.textContent, '');
   p.status(200); await tick(p, 60000); assert.equal(stale.hidden, true);
@@ -237,7 +357,7 @@ test('background failures mark data stale silently; only manual refresh failure 
 for (const status of [200, 503]) test(`reconnect progress stays until the request ends (${status})`, async () => {
   let finish;
   const reconnectResponse = new Promise(resolve => { finish = resolve; });
-  const p = page({ home: true, reconnectResponse }); await settle();
+  const p = page({ home: true, route: '#/guid?wp=agents', reconnectResponse }); await settle();
   const click = text => p.document.querySelectorAll('button').find(button => button.textContent === text).fire('click');
   await click('…'); await click('复制 App ID'); // An earlier toast timer must be cancelled.
   await click('…'); await click('重新连接');
@@ -261,21 +381,21 @@ test('safe mount callbacks contain DOM errors without stopping refresh', async (
   assert.deepEqual([...p.timers.values()].map(t => t.delay), [60000]);
 });
 
-const main = { agentId: 'main', appId: 'cli_Main', name: '主机器人', online: 'online', openUrl: 'https://example.test/main' };
-const agent = (id, setup = 'none') => ({ id: 's0000000' + id, kind: 'sub', name: '助手' + id, setup, appId: null });
-const payload = () => ({ bots: [main, { ...main, agentId: 's00000001', appId: 'cli_Sub', name: '子机器人' }],
+const main = { agentId: 'main', appId: 'cli_Main', name: '主飞书应用', online: 'online', openUrl: 'https://example.test/main' };
+const agent = (id, setup = 'none') => ({ id: 's0000000' + id, kind: 'sub', name: '智能体' + id, setup, appId: null });
+const payload = () => ({ bots: [main, { ...main, agentId: 's00000001', appId: 'cli_Sub', name: '子飞书应用' }],
   agents: [agent(1, 'connected'), agent(2, 'waiting'), agent(3, 'needs_identity'), agent(4)], subAgents: { enabled: true, limit: 5, count: 4 } });
 const findButton = (root, text) => root.querySelectorAll('button').find(b => b.textContent === text);
 const jsonResponse = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
 const submit = root => root.querySelector('form').fire('submit', { preventDefault() {} });
 
 test('sub-agent cards follow main, label kinds and expose only appropriate actions', async () => {
-  const p = page({ home: true, responseData: payload() }); await settle();
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload() }); await settle();
   const cards = p.document.querySelectorAll('.wp-feishu-bot-card');
-  assert.deepEqual(cards.map(c => c.querySelector('h3').textContent), ['主机器人', '助手1', '助手2', '助手3', '助手4']);
-  assert.deepEqual(cards.map(c => c.querySelector('.wp-feishu-bot-tag').textContent), ['主助手', '子助手', '子助手', '子助手', '子助手']);
-  assert.match(cards[1].querySelector('.wp-feishu-bot-summary').textContent, /飞书机器人：子机器人 · App ID cli_Sub/);
-  assert.equal(cards[2].querySelector('.wp-feishu-bot-avatar').textContent, '助');
+  assert.deepEqual(cards.map(c => c.querySelector('h3').textContent), ['主飞书应用', '智能体1', '智能体2', '智能体3', '智能体4']);
+  assert.deepEqual(cards.map(c => c.querySelector('.wp-feishu-bot-tag').textContent), ['主智能体', '智能体', '智能体', '智能体', '智能体']);
+  assert.match(cards[1].querySelector('.wp-feishu-bot-summary').textContent, /飞书：子飞书应用 · App ID cli_Sub/);
+  assert.equal(cards[2].querySelector('.wp-feishu-bot-avatar').textContent, '智');
   assert.deepEqual(cards.slice(2).map(c => c.querySelector('.wp-feishu-bot-state').textContent), ['等待扫码', '待管理员完成连接', '还没连接飞书']);
   assert.deepEqual(cards.slice(2).map(c => c.querySelector('.wp-feishu-bot-summary').textContent), ['等待扫码', '待管理员完成连接', '还没连接飞书']);
   for (const card of cards.slice(2)) {
@@ -298,33 +418,33 @@ test('sub-agent cards follow main, label kinds and expose only appropriate actio
 test('add card supports open, full, unavailable and empty states without changing legacy hint', async () => {
   for (const enabled of [true, false]) for (const count of [1, 5]) {
     const data = payload(); data.subAgents = { enabled, count, limit: 5 };
-    const p = page({ home: true, responseData: data }); await settle();
+    const p = page({ home: true, route: '#/guid?wp=agents', responseData: data }); await settle();
     const add = p.document.querySelector('.wp-feishu-bot-add');
-    assert.equal(add.attributes['aria-label'], enabled ? '新建子助手' : '连接飞书机器人');
+    assert.equal(add.attributes['aria-label'], enabled ? '新建智能体' : '连接飞书');
     assert.equal(add.disabled, enabled && count === 5);
     if (add.disabled) {
       assert.equal(add.attributes['aria-describedby'], 'wp-feishu-bot-add-hint');
-      assert.equal(add.querySelector('small').textContent, '子助手最多 5 个（主助手另算），删掉不用的再建');
+      assert.equal(add.querySelector('small').textContent, '智能体最多 5 个（主智能体另算），删掉不用的再建');
     } else {
       await add.fire('click');
-      if (enabled) assert.equal(p.document.querySelector('dialog').querySelector('h2').textContent, '新建子助手');
-      else assert.equal(p.document.querySelector('.wp-feishu-bot-message').textContent, '一个工作伙伴暂时只能连一个飞书机器人，多个子助手的功能做好后开放');
+      if (enabled) assert.equal(p.document.querySelector('dialog').querySelector('h2').textContent, '新建智能体');
+      else assert.equal(p.document.querySelector('.wp-feishu-bot-message').textContent, '一个工作伙伴暂时只能连接一个飞书应用，更多智能体功能暂未开放');
     }
   }
-  const p = page({ home: true, responseData: { bots: [], agents: [], subAgents: { enabled: true, count: 0, limit: 5 } } }); await settle();
-  assert.equal(p.document.querySelector('.wp-feishu-bot-add').attributes['aria-label'], '连接飞书机器人');
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: { bots: [], agents: [], subAgents: { enabled: true, count: 0, limit: 5 } } }); await settle();
+  assert.equal(p.document.querySelector('.wp-feishu-bot-add').attributes['aria-label'], '连接飞书');
 });
 
 test('new name validates instantly and create transitions the same dialog to polling and connected', async () => {
   const data = payload(); let setup = 'waiting';
-  const p = page({ home: true, responseData: data, handleRequest: (url, options) => {
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: data, handleRequest: (url, options) => {
     if (url.endsWith('/agents')) return jsonResponse({ agent: agent(5, 'preparing') }, 201);
     if (url.endsWith('/setup')) return jsonResponse({ status: setup, qr: 'data:image/png;base64,YQ==' });
   } }); await settle();
   await p.document.querySelector('.wp-feishu-bot-add').fire('click');
   const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
   assert.equal(p.document.activeElement, input);
-  const next = findButton(dialog, '下一步：扫码创建机器人');
+  const next = findButton(dialog, '下一步：扫码创建飞书应用');
   assert.equal(next.disabled, true);
   assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, '');
   assert.equal(input.attributes['aria-invalid'], undefined);
@@ -332,7 +452,7 @@ test('new name validates instantly and create transitions the same dialog to pol
   assert.equal(input.attributes['aria-invalid'], 'true');
   assert.match(dialog.querySelector('.wp-feishu-bot-input-error').textContent, /最多 16 个字/);
   assert.equal(p.requests.some(r => r.options.method === 'POST'), false);
-  for (const value of ['主助手', 'mAIN', 'a  b', '字'.repeat(17), 'emoji😀', '']) {
+  for (const value of ['\u4e3b\u52a9\u624b', 'mAIN', 'a  b', '字'.repeat(17), 'emoji😀', '']) {
     input.value = value; await input.fire('input'); assert.equal(next.disabled, true);
     assert.equal(input.attributes['aria-invalid'], 'true');
     assert.match(dialog.querySelector('.wp-feishu-bot-input-error').textContent, /最多 16 个字/);
@@ -342,19 +462,19 @@ test('new name validates instantly and create transitions the same dialog to pol
   assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, '');
   await submit(dialog); await settle();
   assert.equal(p.document.querySelector('dialog'), dialog);
-  assert.equal(dialog.querySelector('h2').textContent, '给「助手5」创建飞书机器人');
+  assert.equal(dialog.querySelector('h2').textContent, '给「智能体5」创建飞书应用');
   assert.equal(dialog.querySelector('img').src, 'data:image/png;base64,YQ==');
   assert.equal(p.requests.find(r => r.url.endsWith('/agents')).options.body, '{"name":"中文 Agent_·-1"}');
   assert.equal(p.requests.find(r => r.url.endsWith('/setup')).options.method, 'GET');
   setup = 'connected'; await tick(p, 2000);
-  assert.match(dialog.textContent, /已连接，可以在飞书里找「助手5」了/);
+  assert.match(dialog.textContent, /已连接，可以在飞书里找「智能体5」了/);
   assert.equal([...p.timers.values()].some(t => t.delay === 2000), false);
   assert.ok(p.requests.filter(r => r.url.endsWith('/bots')).length >= 3);
 });
 
 test('setup pauses hidden, resumes visible, and stops on close including inflight response', async () => {
   let finish;
-  const p = page({ home: true, responseData: payload(), handleRequest: url => {
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: url => {
     if (!url.endsWith('/setup')) return;
     if (finish === 'pending') return new Promise(resolve => { finish = resolve; });
     return jsonResponse({ status: 'waiting' });
@@ -375,7 +495,7 @@ test('setup pauses hidden, resumes visible, and stops on close including infligh
 
 for (const terminal of ['none', 'expired', 'failed']) test(`setup ${terminal} stops polling until retry, and needs_identity polls every ten seconds`, async () => {
   let setup = terminal;
-  const p = page({ home: true, responseData: payload(), handleRequest: url =>
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: url =>
     url.endsWith('/setup') ? jsonResponse({ status: setup }) : undefined }); await settle();
   await findButton(p.document, '扫码连接').fire('click'); await settle();
   const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
@@ -403,13 +523,13 @@ for (const terminal of ['none', 'expired', 'failed']) test(`setup ${terminal} st
 
 test('create and rename reject reserved agent-id names locally and allow near matches', async () => {
   for (const rename of [false, true]) {
-    const p = page({ home: true, responseData: payload() }); await settle();
+    const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload() }); await settle();
     if (rename) {
       const card = p.document.querySelectorAll('.wp-feishu-bot-card')[1];
       await findButton(card, '…').fire('click'); await findButton(card, '改名').fire('click');
     } else await p.document.querySelector('.wp-feishu-bot-add').fire('click');
     const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
-    const save = findButton(dialog, rename ? '保存' : '下一步：扫码创建机器人');
+    const save = findButton(dialog, rename ? '保存' : '下一步：扫码创建飞书应用');
     for (const value of ['s1234abcd', 'S1234ABCD', 'sAbCd0123', '  S00000001  ']) {
       input.value = value; await input.fire('input');
       assert.equal(save.disabled, true); assert.equal(input.attributes['aria-invalid'], 'true');
@@ -426,13 +546,13 @@ test('create and rename reject reserved agent-id names locally and allow near ma
 });
 
 test('create with setup none shows retry immediately and starts only when retry is clicked', async () => {
-  const p = page({ home: true, responseData: payload(), handleRequest: (url, options) => {
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: (url, options) => {
     if (url.endsWith('/agents')) return jsonResponse({ agent: agent(5, 'none') }, 201);
     if (url.endsWith('/setup')) return jsonResponse({ status: options.method === 'POST' ? 'preparing' : 'waiting', qr: 'data:image/png;base64,YQ==' });
   } }); await settle();
   await p.document.querySelector('.wp-feishu-bot-add').fire('click');
   const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
-  input.value = '新助手'; await input.fire('input'); await submit(dialog); await settle();
+  input.value = '新智能体'; await input.fire('input'); await submit(dialog); await settle();
   const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
   assert.match(dialog.textContent, /二维码没有准备好，请重试/);
   assert.equal(dialog.querySelector('img').hidden, true);
@@ -453,7 +573,7 @@ test('create with setup none shows retry immediately and starts only when retry 
 
 test('setup not_found stops polling, hides an old QR, refreshes cards and leaves no retry', async () => {
   let missing = false;
-  const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/setup')
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: url => url.endsWith('/setup')
     ? missing ? jsonResponse({ error: 'not_found' }, 404) : jsonResponse({ status: 'waiting', qr: 'data:image/png;base64,YQ==' }) : undefined });
   await settle(); await findButton(p.document, '扫码连接').fire('click'); await settle();
   const dialog = p.document.querySelector('dialog');
@@ -462,7 +582,7 @@ test('setup not_found stops polling, hides an old QR, refreshes cards and leaves
   const setupRequests = () => p.requests.filter(r => r.url.endsWith('/setup'));
   const cardRefreshes = () => p.requests.filter(r => r.url.endsWith('/bots'));
   assert.equal(setupRequests().at(-1).options.method, 'GET');
-  assert.match(dialog.textContent, /这个子助手已不存在/);
+  assert.match(dialog.textContent, /这个智能体已不存在/);
   assert.equal(dialog.querySelector('img').hidden, true);
   assert.equal(findButton(dialog, '重试').hidden, true);
   assert.equal(cardRefreshes().length, 2);
@@ -475,7 +595,7 @@ test('setup not_found stops polling, hides an old QR, refreshes cards and leaves
 });
 
 test('setup errors other than not_found keep the generic message and retry button', async () => {
-  const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/setup')
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: url => url.endsWith('/setup')
     ? jsonResponse({ error: 'unavailable' }, 500) : undefined });
   await settle(); await findButton(p.document, '扫码连接').fire('click'); await settle();
   const dialog = p.document.querySelector('dialog'); await tick(p, 2000);
@@ -485,19 +605,19 @@ test('setup errors other than not_found keep the generic message and retry butto
 
 test('rename validates, reports conflict and success; delete confirms; sub restart targets its own id', async () => {
   let error = true;
-  const p = page({ home: true, responseData: payload(), handleRequest: (url, options) => {
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: (url, options) => {
     if (options.method === 'POST') return jsonResponse(url.endsWith('/rename') && error ? { error: 'name_taken' } : { ok: true }, url.endsWith('/rename') && error ? 409 : 200);
   } }); await settle();
   const card = () => p.document.querySelectorAll('.wp-feishu-bot-card')[1];
   const menuAction = async text => { await findButton(card(), '…').fire('click'); await findButton(card(), text).fire('click'); };
   await menuAction('改名');
   const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
-  assert.equal(input.value, '助手1'); assert.match(dialog.textContent, /只改工作伙伴里的名字/);
+  assert.equal(input.value, '智能体1'); assert.match(dialog.textContent, /只改工作伙伴里的名字/);
   await submit(dialog); assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, '这个名字已经有了');
   error = false; input.value = '新名字'; await input.fire('input'); await submit(dialog);
   assert.equal(p.document.querySelector('dialog'), null); assert.equal(p.document.querySelector('.wp-feishu-bot-message').textContent, '已改名');
   assert.equal(p.requests.find(r => r.url.endsWith('/rename')).url, '/_wp/feishu-bot/agents/s00000001/rename');
-  await menuAction('删除'); assert.match(card().querySelector('.wp-feishu-bot-confirm').textContent, /工作目录移到回收目录。飞书里的机器人不会被删除/);
+  await menuAction('删除'); assert.match(card().querySelector('.wp-feishu-bot-confirm').textContent, /工作目录移到回收目录。飞书应用不会被删除/);
   await findButton(card(), '取消').fire('click'); assert.equal(p.requests.some(r => r.url.endsWith('/delete')), false);
   await menuAction('删除'); await findButton(card(), '确认删除').fire('click');
   assert.equal(p.requests.find(r => r.url.endsWith('/delete')).url, '/_wp/feishu-bot/agents/s00000001/delete');
@@ -510,15 +630,15 @@ test('rename validates, reports conflict and success; delete confirms; sub resta
 test('create shows fixed server error copy and a missing agent does not revoke the whole feature', async () => {
   for (const [error, status, text] of [
     ['invalid_name', 400, '名字只能用汉字、字母、数字、空格和 _ - ·，最多 16 个字'],
-    ['limit_reached', 409, '子助手最多 5 个（主助手另算）'],
+    ['limit_reached', 409, '智能体最多 5 个（主智能体另算）'],
     ['name_taken', 409, '这个名字已经有了'],
     ['unavailable', 503, '操作没有成功，请稍后重试'],
     ['not_found', 404, '操作没有成功，请稍后重试'],
   ]) {
-    const p = page({ home: true, responseData: payload(), handleRequest: url => url.endsWith('/agents') ? jsonResponse({ error }, status) : undefined });
+    const p = page({ home: true, route: '#/guid?wp=agents', responseData: payload(), handleRequest: url => url.endsWith('/agents') ? jsonResponse({ error }, status) : undefined });
     await settle(); await p.document.querySelector('.wp-feishu-bot-add').fire('click');
     const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
-    input.value = '助手'; await input.fire('input'); await submit(dialog);
+    input.value = '智能体'; await input.fire('input'); await submit(dialog);
     assert.equal(dialog.querySelector('.wp-feishu-bot-input-error').textContent, text);
     assert.equal(dialog.querySelector('img'), null); assert.ok(p.document.querySelector('.wp-feishu-bot-section'));
   }
@@ -527,9 +647,9 @@ test('create shows fixed server error copy and a missing agent does not revoke t
 test('legacy and disabled sub-agent payloads never label bot cards', async () => {
   for (const responseData of [
     { bots: [main, { ...main, appId: 'cli_Second' }] },
-    { bots: [main], agents: [{ id: 'main', kind: 'main', name: '主助手' }], subAgents: { enabled: false, limit: 5, count: 0 } },
+    { bots: [main], agents: [{ id: 'main', kind: 'main', name: '主智能体' }], subAgents: { enabled: false, limit: 5, count: 0 } },
   ]) {
-    const p = page({ home: true, responseData }); await settle();
+    const p = page({ home: true, route: '#/guid?wp=agents', responseData }); await settle();
     assert.equal(p.document.querySelectorAll('.wp-feishu-bot-card').length, responseData.bots.length);
     assert.equal(p.document.querySelectorAll('.wp-feishu-bot-tag').length, 0);
   }
@@ -540,7 +660,7 @@ test('successful deletion waits for an inflight refresh then fetches fresh cards
   after.agents = after.agents.filter(a => a.id !== 's00000001');
   after.bots = after.bots.filter(b => b.agentId !== 's00000001'); after.subAgents.count--;
   let reads = 0, release;
-  const p = page({ home: true, handleRequest: (url, options) => {
+  const p = page({ home: true, route: '#/guid?wp=agents', handleRequest: (url, options) => {
     if (options.method === 'GET') {
       reads++;
       if (reads === 2) return new Promise(resolve => { release = resolve; });
@@ -562,7 +682,7 @@ test('successful deletion waits for an inflight refresh then fetches fresh cards
 test('dialog close restores its trigger or falls back by agent id then to add', async () => {
   for (const kind of ['create', 'rename', 'setup']) for (const change of ['none', 'redraw', 'removed']) {
     const data = payload();
-    const p = page({ home: true, responseData: data, handleRequest: url => url.endsWith('/setup') ? jsonResponse({ status: 'waiting' }) : undefined });
+    const p = page({ home: true, route: '#/guid?wp=agents', responseData: data, handleRequest: url => url.endsWith('/setup') ? jsonResponse({ status: 'waiting' }) : undefined });
     await settle();
     const card = () => p.document.querySelectorAll('.wp-feishu-bot-card').find(c => c.dataset.agentId === 's00000002');
     let trigger;
@@ -592,13 +712,13 @@ test('dialog close restores its trigger or falls back by agent id then to add', 
 
 test('create-to-QR close returns to the new agent after its add trigger was redrawn', async () => {
   const data = payload();
-  const p = page({ home: true, responseData: data, handleRequest: url => {
+  const p = page({ home: true, route: '#/guid?wp=agents', responseData: data, handleRequest: url => {
     if (url.endsWith('/agents')) { data.agents.push(agent(5)); data.subAgents.count++; return jsonResponse({ agent: agent(5, 'preparing') }, 201); }
     if (url.endsWith('/setup')) return jsonResponse({ status: 'waiting' });
   } }); await settle();
   await p.document.querySelector('.wp-feishu-bot-add').fire('click');
   const dialog = p.document.querySelector('dialog'), input = dialog.querySelector('input');
-  input.value = '新助手'; await input.fire('input'); await submit(dialog); await settle();
+  input.value = '新智能体'; await input.fire('input'); await submit(dialog); await settle();
   await findButton(dialog, '×').fire('click');
   const newCard = p.document.querySelectorAll('.wp-feishu-bot-card').find(c => c.dataset.agentId === 's00000005');
   assert.equal(p.document.activeElement, findButton(newCard, '…'));

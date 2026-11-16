@@ -81,7 +81,7 @@ test('live feature and slug, unionId, wildcard admission govern HTTP and client'
   for (const allow of [['tang'], ['union-tang'], ['*']]) {
     f.config({ features: { feishuBot: true }, feishuBot: { allow } });
     assert.equal((await f.request()).status, 200);
-    const script = f.handler.clientFor(tang); assert.ok(script.includes('我的飞书机器人')); new Script(script);
+    const script = f.handler.clientFor(tang); assert.ok(script.includes('智能体')); new Script(script);
   }
   for (const config of [{ features: { feishuBot: false }, feishuBot: { allow: ['*'] } },
     { features: { feishuBot: true }, feishuBot: { allow: ['other'] } },

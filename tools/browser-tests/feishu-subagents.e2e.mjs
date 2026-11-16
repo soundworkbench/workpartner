@@ -7,8 +7,8 @@ import { ORIGIN } from './lib/harness.mjs';
 
 const S = '.wp-feishu-bot-section', CARD = '.wp-feishu-bot-card', D = 'dialog.wp-feishu-bot-dialog';
 const qr = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQj/8AAAIPAW823JCjAAAAAElFTkSuQmCC';
-const main = { id: 'main', name: '主助手', kind: 'main', setup: 'connected', appId: 'cli_Main', createdAt: null };
-const sub = (i, setup = 'none') => ({ id: 's' + String(i).padStart(8, '0'), name: '助手' + i, kind: 'sub', setup,
+const main = { id: 'main', name: '主智能体', kind: 'main', setup: 'connected', appId: 'cli_Main', createdAt: null };
+const sub = (i, setup = 'none') => ({ id: 's' + String(i).padStart(8, '0'), name: '智能体' + i, kind: 'sub', setup,
   appId: setup === 'connected' ? 'cli_Sub' + i : null, createdAt: `2026-11-${String(i + 1).padStart(2, '0')}T00:00:00Z` });
 const suite = createSuite('feishu-subagents', async s => {
   s.main = await s.harness.startGateway('subagents', { feishuBot: { allow: ['member'], subAgents: { allow: ['member'] } } });
@@ -28,7 +28,7 @@ function runtimeFixture(enabled = true) {
       if (options.detached) assert.equal('stdin' in options, false);
       const action = cmd[2], id = cmd.at(-1), current = agents.find(a => a.id === id);
       if (action === 'info') return reply({ ok: true, agents, limit: 5, bots: agents.filter(a => a.setup === 'connected').map(a => ({
-        agentId: a.id, appId: a.appId, name: a.id === 'main' ? '主机器人' : '飞书' + a.name, online: 'online', activate: true })) });
+        agentId: a.id, appId: a.appId, name: a.id === 'main' ? '主飞书应用' : '飞书' + a.name, online: 'online', activate: true })) });
       if (action === 'create' || action === 'rename') {
         const name = JSON.parse(options.stdin).name;
         if (agents.some(a => a.name === name && a !== current)) return reply({ ok: false, error: 'name_taken' }, 1);
@@ -67,7 +67,7 @@ async function session(label, options, body, enabled = true) {
   suite.harness.use(suite.main);
   const fixture = runtimeFixture(enabled);
   await suite.session(label, { route: null, avatar: false, init: [[init]], ...options }, async context => {
-    await fixture.attach(context.page); await context.page.goto(ORIGIN + '/');
+    await fixture.attach(context.page); await context.page.goto(ORIGIN + '/#/guid?wp=agents');
     await context.page.locator(CARD).first().waitFor();
     await body({ ...context, fixture });
     assert.deepEqual(context.log.pageErrors, []);
@@ -92,10 +92,10 @@ async function fits(page, dialog = false) {
 for (const [width, dark] of [[1280, false], [390, false], [360, false], [360, true]]) {
   test(`cards and dialog fit ${width}px ${dark ? 'dark' : 'light'}`, LONG, async () => {
     await session(`layout-${width}-${dark}`, { viewport: { width, height: 844 }, storage: { 'fixture-theme': dark ? 'dark' : 'light' } }, async ({ page }) => {
-      assert.deepEqual(await page.locator(CARD + ' h3').allTextContents(), ['主机器人', '助手1', '助手2']);
-      assert.deepEqual(await page.locator('.wp-feishu-bot-tag').allTextContents(), ['主助手', '子助手', '子助手']);
-      assert.equal(await page.locator('.wp-feishu-bot-cards > :first-child').getAttribute('aria-label'), '新建子助手');
-      assert.match(await card(page, 's00000001').locator('.wp-feishu-bot-summary').innerText(), /飞书机器人：飞书助手1/);
+      assert.deepEqual(await page.locator(CARD + ' h3').allTextContents(), ['主飞书应用', '智能体1', '智能体2']);
+      assert.deepEqual(await page.locator('.wp-feishu-bot-tag').allTextContents(), ['主智能体', '智能体', '智能体']);
+      assert.equal(await page.locator('.wp-feishu-bot-cards > :first-child').getAttribute('aria-label'), '新建智能体');
+      assert.match(await card(page, 's00000001').locator('.wp-feishu-bot-summary').innerText(), /飞书：飞书智能体1/);
       assert.equal(await card(page, 's00000002').locator('.wp-feishu-bot-state').innerText(), '等待扫码');
       assert.equal(await card(page, 's00000002').getByRole('link').count(), 0);
       await page.mouse.move(0, 0);
@@ -105,11 +105,11 @@ for (const [width, dark] of [[1280, false], [390, false], [360, false], [360, tr
       assert.equal(await connect.evaluate(el => getComputedStyle(el.parentElement).pointerEvents), 'auto');
       assert.equal(await card(page, 's00000002').locator('.wp-feishu-bot-summary').innerText(), '等待扫码');
       await fits(page); await suite.shot(page, `cards-${width}-${dark ? 'dark' : 'light'}`, { fullPage: true });
-      await page.getByRole('button', { name: '新建子助手', exact: true }).click();
+      await page.getByRole('button', { name: '新建智能体', exact: true }).click();
       const input = page.locator(D).getByLabel('名字', { exact: true });
       assert.equal(await input.evaluate(el => document.activeElement === el), true);
-      const next = page.locator(D).getByRole('button', { name: '下一步：扫码创建机器人' });
-      for (const value of ['a  b', '字'.repeat(17), 'main', '主助手', '😀']) {
+      const next = page.locator(D).getByRole('button', { name: '下一步：扫码创建飞书应用' });
+      for (const value of ['a  b', '字'.repeat(17), 'main', '\u4e3b\u52a9\u624b', '😀']) {
         await input.fill(value); assert.equal(await next.isDisabled(), true);
         assert.match(await page.locator('.wp-feishu-bot-input-error').innerText(), /最多 16 个字/);
       }
@@ -127,19 +127,19 @@ for (const [width, dark] of [[1280, false], [390, false], [360, false], [360, tr
 
 test('create, QR polling, connect, rename, restart and confirmed deletion call the real handler', LONG, async () => {
   await session('lifecycle', {}, async ({ page, fixture }) => {
-    await page.getByRole('button', { name: '新建子助手', exact: true }).click();
-    await page.locator(D).getByLabel('名字', { exact: true }).fill('研究助手');
-    await page.locator(D).getByRole('button', { name: '下一步：扫码创建机器人' }).click();
+    await page.getByRole('button', { name: '新建智能体', exact: true }).click();
+    await page.locator(D).getByLabel('名字', { exact: true }).fill('研究智能体');
+    await page.locator(D).getByRole('button', { name: '下一步：扫码创建飞书应用' }).click();
     await page.locator(D + ' img:not([hidden])').waitFor();
-    assert.equal(await page.locator(D + ' h2').innerText(), '给「研究助手」创建飞书机器人');
+    assert.equal(await page.locator(D + ' h2').innerText(), '给「研究智能体」创建飞书应用');
     assert.ok(fixture.calls.some(c => c.cmd.join(' ') === 'python3 /opt/workpartner/bin/feishu-onboard.py start --agent s00000003' && c.options.detached));
     fixture.connect('s00000003');
-    await page.locator(D).getByText('已连接，可以在飞书里找「研究助手」了', { exact: true }).waitFor();
+    await page.locator(D).getByText('已连接，可以在飞书里找「研究智能体」了', { exact: true }).waitFor();
     await page.locator(D).getByRole('button', { name: '关闭弹层' }).click();
     assert.equal(await card(page, 's00000003').getByRole('link', { name: '去对话' }).getAttribute('href'), 'https://applink.feishu.cn/client/bot/open?appId=cli_Createds00000003');
     await menu(page, 's00000003', '改名');
-    assert.equal(await page.locator(D).getByLabel('名字', { exact: true }).inputValue(), '研究助手');
-    await page.locator(D).getByLabel('名字', { exact: true }).fill('助手1');
+    assert.equal(await page.locator(D).getByLabel('名字', { exact: true }).inputValue(), '研究智能体');
+    await page.locator(D).getByLabel('名字', { exact: true }).fill('智能体1');
     await page.locator(D).getByRole('button', { name: '保存', exact: true }).click();
     await page.locator(D).getByText('这个名字已经有了', { exact: true }).waitFor();
     await page.locator(D).getByLabel('名字', { exact: true }).fill('研究改名');
@@ -150,7 +150,7 @@ test('create, QR polling, connect, rename, restart and confirmed deletion call t
     await page.getByText('已重新连接，稍后刷新状态。', { exact: true }).waitFor();
     await menu(page, 's00000003', '删除');
     const confirmation = card(page, 's00000003').locator('.wp-feishu-bot-confirm');
-    assert.match(await confirmation.innerText(), /工作目录移到回收目录。飞书里的机器人不会被删除/);
+    assert.match(await confirmation.innerText(), /工作目录移到回收目录。飞书应用不会被删除/);
     await confirmation.getByRole('button', { name: '取消', exact: true }).click();
     assert.equal(fixture.requests.some(r => r.path.endsWith('/delete')), false);
     await menu(page, 's00000003', '删除');
@@ -160,7 +160,7 @@ test('create, QR polling, connect, rename, restart and confirmed deletion call t
     assert.ok(fixture.calls.some(c => c.cmd.join(' ') === 'python3 /opt/workpartner/bin/wp-feishu-bot.py restart --agent s00000003'));
     fixture.fill(); await page.locator(S).getByRole('button', { name: '刷新', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.wp-feishu-bot-add').disabled);
-    assert.equal(await page.locator('.wp-feishu-bot-add-hint').innerText(), '子助手最多 5 个（主助手另算），删掉不用的再建');
+    assert.equal(await page.locator('.wp-feishu-bot-add-hint').innerText(), '智能体最多 5 个（主智能体另算），删掉不用的再建');
     assert.equal(await page.locator('.wp-feishu-bot-add').getAttribute('aria-describedby'), 'wp-feishu-bot-add-hint');
   });
 });
@@ -184,10 +184,10 @@ test('users outside sub-agent list see only main and legacy plus hint', LONG, as
   await session('not-enabled', {}, async ({ page, fixture }) => {
     assert.equal(await page.locator(CARD).count(), 1);
     assert.equal(await page.locator('.wp-feishu-bot-tag').count(), 0);
-    assert.equal(await page.locator(CARD + ' h3').innerText(), '主机器人');
-    await page.getByRole('button', { name: '连接飞书机器人', exact: true }).click();
+    assert.equal(await page.locator(CARD + ' h3').innerText(), '主飞书应用');
+    await page.getByRole('button', { name: '连接飞书', exact: true }).click();
     assert.equal(await page.locator(D).count(), 0);
-    assert.equal(await page.locator('.wp-feishu-bot-message').innerText(), '一个工作伙伴暂时只能连一个飞书机器人，多个子助手的功能做好后开放');
+    assert.equal(await page.locator('.wp-feishu-bot-message').innerText(), '一个工作伙伴暂时只能连接一个飞书应用，更多智能体功能暂未开放');
     assert.equal(fixture.requests.some(r => r.method === 'POST'), false);
   }, false);
 });

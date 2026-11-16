@@ -4,7 +4,7 @@ import { createSuite, LONG } from './lib/suite.mjs';
 import { openMenu, closeMenu } from './lib/browser.mjs';
 
 const API = '/_wp/feishu-bot', S = '.wp-feishu-bot-section', CARD = '.wp-feishu-bot-card';
-const bot = { appId: 'cli_Test123', name: '唐的飞书助手', avatar: null, online: 'online', activate: true, lastEventAt: null, error: null };
+const bot = { appId: 'cli_Test123', name: '唐的飞书智能体', avatar: null, online: 'online', activate: true, lastEventAt: null, error: null };
 // Opaque blue RGB PNG, not the previous transparent tracking pixel.
 const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQj/8AAAIPAW823JCjAAAAAElFTkSuQmCC';
 const brokenAvatar = 'data:image/gif;base64,broken';
@@ -31,7 +31,7 @@ function init() {
     const container = document.createElement('div'); container.className = '_guidContainer_fixture_1';
     composer.before(container); container.append(composer);
     function route() {
-      if (!location.hash || location.hash === '#/guid') input.setAttribute('data-testid', 'guid-input');
+      if (location.hash.split('?')[0] === '#/guid') input.setAttribute('data-testid', 'guid-input');
       else input.removeAttribute('data-testid');
       // The real SPA replaces its composer subtree when changing pages.
       input.parentElement.append(input);
@@ -39,9 +39,46 @@ function init() {
     route(); addEventListener('hashchange', route);
   }, { once: true });
 }
+async function sidebar(page) {
+  await page.locator('[data-wp-nav="agents"]').waitFor();
+  if (page.viewportSize().width < 768) {
+    if (await page.locator('aside.layout-sider').evaluate(el => el.getBoundingClientRect().right <= 0)) {
+      await page.locator('.app-titlebar__menu button.app-titlebar__button').click();
+    }
+    await page.waitForFunction(() => document.querySelector('aside.layout-sider').getBoundingClientRect().left >= 0);
+  }
+  assert.equal(await page.locator('[data-wp-nav="agents"] .wp-nav-text').evaluate(el => el.scrollWidth <= el.clientWidth), true,
+    'the sidebar label must not be truncated');
+  assert.equal(await page.locator('aside.layout-sider main.layout-sider-content').count(), 1);
+  for (const key of ['search', 'auto', 'market', 'agents']) {
+    assert.equal(await page.locator(`[data-wp-nav="${key}"]`).isVisible(), true, 'sidebar menus remain visible with the agents panel open');
+  }
+}
+async function enterAgents(page) {
+  await sidebar(page);
+  await page.locator('[data-wp-nav="agents"]').click();
+  await page.locator(S).waitFor();
+  if (page.viewportSize().width < 768) {
+    await page.waitForFunction(() => document.querySelector('aside.layout-sider').getBoundingClientRect().right <= 0);
+    assert.equal(await page.locator('html').evaluate(el => el.classList.contains('fixture-drawer-open')), false);
+  }
+}
 async function ready(page) {
+  if (!(await page.locator(S).count())) await enterAgents(page);
   await page.locator(S).waitFor();
   await page.waitForFunction(selector => !document.querySelector(selector + ' button[aria-label="刷新"]').disabled, S);
+}
+async function homeShot(page, label) {
+  await page.locator('[data-wp-nav="agents"]').waitFor();
+  assert.equal(new URL(page.url()).hash, '#/guid');
+  assert.equal(await page.locator(S).count(), 0);
+  assert.equal(await page.locator('#fixture-input').isVisible(), true);
+  await suite.shot(page, 'homepage-empty-' + label, { fullPage: true });
+}
+async function sidebarShot(page, label) {
+  await sidebar(page);
+  await suite.shot(page, 'sidebar-agents-' + label, { fullPage: true });
+  if (page.viewportSize().width < 768) await enterAgents(page);
 }
 async function more(first) {
   await first.getByRole('link', { name: '去对话', exact: true }).focus();
@@ -58,20 +95,25 @@ async function fits(page) {
   assert.deepEqual(result, { page: true, section: true, outside: [] });
 }
 for (const width of [1280, 390, 360]) {
-  test(`homepage cards at ${width}px, states, actions and no overflow`, LONG, async () => {
+  test(`agents page cards at ${width}px, states, actions and no overflow`, LONG, async () => {
     suite.harness.use(suite.main);
-    suite.main.setBots([bot, { ...bot, appId: 'cli_Second', name: '很长的机器人名字'.repeat(8), avatar, online: 'offline', lastEventAt: new Date(Date.now() - 5 * 60000).toISOString() },
+    suite.main.setBots([bot, { ...bot, appId: 'cli_Second', name: '很长的飞书应用名字'.repeat(8), avatar, online: 'offline', lastEventAt: new Date(Date.now() - 5 * 60000).toISOString() },
       { ...bot, appId: 'cli_Third', name: null, avatar: brokenAvatar, online: 'unknown', error: 'feishu_auth_failed' }]);
-    await suite.session('width-' + width, { viewport: { width, height: 844 }, avatar: width >= 768, init: [[init]] }, async ({ page, log }) => {
+    await suite.session('width-' + width, { route: '/#/guid', viewport: { width, height: 844 }, avatar: width >= 768, init: [[init]] }, async ({ page, log }) => {
+      await homeShot(page, width);
       await ready(page); await page.locator(CARD).first().waitFor();
+      assert.equal(await page.locator('#fixture-input').isVisible(), false);
+      assert.equal(await page.locator(S + ' h2#wp-feishu-bot-title').count(), 1);
       assert.equal(await page.locator('dialog').count(), 0);
       assert.equal(await page.locator('.wp-feishu-bot-bar').count(), 0);
-      assert.equal(await page.locator('#fixture-input-container + ' + S).count(), 1);
-      assert.equal(await page.locator('[class*="_guidContainer_"] > [class*="_guidInputCardWrap"] + ' + S).count(), 1);
-      assert.ok(await page.locator(S).evaluate(section => section.getBoundingClientRect().top >= document.querySelector('[data-testid="guid-input"]').getBoundingClientRect().bottom));
+      assert.equal(new URL(page.url()).hash, '#/guid?wp=agents');
+      assert.equal(await page.locator('[data-wp-nav="market"] + [data-wp-nav="agents"]').count(), 1);
+      assert.equal(await page.locator('[data-wp-nav="agents"]').getAttribute('aria-current'), 'page');
+      assert.equal(await page.locator(S).evaluate(section => section.parentElement === document.querySelector('main.layout-content')), true);
+      assert.equal(await page.locator('aside.layout-sider ' + S).count(), 0);
       assert.equal(await page.locator(CARD).count(), 3);
       assert.equal(await page.locator('.wp-feishu-bot-tag').count(), 0);
-      assert.equal(await page.locator('.wp-feishu-bot-cards > :first-child').getAttribute('aria-label'), '连接飞书机器人');
+      assert.equal(await page.locator('.wp-feishu-bot-cards > :first-child').getAttribute('aria-label'), '连接飞书');
       const first = page.locator(CARD).first();
       assert.equal(await first.locator('h3').innerText(), bot.name);
       assert.equal(await first.locator('.wp-feishu-bot-summary').innerText(), 'App ID ' + bot.appId);
@@ -89,8 +131,8 @@ for (const width of [1280, 390, 360]) {
       }), [31, 95, 240, 255], 'fixture avatar has visible opaque pixels');
       await page.waitForFunction(selector => document.querySelectorAll(selector)[2].textContent === '飞', CARD + ' .wp-feishu-bot-avatar');
       assert.equal(await page.locator(CARD).nth(2).locator('.wp-feishu-bot-avatar img').count(), 0);
-      assert.equal(await page.locator(S).getByText('暂时拿不到机器人信息', { exact: true }).count(), 1);
-      assert.equal(await page.locator(S).getByRole('heading', { name: '飞书机器人', exact: true }).count(), 1);
+      assert.equal(await page.locator(S).getByText('暂时拿不到飞书应用信息', { exact: true }).count(), 1);
+      assert.equal(await page.locator(S).getByRole('heading', { name: '智能体', exact: true }).count(), 1);
       assert.deepEqual(await page.locator(CARD + ' .wp-feishu-bot-state').allTextContents(), ['在线', '离线', '状态未知']);
       const longName = page.locator(CARD).nth(1).locator('h3');
       const nameLayout = await longName.evaluate(el => ({
@@ -123,16 +165,17 @@ for (const width of [1280, 390, 360]) {
       assert.equal(await first.getByRole('link', { name: '管理', exact: true }).getAttribute('href'), 'https://open.feishu.cn/app/' + bot.appId);
       await page.mouse.move(0, 0); await fits(page);
       assert.equal(await first.locator('.wp-feishu-bot-actions').evaluate(el => getComputedStyle(el).opacity), width < 768 ? '1' : '0');
-      await suite.shot(page, `home-${width}`, { fullPage: true });
+      await suite.shot(page, `agents-${width}`, { fullPage: true });
+      await sidebarShot(page, width);
       if (width === 1280) {
         await first.hover();
         assert.equal(await first.locator('.wp-feishu-bot-summary').evaluate(el => getComputedStyle(el).visibility), 'hidden');
         assert.equal(await first.locator('.wp-feishu-bot-actions').evaluate(el => getComputedStyle(el).opacity), '1');
-        await suite.shot(page, 'home-1280-hover', { fullPage: true });
+        await suite.shot(page, 'agents-1280-hover', { fullPage: true });
         await page.mouse.move(0, 0); await chat.focus();
         assert.equal(await first.locator('.wp-feishu-bot-actions').evaluate(el => getComputedStyle(el).opacity), '1');
       } else {
-        assert.equal(await page.locator('#root > aside').isVisible(), false);
+        assert.equal(await page.locator('#root > aside').evaluate(el => el.getBoundingClientRect().right <= 0), true);
         await chat.focus();
         assert.equal(await first.locator('.wp-feishu-bot-summary').evaluate(el => getComputedStyle(el).visibility), 'visible');
         const summary = await first.locator('.wp-feishu-bot-summary').boundingBox(), actions = await first.locator('.wp-feishu-bot-actions').boundingBox();
@@ -161,10 +204,10 @@ for (const width of [1280, 390, 360]) {
       assert.equal(await first.evaluate(el => el.getBoundingClientRect().y), cardY, 'copy hint does not move cards');
       assert.equal(await page.locator('.wp-feishu-bot-message').getAttribute('aria-live'), 'polite');
       const count = log.requests.filter(url => url.includes(API)).length;
-      await page.getByRole('button', { name: '连接飞书机器人', exact: true }).scrollIntoViewIfNeeded();
+      await page.getByRole('button', { name: '连接飞书', exact: true }).scrollIntoViewIfNeeded();
       const addY = await first.evaluate(el => el.getBoundingClientRect().y);
-      await page.getByRole('button', { name: '连接飞书机器人', exact: true }).click();
-      await page.getByText('一个工作伙伴暂时只能连一个飞书机器人，多个子助手的功能做好后开放', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '连接飞书', exact: true }).click();
+      await page.getByText('一个工作伙伴暂时只能连接一个飞书应用，更多智能体功能暂未开放', { exact: true }).waitFor();
       assert.equal(await first.evaluate(el => el.getBoundingClientRect().y), addY, 'add hint does not move cards');
       assert.equal(log.requests.filter(url => url.includes(API)).length, count);
       await more(first); await page.keyboard.press('Escape');
@@ -196,7 +239,7 @@ for (const width of [1280, 390, 360]) {
       if (width === 390) {
         const last = page.locator(CARD).last(); await last.scrollIntoViewIfNeeded();
         const visible = await last.evaluate(el => {
-          const r = el.getBoundingClientRect(), main = el.closest('main').getBoundingClientRect();
+          const r = el.getBoundingClientRect(), main = el.closest('main.layout-content').getBoundingClientRect();
           return r.top >= Math.max(0, main.top) && r.bottom <= Math.min(innerHeight, main.bottom) + 1;
         });
         assert.equal(visible, true, '390px can scroll to the complete last card including its bottom');
@@ -208,7 +251,8 @@ for (const width of [1280, 390, 360]) {
 
 test('dark desktop cards remain readable', LONG, async () => {
   suite.harness.use(suite.main); suite.main.setBots([bot]);
-  await suite.session('dark', { viewport: { width: 1280, height: 844 }, storage: { 'fixture-theme': 'dark' }, init: [[init]] }, async ({ page, log }) => {
+  await suite.session('dark', { route: '/#/guid', viewport: { width: 1280, height: 844 }, storage: { 'fixture-theme': 'dark' }, init: [[init]] }, async ({ page, log }) => {
+    await homeShot(page, 'dark-1280');
     await ready(page); await page.locator(CARD).waitFor();
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
     const colors = await page.locator(CARD).evaluate(card => ({
@@ -222,12 +266,13 @@ test('dark desktop cards remain readable', LONG, async () => {
       let backdrop = title;
       while (backdrop.parentElement && getComputedStyle(backdrop).backgroundColor === 'rgba(0, 0, 0, 0)') backdrop = backdrop.parentElement;
       return { foreground: getComputedStyle(title).color, background: getComputedStyle(backdrop).backgroundColor,
-        mainBackground: getComputedStyle(title.closest('main')).backgroundColor };
+        mainBackground: getComputedStyle(title.closest('main.layout-content')).backgroundColor };
     });
     assert.equal(headingColors.background, headingColors.mainBackground, 'title sits on the themed main background');
     assert.equal(headingColors.background, 'rgb(24, 24, 24)');
     assert.notEqual(headingColors.foreground, headingColors.background);
-    await page.locator(CARD).hover(); await fits(page); await suite.shot(page, 'home-dark-1280');
+    await page.locator(CARD).hover(); await fits(page); await suite.shot(page, 'agents-dark-1280');
+    await sidebarShot(page, 'dark-1280');
     assert.deepEqual(log.pageErrors, []);
   });
 });
@@ -264,7 +309,7 @@ test('empty state reuses the existing connection entry; absent entry disables ad
   suite.harness.use(suite.noPreview); suite.noPreview.setBots([]);
   await suite.session('empty', { init: [[init]] }, async ({ page, log }) => {
     await ready(page);
-    const add = page.getByRole('button', { name: '连接飞书机器人', exact: true });
+    const add = page.getByRole('button', { name: '连接飞书', exact: true });
     assert.equal(await page.locator(CARD).count(), 0);
     assert.equal(await add.isDisabled(), true);
     // The onboarding module owns this private handler; model its DOM contract only.
@@ -272,7 +317,7 @@ test('empty state reuses the existing connection entry; absent entry disables ad
       window.__connect = 0;
       const banner = document.createElement('div'); banner.className = 'wp-feishu-banner';
       const open = document.createElement('button'); open.textContent = '开通';
-      open.onclick = () => { window.__connect++; }; banner.append(open); document.querySelector('main').prepend(banner);
+      open.onclick = () => { window.__connect++; }; banner.append(open); document.querySelector('main.layout-content').prepend(banner);
     });
     await page.waitForFunction(() => !document.querySelector('.wp-feishu-bot-add').disabled);
     await add.click(); assert.equal(await page.evaluate(() => window.__connect), 1);
@@ -291,8 +336,8 @@ test('one connected bot keeps add visible and never starts another connection', 
     await ready(page); await page.locator(CARD).waitFor();
     const connectionRequests = () => log.requests.filter(url => url.includes(API) || url.includes('/_wp/aionui/feishu/'));
     const before = connectionRequests();
-    await page.getByRole('button', { name: '连接飞书机器人', exact: true }).click();
-    await page.getByText('一个工作伙伴暂时只能连一个飞书机器人，多个子助手的功能做好后开放', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '连接飞书', exact: true }).click();
+    await page.getByText('一个工作伙伴暂时只能连接一个飞书应用，更多智能体功能暂未开放', { exact: true }).waitFor();
     assert.deepEqual(connectionRequests(), before);
     await page.waitForFunction(() => document.querySelector('.wp-feishu-bot-message').textContent === '', null, { timeout: 4500 });
   });
@@ -309,50 +354,44 @@ test('outside allowlist has no menu, cards or bot requests', LONG, async () => {
   });
 });
 
-test('menu returns home, scrolls to cards and briefly highlights the section', LONG, async () => {
+test('avatar menu and sidebar open the agents page; leaving it removes the cards', LONG, async () => {
   suite.harness.use(suite.main); suite.main.setBots([bot]);
   await suite.session('navigate', { init: [[init]] }, async ({ page, log }) => {
-    await ready(page);
-    await page.evaluate(() => {
-      window.__cardScrolls = 0;
-      const original = Element.prototype.scrollIntoView;
-      Element.prototype.scrollIntoView = function (...args) { if (this.matches('.wp-feishu-bot-section')) window.__cardScrolls++; return original.apply(this, args); };
-      location.hash = '#/conversation/test';
-    });
+    await page.locator('[data-wp-nav="agents"]').waitFor();
+    await page.locator('[data-wp-nav="agents"]').click(); await ready(page);
+    assert.equal(new URL(page.url()).hash, '#/guid?wp=agents');
+    await page.evaluate(() => { location.hash = '#/market'; });
     await page.locator(S).waitFor({ state: 'detached' });
+    assert.equal(await page.locator('[data-wp-nav="agents"]').getAttribute('aria-current'), null);
     await openMenu(page); await page.locator('[data-wp-feishu-bot]').click();
-    await page.locator(S + '.wp-feishu-bot-highlight').waitFor();
-    assert.equal(new URL(page.url()).hash, '#/guid');
-    assert.equal(await page.evaluate(() => window.__cardScrolls), 1);
-    assert.equal(await page.locator(S).evaluate(el => el === document.activeElement), true);
-    assert.equal(await page.locator('dialog').count(), 0);
-    await page.waitForFunction(() => !document.querySelector('.wp-feishu-bot-highlight'));
-    await page.evaluate(() => { location.hash = '#/conversation/test'; });
-    await page.locator(S).waitFor({ state: 'detached' });
-    await openMenu(page);
-    await page.evaluate(() => {
-      document.querySelector('[data-wp-feishu-bot]').click();
-      // Leave again before the SPA has mounted the requested home input.
-      location.hash = '#/conversation/other';
-    });
-    await page.waitForFunction(() => document.querySelector('#fixture-route').textContent === 'route=#/conversation/other');
-    await page.evaluate(() => { location.hash = '#/guid'; });
     await ready(page);
-    assert.equal(await page.evaluate(() => window.__cardScrolls), 1, 'leaving home cancels a pending reveal');
-    assert.equal(await page.locator('.wp-feishu-bot-highlight').count(), 0);
+    assert.equal(new URL(page.url()).hash, '#/guid?wp=agents');
+    assert.equal(await page.locator(S).getByRole('heading', { name: '智能体', exact: true }).count(), 1);
     assert.deepEqual(log.pageErrors, []);
   });
 });
 
-test('homepage without main mounts after the input container', LONG, async () => {
+test('homepage has no bot cards until the agents page is opened', LONG, async () => {
+  suite.harness.use(suite.main); suite.main.setBots([bot]);
+  await suite.session('homepage-empty', { route: '/#/guid', init: [[init]] }, async ({ page, log }) => {
+    await page.locator('[data-wp-nav="agents"]').waitFor();
+    assert.equal(new URL(page.url()).hash, '#/guid');
+    assert.equal(await page.locator(S).count(), 0);
+    assert.equal(await page.locator('[data-wp-nav="agents"]').innerText(), '智能体');
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
+
+test('agents page remounts after the main content is rebuilt', LONG, async () => {
   suite.harness.use(suite.main); suite.main.setBots([bot]);
   await suite.session('no-main', { init: [[init]] }, async ({ page, log }) => {
     await ready(page);
     await page.evaluate(() => {
-      const input = document.querySelector('#fixture-input-container');
-      document.body.append(input); document.querySelector('main').remove();
+      document.querySelector('main.layout-content').remove();
+      const main = document.createElement('main'); main.className = 'layout-content'; main.style.cssText = 'flex:1;min-width:0;box-sizing:border-box;padding:24px;overflow:hidden';
+      document.querySelector('#root').append(main);
     });
-    await page.locator('body > #fixture-input-container + ' + S).waitFor();
+    await page.locator('main.layout-content > ' + S).waitFor();
     assert.equal(await page.locator(S).count(), 1); assert.deepEqual(log.pageErrors, []);
   });
 });
@@ -376,14 +415,93 @@ test('SPA remount restores cards; live admission failure removes UI', LONG, asyn
   suite.harness.use(suite.main); suite.main.setBots([bot]);
   await suite.session('remount-revoke', { init: [[init]] }, async ({ page, log }) => {
     await ready(page);
-    await page.evaluate(() => { window.__homeInput = document.querySelector('[data-testid="guid-input"]'); window.__homeInput.remove(); });
-    await page.locator(S).waitFor({ state: 'detached' });
-    await page.evaluate(() => document.querySelector('#fixture-input-container').append(window.__homeInput));
-    await ready(page); assert.equal(await page.locator(S).count(), 1);
+    await page.locator(S).evaluate(section => section.remove());
+    await page.locator(S).waitFor();
+    assert.equal(await page.locator(S).count(), 1);
+    await page.locator('.wp-nav').evaluate(nav => nav.remove());
+    await page.locator('[data-wp-nav="market"] + [data-wp-nav="agents"]').waitFor();
+    assert.equal(await page.locator('[data-wp-nav="agents"]').count(), 1);
     await page.route('**/_wp/feishu-bot/bots?refresh=1', route => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not_found"}' }));
     await page.locator(S).getByRole('button', { name: '刷新', exact: true }).click();
     await page.locator(S).waitFor({ state: 'detached' });
+    await page.waitForFunction(() => location.hash === '#/guid');
+    assert.equal(await page.locator('#fixture-input').isVisible(), true);
     await openMenu(page); assert.equal(await page.locator('[data-wp-feishu-bot]').count(), 0);
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
+
+
+test('router fallback, query refresh, back/forward and all sidebar destinations', LONG, async () => {
+  suite.harness.use(suite.main); suite.main.setBots([bot]);
+  await suite.session('route-history', { route: '/#/agents', init: [[init]] }, async ({ page, log }) => {
+    await page.waitForFunction(() => location.hash === '#/guid');
+    assert.equal(await page.locator(S).count(), 0, 'unknown path must be replaced, just like the upstream bundle');
+    await ready(page);
+    await page.reload(); await page.locator(S).waitFor();
+    assert.equal(new URL(page.url()).hash, '#/guid?wp=agents');
+    await page.goBack(); await page.locator(S).waitFor({ state: 'detached' });
+    assert.equal(new URL(page.url()).hash, '#/guid');
+    assert.equal(await page.locator('#fixture-input').isVisible(), true);
+    await page.goForward(); await page.locator(S).waitFor();
+    for (const [selector, hash] of [
+      ['[class*="_newChatTrigger"]', '#/guid'],
+      ['[data-wp-nav="search"]', '#/guid'],
+      ['[data-wp-nav="auto"]', '#/scheduled'],
+      ['[data-wp-nav="market"]', '#/market'],
+      ['.chat-history__item', '#/conversation/fixture'],
+    ]) {
+      const historyLength = await page.evaluate(() => history.length);
+      await sidebar(page); await page.locator(selector).click();
+      await page.locator(S).waitFor({ state: 'detached' });
+      assert.equal(new URL(page.url()).hash, hash);
+      assert.equal(await page.evaluate(() => history.length), historyLength + (selector.includes('search') ? 0 : 1),
+        'closing the panel must not push an extra guid entry');
+      assert.equal(await page.locator('[data-wp-nav="agents"]').getAttribute('aria-current'), null);
+      if (selector.includes('search')) await page.keyboard.press('Escape');
+      await enterAgents(page);
+    }
+    // Keyboard activation follows the same navigation contract.
+    await page.locator('[data-wp-nav="auto"]').focus(); await page.keyboard.press('Enter');
+    await page.locator(S).waitFor({ state: 'detached' });
+    await page.locator('[data-wp-nav="agents"]').focus(); await page.keyboard.press('Enter');
+    await page.locator(S).waitFor();
+    assert.equal(new URL(page.url()).hash, '#/guid?wp=agents');
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
+
+test('in-place search replaces the agents entry and Back returns to the preceding page', LONG, async () => {
+  suite.harness.use(suite.main); suite.main.setBots([bot]);
+  await suite.session('search-history', { route: '/#/conversation/before-agents', init: [[init]] }, async ({ page, log }) => {
+    await enterAgents(page);
+    await page.locator('[data-wp-nav="search"]').click();
+    await page.locator(S).waitFor({ state: 'detached' });
+    await page.keyboard.press('Escape');
+    await page.goBack();
+    await page.waitForFunction(() => location.hash === '#/conversation/before-agents');
+    assert.equal(await page.locator(S).count(), 0);
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
+
+test('pushState with popstate dismisses the panel and Back restores it', LONG, async () => {
+  suite.harness.use(suite.main); suite.main.setBots([bot]);
+  await suite.session('popstate-navigation', { route: '/#/guid?wp=agents', init: [[init]] }, async ({ page, log }) => {
+    await ready(page);
+    await page.evaluate(() => {
+      window.__hashChanges = 0;
+      addEventListener('hashchange', () => { window.__hashChanges++; });
+      history.pushState(null, '', '#/guid');
+      dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await page.locator(S).waitFor({ state: 'detached' });
+    assert.equal(await page.evaluate(() => window.__hashChanges), 0);
+    assert.equal(await page.locator('#fixture-input').isVisible(), true);
+    assert.equal(await page.locator('[data-wp-nav="agents"]').getAttribute('aria-current'), null);
+    await page.goBack(); await page.locator(S).waitFor();
+    assert.equal(new URL(page.url()).hash, '#/guid?wp=agents');
+    await page.goForward(); await page.locator(S).waitFor({ state: 'detached' });
     assert.deepEqual(log.pageErrors, []);
   });
 });
