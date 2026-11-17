@@ -97,7 +97,8 @@ aionui.startReconcileImages(users, organization.runtime.k8s?.reconcileImagesInte
 const modelKeyFile = user => `${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`;
 const modelKeyFor = user => fs.readFileSync(modelKeyFile(user), 'utf8').trim();
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
-const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor });
+const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor,
+  timeoutMs: process.env.WP_TITLE_TIMEOUT_MS, models: process.env.WP_TITLE_MODELS });
 import { createFeedback } from './feedback.mjs';
 import { createMyKey } from './my-key.mjs';
 import { createVoice } from './voice.mjs';
