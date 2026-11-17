@@ -55,6 +55,7 @@ export function organizationData(environment = process.env) {
     throw new Error('runtime.k8s.reconcileExclude must be an array of nonempty user slugs');
   }
   quickLineModel(data.model.quickLineModel);
+  fallbackDefaults(data.model.fallbackDefaults);
   const userCatalog = data.model.userCatalog;
   if (userCatalog !== undefined) {
     if (!userCatalog || Object.getPrototypeOf(userCatalog) !== Object.prototype || Object.entries(userCatalog).some(([slug, added]) => !slug.trim()
@@ -85,10 +86,21 @@ export function organizationData(environment = process.env) {
   return { ...data, directory };
 }
 
+/** Optional Claude Code models for keys without any model.defaults.claudePrefix model. */
+function fallbackDefaults(value) {
+  if (value === undefined) return undefined;
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype
+    || ['claude', 'haiku'].some(name => typeof value[name] !== 'string' || !value[name] || /[\r\n]/.test(value[name]))) {
+    throw new Error('model.fallbackDefaults must set claude and haiku model names');
+  }
+  return { claude: value.claude, haiku: value.haiku };
+}
+
 /** Model defaults and optional catalog entries, shared by gateway and image startup; slug appends that user's model.userCatalog entries. */
 export function nextModelConfig(data, environment = {}, slug) {
   const selected = environment.WORKPARTNER_MODEL_CONFIG
-    ? JSON.parse(environment.WORKPARTNER_MODEL_CONFIG) : { defaults: data.model.defaults, catalog: data.model.catalog, quickLineModel: data.model.quickLineModel };
+    ? JSON.parse(environment.WORKPARTNER_MODEL_CONFIG)
+    : { defaults: data.model.defaults, catalog: data.model.catalog, quickLineModel: data.model.quickLineModel, fallbackDefaults: data.model.fallbackDefaults };
   const defaults = { ...selected.defaults };
   for (const [field, variable] of Object.entries({ claude: 'ANTHROPIC_MODEL', opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
     sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL', haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' })) {
@@ -112,7 +124,8 @@ export function nextModelConfig(data, environment = {}, slug) {
     });
   }
   const quickModel = quickLineModel(selected.quickLineModel);
-  return { defaults, catalog, ...(quickModel ? { quickLineModel: quickModel } : {}) };
+  const fallback = fallbackDefaults(selected.fallbackDefaults);
+  return { defaults, catalog, ...(quickModel ? { quickLineModel: quickModel } : {}), ...(fallback ? { fallbackDefaults: fallback } : {}) };
 }
 
 /** Environment consumed by the next image; credentials remain in the mounted key file. */
