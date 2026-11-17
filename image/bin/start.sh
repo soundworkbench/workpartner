@@ -19,6 +19,12 @@ export "$PARTNER_MODEL_KEY_ENV=$ANTHROPIC_API_KEY"
 export DISABLE_AUTOUPDATER=1 CODEX_HOME=/data/.codex
 # Inherit the organization sub-agent default (or a deployment override).
 export CLAUDE_CODE_SUBAGENT_MODEL
+# A key without the organization's Claude models runs Claude Code on model.fallbackDefaults.
+if access_env=$(python3 -I /opt/workpartner/bin/wp-model-access.py); then
+  eval "$access_env"
+else
+  echo "警告：未按钥匙权限调整模型，继续启动" >&2
+fi
 
 mkdir -p /data/work /data/.claude/skills "$CODEX_HOME/skills" || exit 1
 # AionUi 把上传的附件固定写到 /tmp/aionui：指到工作目录的“上传”文件夹，网页、文件栏和消息桥都看得到，容器重建也不丢。

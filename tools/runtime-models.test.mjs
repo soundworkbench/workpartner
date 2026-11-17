@@ -180,6 +180,24 @@ test('editing only JSON replaces an idle container on the same image and supplie
 
 });
 
+test('fallback defaults for keys without Claude models travel in the runtime configuration and are validated', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-fallback-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'organization.json');
+  const read = fallbackDefaults => {
+    fs.writeFileSync(file, JSON.stringify({ model: { fallbackDefaults } }));
+    return nextModelConfig(organizationData({ WORKPARTNER_ORG_DIR: dir }));
+  };
+  const fallback = { claude: 'provider/large', haiku: 'provider/small' };
+  assert.deepEqual(read(fallback).fallbackDefaults, fallback);
+  assert.deepEqual(JSON.parse(nextEnvironment(organizationData({ WORKPARTNER_ORG_DIR: dir }), { MODEL_BASE_URL: 'http://m.test/v1' })
+    .WORKPARTNER_MODEL_CONFIG).fallbackDefaults, fallback);
+  assert.equal('fallbackDefaults' in read(undefined), false);
+  for (const invalid of [{ claude: 'provider/large' }, { claude: 'a', haiku: 'b\nc' }, ['a', 'b']]) {
+    assert.throws(() => read(invalid), /model.fallbackDefaults/);
+  }
+});
+
 test('runtime selection rejects unknown kinds and defaults to Docker', async () => {
   const { createRuntime } = await import('../gateway/runtime/index.mjs');
   for (const kind of ['unknown', '', null, false]) assert.throws(() => createRuntime({ runtime: { kind } }), /Unsupported runtime kind/);

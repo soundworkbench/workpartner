@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import stat
 import sys
 import tempfile
@@ -240,10 +241,17 @@ def refresh(target, model=None, effort=None, *, apply=True):
                 defaults = selected['model']['defaults']
             model = model or os.environ.get('ANTHROPIC_MODEL') or defaults['claude']
             effort = effort or defaults['effort']
+        # Keys without the organization's Claude models list and use only the fallback model.
+        access = runpy.run_path(str(Path(__file__).with_name('wp-model-access.py')))
+        fallback = access['active'](runtime) if runtime else None
+        model = access['substitute']('PARTNER_BRIDGE_MODEL', model, fallback)
         upgrades = ((selected or {}).get('bridge') or {}).get('upgradeKeys') or []
         template = tomllib.loads(TEMPLATE.read_text()) if upgrades and TEMPLATE.is_file() else None
         # The injected catalog already carries this user's model.userCatalog entries.
         catalog = (runtime.get('catalog') or {}).get('claude')
+        if fallback and catalog:
+            catalog = [entry for entry in catalog if not entry['key'].startswith(fallback['prefix'])] \
+                or [{'key': model, 'name': model.split('/')[-1]}]
         return migrate(target, model, effort, apply=apply, template=template, upgrades=upgrades, catalog=catalog)
     except Exception as error:
         # Parser and OS exception messages can contain credentials; print type only.
