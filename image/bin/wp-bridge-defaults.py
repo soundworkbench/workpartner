@@ -239,9 +239,23 @@ def key_models():
         return None
 
 
+def model_names(model_id):
+    """Names a listed model id answers to: as listed, without an `mp-*/` instance prefix, bare, and as `claude/…` or `codex/…`."""
+    parts = model_id.split('/')
+    if len(parts) > 1 and parts[0].startswith('mp-'):
+        parts = parts[1:]
+    base = parts[-1]
+    names = {model_id, '/'.join(parts), base}
+    if base.startswith('claude-'):
+        names.add('claude/' + base)
+    elif base.startswith('gpt-'):
+        names.add('codex/' + base)
+    return names
+
+
 def allowed(ids, model):
-    """Exact ids, or a trailing `*` opening every model with that prefix."""
-    return any(i == model or (i.endswith('*') and model.startswith(i[:-1])) for i in ids)
+    """A listed model under any of its names, or a trailing `*` opening every model with that prefix."""
+    return any((i.endswith('*') and model.startswith(i[:-1])) or model in model_names(i) for i in ids)
 
 
 def feishu_catalog(entries, ids):

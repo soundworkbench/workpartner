@@ -6,9 +6,17 @@ const PAGE = '/_wp/model', API = '/_wp/api/model';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fail = status => Object.assign(new Error('Model request failed'), { status });
 
-/** A key lists exact model ids; an id ending in `*` opens every model with that prefix. */
+// Names a listed model id answers to: as listed, without an `mp-…` instance prefix, bare, and as `claude/…` or `codex/…`.
+export function modelNames(id) {
+  const parts = id.split('/');
+  if (parts.length > 1 && parts[0].startsWith('mp-')) parts.shift();
+  const base = parts.at(-1);
+  return [id, parts.join('/'), base, ...(base.startsWith('claude-') ? ['claude/' + base] : base.startsWith('gpt-') ? ['codex/' + base] : [])];
+}
+
+/** A key lists the models it may call; an id ending in `*` opens every model with that prefix. */
 export function keyAllows(ids, model) {
-  return ids.some(id => id === model || (id.endsWith('*') && model.startsWith(id.slice(0, -1))));
+  return ids.some(id => (id.endsWith('*') && model.startsWith(id.slice(0, -1))) || modelNames(id).includes(model));
 }
 
 function readModel(req) {

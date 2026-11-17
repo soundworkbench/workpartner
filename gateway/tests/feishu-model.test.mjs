@@ -56,6 +56,11 @@ test('key ids match exactly or by a trailing wildcard', () => {
   assert.equal(keyAllows(['vendor/large-2'], 'vendor/large'), false);
   assert.equal(keyAllows(['vendor/'], 'vendor/large'), false);
   assert.equal(keyAllows([], 'vendor/large'), false);
+  // Multi-instance and bare listings answer to the catalog's provider-qualified names.
+  assert.equal(keyAllows(['mp-q/vendor/large'], 'vendor/large'), true);
+  assert.equal(keyAllows(['mp-q/claude/claude-x-1'], 'claude/claude-x-1'), true);
+  assert.equal(keyAllows(['gpt-x-1'], 'codex/gpt-x-1'), true);
+  assert.equal(keyAllows(['mp-q/vendor/large'], 'other/large'), false);
 });
 
 async function fixture(t) {

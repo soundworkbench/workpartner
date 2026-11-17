@@ -257,8 +257,9 @@ name = "second"
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, runtime):
             target = Path(directory) / 'config.toml'
             target.write_bytes(self.old_config())
-            # A key without the first vendor gets the first entry it may call.
-            with patch.object(bridge, 'key_models', return_value=['other/*']):
+            # A key without the first vendor gets the first entry it may call; listed ids
+            # match without their instance prefix.
+            with patch.object(bridge, 'key_models', return_value=['mp-q/other/model', 'other/mini', 'vendor/large-2']):
                 self.assertTrue(bridge.refresh(target))
                 self.assertEqual(provider(target), {'name': 'workpartner', 'model': 'other/model', 'models': [
                     {'model': 'other/model', 'alias': 'Other'}, {'model': 'other/mini', 'alias': 'Other mini'}]})
