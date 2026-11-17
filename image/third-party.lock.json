@@ -35,23 +35,23 @@
     },
     {
       "destination": "codex",
-      "version": "0.167.0",
-      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "version": "0.169.1",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.169.1/codex-x86_64-unknown-linux-musl.tar.gz",
       "format": "tar-member",
       "member": "codex-x86_64-unknown-linux-musl",
-      "release": "https://github.com/openai/codex/releases/tag/rust-v0.167.0",
-      "sha256": "9d64836106d5b374e90ee4454c7ebcde7ca7106558bd7e41a34b9f26ebda251a",
-      "bytes": 122587028
+      "release": "https://github.com/openai/codex/releases/tag/rust-v0.169.1",
+      "sha256": "bd8383e0eaf3e4ca2aa5628f91ed9456bc3392d26134a04e949f47d7ef3660c1",
+      "bytes": 117816687
     },
     {
       "destination": "codex-code-mode-host",
-      "version": "0.167.0",
-      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
+      "version": "0.169.1",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.169.1/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz",
       "format": "tar-member",
       "member": "codex-code-mode-host-x86_64-unknown-linux-musl",
-      "release": "https://github.com/openai/codex/releases/tag/rust-v0.167.0",
-      "sha256": "b5074d5dd64643b2c073927e494a588eff31c1f5a27f12c1e2c45f9a6cf07dd4",
-      "bytes": 29079293
+      "release": "https://github.com/openai/codex/releases/tag/rust-v0.169.1",
+      "sha256": "4399aa75ad8b797efb347e10277e8b0caafd61e39f2da0c467af5e79f129116e",
+      "bytes": 27386600
     },
     {
       "destination": "claude",

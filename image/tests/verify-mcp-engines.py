@@ -106,7 +106,7 @@ def main():
     args = parser.parse_args()
     binaries = {name: str(value.resolve()) for name, value in vars(args).items()}
     versions = {name: subprocess.check_output([binary, '--version'], stderr=subprocess.DEVNULL, text=True).strip() for name, binary in binaries.items()}
-    assert versions == {'claude': '2.1.319 (Claude Code)', 'codex': 'codex-cli 0.167.0'}, versions
+    assert versions == {'claude': '2.1.319 (Claude Code)', 'codex': 'codex-cli 0.169.1'}, versions
     service = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
