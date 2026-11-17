@@ -55,7 +55,7 @@ def main():
     versions = {key: subprocess.check_output([str(value), '--version'], stderr=subprocess.DEVNULL, text=True).strip()
                 for key, value in binaries.items()}
     assert versions['claude'].startswith('2.1.319 '), versions
-    assert versions['codex'] == 'codex-cli 0.167.0', versions
+    assert versions['codex'] == 'codex-cli 0.169.1', versions
     results = []
     with tempfile.TemporaryDirectory(prefix='shared-engine-check-') as temporary:
         root = Path(temporary)
