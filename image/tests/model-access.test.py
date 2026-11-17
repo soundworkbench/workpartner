@@ -122,6 +122,33 @@ class ModelAccessTest(unittest.TestCase):
         self.assertEqual(agent['options']['model'], 'claude/opus')
         self.assertEqual([entry['model'] for entry in agent['providers'][0]['models']], ['claude/opus', 'claude/haiku'])
 
+    def test_messaging_list_keeps_the_fallback_when_key_permissions_are_unreadable(self):
+        """With no answer from the model service, the messaging-app list drops the models the fallback ruled out."""
+        Endpoint.models = ['codex/gpt-small']
+        self.startup()
+        feishu = [{'name': 'Opus', 'key': 'claude/opus'}, {'name': 'Large', 'key': 'codex/gpt-large'},
+                  {'name': 'Small', 'key': 'codex/gpt-small'}]
+        config = dict(CONFIG, defaults=dict(CONFIG['defaults'], claude='claude/opus', effort='medium'),
+                      catalog=dict(CONFIG['catalog'], feishu=feishu))
+        exec_env = {'WORKPARTNER_MODEL_CONFIG': json.dumps(config), 'WP_MODEL_FALLBACK_FILE': str(self.marker)}
+        template = (ROOT / 'home/cc-connect-feishu.toml').read_text()
+        target = Path(self.directory.name) / 'config.toml'
+        target.write_text(template.replace('__CLAUDE_MODEL__', 'claude/opus').replace('__EFFORT__', 'medium')
+                          .replace('__APP_SECRET__', 'fixture').replace('__PROJECT__', 'p').replace('__ALLOW_FROM__', ''))
+        with patch.dict(os.environ, exec_env, clear=True), patch.object(bridge, 'key_models', return_value=None):
+            self.assertTrue(bridge.refresh(target))
+        provider = tomllib.loads(target.read_text())['projects'][0]['agent']['providers'][0]
+        self.assertEqual(provider['model'], 'codex/gpt-large')
+        self.assertEqual([entry['model'] for entry in provider['models']], ['codex/gpt-large', 'codex/gpt-small'])
+        # A list of only ruled-out models leaves the fallback catalog in place.
+        config['catalog']['feishu'] = feishu[:1]
+        with patch.dict(os.environ, dict(exec_env, WORKPARTNER_MODEL_CONFIG=json.dumps(config)), clear=True), \
+                patch.object(bridge, 'key_models', return_value=None):
+            bridge.refresh(target)
+        provider = tomllib.loads(target.read_text())['projects'][0]['agent']['providers'][0]
+        self.assertEqual(provider, {'name': 'workpartner', 'model': 'codex/gpt-large',
+                                    'models': [{'model': 'codex/gpt-large', 'alias': 'gpt-large'}]})
+
 
 if __name__ == '__main__':
     unittest.main()

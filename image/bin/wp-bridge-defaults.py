@@ -258,10 +258,11 @@ def allowed(ids, model):
     return any((i.endswith('*') and model.startswith(i[:-1])) or model in model_names(i) for i in ids)
 
 
-def feishu_catalog(entries, ids):
-    """This person's messaging-app list narrowed to their key; unknown permissions keep the whole list."""
+def feishu_catalog(entries, ids, fallback=None):
+    """This person's messaging-app list narrowed to their key. Unknown permissions keep the whole
+    list, less the models a recorded fallback has already ruled out."""
     if ids is None:
-        return entries
+        return [entry for entry in entries if not (fallback and entry['key'].startswith(fallback['prefix']))]
     return [entry for entry in entries if allowed(ids, entry['key'])]
 
 
@@ -298,7 +299,7 @@ def refresh(target, model=None, effort=None, *, apply=True):
                 or [{'key': model, 'name': model.split('/')[-1]}]
         # The messaging-app list replaces the web catalog in the bridge when this person can use any entry of it.
         listed = (runtime.get('catalog') or {}).get('feishu')
-        feishu = feishu_catalog(listed, key_models()) if listed else []
+        feishu = feishu_catalog(listed, key_models(), fallback) if listed else []
         return migrate(target, model, effort, apply=apply, template=template, upgrades=upgrades,
                        catalog=feishu or catalog, keep_listed=bool(feishu))
     except Exception as error:
