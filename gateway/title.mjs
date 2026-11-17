@@ -1,5 +1,29 @@
+export const DEFAULT_TITLE_TIMEOUT_MS = 30000;
+export const MIN_TITLE_TIMEOUT_MS = 5000;
+export const MAX_TITLE_TIMEOUT_MS = 120000;
+export const TITLE_MODELS_TIMEOUT_MS = 8000;
+
+/** Parse the title deadline, using the default for malformed values and clamping valid values. */
+export function titleTimeoutMs(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_TITLE_TIMEOUT_MS;
+  if (typeof value === 'string' && !/^\d+$/.test(value.trim())) return DEFAULT_TITLE_TIMEOUT_MS;
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(number) || !Number.isFinite(number)) return DEFAULT_TITLE_TIMEOUT_MS;
+  return Math.min(MAX_TITLE_TIMEOUT_MS, Math.max(MIN_TITLE_TIMEOUT_MS, number));
+}
+
+/** Parse the optional model priority list from its comma-separated deployment setting. */
+export function titleModels(value) {
+  if (Array.isArray(value)) return value.filter(model => typeof model === 'string').map(model => model.trim()).filter(Boolean);
+  if (typeof value !== 'string') return [];
+  return value.split(',').map(model => model.trim()).filter(Boolean);
+}
+
 /** One optional title request for newly created web chats; credentials stay in the gateway. */
-export function createChatTitles({ baseUrl, keyFor, enabled = true, fetcher = fetch, now = Date.now }) {
+export function createChatTitles({ baseUrl, keyFor, enabled = true, fetcher = fetch, now = Date.now,
+  timeoutMs = process.env.WP_TITLE_TIMEOUT_MS, models = process.env.WP_TITLE_MODELS }) {
+  const titleDeadline = titleTimeoutMs(timeoutMs);
+  const preferredModels = titleModels(models);
   const chats = new Map();
   const key = (r, id) => JSON.stringify([r.user.slug, id]);
   const expired = entry => now() - entry.created > 24 * 60 * 60 * 1000;
@@ -66,18 +90,22 @@ export function createChatTitles({ baseUrl, keyFor, enabled = true, fetcher = fe
       const entry = entryFor(r, id);
       if (!entry || entry.attempted || entry.cancelled || entry.messages !== 1 || !entry.input?.trim()) return false;
       entry.attempted = true;
-      const signal = AbortSignal.timeout(8000);
+      const signal = AbortSignal.timeout(titleDeadline);
       try {
         const chat = await conversation(r, id, undefined, signal);
         if (!same(entry, chat) || entry.cancelled || (chat.extra?.backend ?? chat.assistant?.backend) !== 'codex') return false;
         const apiKey = await keyFor(r.user);
         const headers = { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
-        const models = await json(new URL('models', baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'), { headers, signal });
+        const modelList = await json(new URL('models', baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'), {
+          headers,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_MODELS_TIMEOUT_MS)]),
+        });
         // Match the advertised id, including model's instance prefix. Never invent a route.
-        const available = (models.data ?? []).map(item => item.id).filter(id => typeof id === 'string');
+        const available = (modelList.data ?? []).map(item => item.id).filter(id => typeof id === 'string');
         const leaf = id => id.split('/').at(-1);
         const current = chat.extra?.current_model_id ?? chat.model?.use_model ?? chat.model?.model;
-        const model = available.find(id => leaf(id) === 'gpt-6-luna') ??
+        const preferred = preferredModels.map(preference => available.find(id => id === preference || leaf(id) === leaf(preference))).find(Boolean);
+        const model = preferred ?? available.find(id => leaf(id) === 'gpt-6-luna') ??
           (typeof current === 'string' && leaf(current).startsWith('gpt-') ?
             available.find(id => id === current) ?? available.find(id => leaf(id) === leaf(current)) : undefined);
         if (!model || entry.cancelled) return false;
