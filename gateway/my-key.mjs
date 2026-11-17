@@ -7,6 +7,8 @@ import { myKeyClient } from './my-key-client.mjs';
 import { createMyKeyReset } from './my-key-reset.mjs';
 
 const API = '/_wp/api/my-key';
+/** The model endpoint's view of one key: its name, limits and the models it may call. */
+export const PROFILE = '/magpie/me';
 export const USAGE_ZONE = 'UTC';
 const DAY = 86400000;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -105,7 +107,7 @@ export function publicBaseUrl(value) {
 }
 
 // A wall-clock deadline also covers DNS, connection setup and a slowly trickling body.
-function upstream(url, key, timeoutMs) {
+export function upstream(url, key, timeoutMs) {
   return new Promise(resolve => {
     let request, timer, done = false;
     const finish = value => { if (done) return; done = true; clearTimeout(timer); resolve(value); request?.destroy(); };
@@ -172,7 +174,7 @@ export function createMyKey({ organization, organizationData, authenticate, sess
     res.end(data === undefined ? '' : JSON.stringify(data));
   };
   const reset = createMyKeyReset({ organization, policy, runtime, restarted, keyFile, now, timers, timing,
-    verify: key => upstream(organization.model.baseUrl.replace(/\/+$/, '') + '/magpie/me', key, timeoutMs) });
+    verify: key => upstream(organization.model.baseUrl.replace(/\/+$/, '') + PROFILE, key, timeoutMs) });
   const handle = async (req, res, url) => {
     if (![API, API + '/reveal', API + '/reset'].includes(url.pathname)) return false;
     try {
@@ -208,7 +210,7 @@ export function createMyKey({ organization, organizationData, authenticate, sess
         let mapped = { usage: null, models: [] };
         if (key) {
           const base = organization.model.baseUrl.replace(/\/+$/, '');
-          const [profile, usage] = await Promise.all([upstream(base + '/magpie/me', key, timeoutMs),
+          const [profile, usage] = await Promise.all([upstream(base + PROFILE, key, timeoutMs),
             upstream(base + '/magpie/usage/requests?period=' + windows.period + '&limit=1&offset=0', key, timeoutMs)]);
           const accounts = object(config.reference?.accounts) ? config.reference.accounts : {};
           const reference = [accounts[user.slug], accounts[user.unionId], config.reference?.weekly].find(positive);
