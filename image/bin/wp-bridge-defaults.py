@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import tomllib
+import urllib.request
 
 # Only the bridge resumes the agent when background work finishes, so only the
 # bridge may end a turn early; the shared instructions wait in the same turn.
@@ -78,7 +79,7 @@ def provider_block(provider, newline):
     return newline.join(lines) + newline
 
 
-def set_provider(source, index, catalog, original_model):
+def set_provider(source, index, catalog, original_model, keep_listed=False):
     """Replace only the managed provider of one project and make it active unless another is chosen."""
     parsed = tomllib.loads(source)
     agent = parsed['projects'][index]['agent']
@@ -91,7 +92,11 @@ def set_provider(source, index, catalog, original_model):
     # A model chosen with /model is kept while listed; one that only followed the
     # previous default follows the current option.
     chosen = previous.get('model')
-    if chosen and chosen != original_model and chosen in [entry['model'] for entry in models]:
+    listed = [entry['model'] for entry in models]
+    if keep_listed:
+        # The messaging-app list: keep a choice while it stays listed, else its first entry.
+        provider['model'] = chosen if chosen in listed else listed[0]
+    elif chosen and chosen != original_model and chosen in listed:
         provider['model'] = chosen
     elif 'model' in agent.get('options', {}):
         provider['model'] = agent['options']['model']
@@ -169,7 +174,7 @@ def template_upgrades(config, template, upgrades):
                 yield path, key, source[key]
 
 
-def migrate(target, model, effort, *, apply=True, template=None, upgrades=(), catalog=None):
+def migrate(target, model, effort, *, apply=True, template=None, upgrades=(), catalog=None, keep_listed=False):
     """Atomically update all projects, or leave the original untouched on failure."""
     target = Path(target).resolve()
     if not target.exists():
@@ -192,7 +197,7 @@ def migrate(target, model, effort, *, apply=True, template=None, upgrades=(), ca
         source = replace_key(source, path, key, value)
     if catalog:
         for index, original_model in enumerate(original_models):
-            source = set_provider(source, index, catalog, original_model)
+            source = set_provider(source, index, catalog, original_model, keep_listed)
     updated = source.encode('utf-8')
     if updated == original:
         return False
@@ -219,6 +224,31 @@ def organization():
         return json.loads((directory / 'organization.json').read_bytes())
     except FileNotFoundError:
         return None
+
+
+def key_models():
+    """Model ids this container's key may call, or None when the model service cannot tell."""
+    try:
+        key = Path(os.environ['PARTNER_MODEL_KEY_FILE']).read_text().strip()
+        base = os.environ['MODEL_BASE_URL'].rstrip('/')
+        request = urllib.request.Request(base + '/magpie/me', headers={'authorization': f'Bearer {key}'})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            models = json.loads(response.read(4 * 1024 * 1024))['models']
+        return [entry['id'] for entry in models if isinstance(entry, dict) and isinstance(entry.get('id'), str)]
+    except Exception:
+        return None
+
+
+def allowed(ids, model):
+    """Exact ids, or a trailing `*` opening every model with that prefix."""
+    return any(i == model or (i.endswith('*') and model.startswith(i[:-1])) for i in ids)
+
+
+def feishu_catalog(entries, ids):
+    """This person's messaging-app list narrowed to their key; unknown permissions keep the whole list."""
+    if ids is None:
+        return entries
+    return [entry for entry in entries if allowed(ids, entry['key'])]
 
 
 def refresh(target, model=None, effort=None, *, apply=True):
@@ -252,7 +282,11 @@ def refresh(target, model=None, effort=None, *, apply=True):
         if fallback and catalog:
             catalog = [entry for entry in catalog if not entry['key'].startswith(fallback['prefix'])] \
                 or [{'key': model, 'name': model.split('/')[-1]}]
-        return migrate(target, model, effort, apply=apply, template=template, upgrades=upgrades, catalog=catalog)
+        # The messaging-app list replaces the web catalog in the bridge when this person can use any entry of it.
+        listed = (runtime.get('catalog') or {}).get('feishu')
+        feishu = feishu_catalog(listed, key_models()) if listed else []
+        return migrate(target, model, effort, apply=apply, template=template, upgrades=upgrades,
+                       catalog=feishu or catalog, keep_listed=bool(feishu))
     except Exception as error:
         # Parser and OS exception messages can contain credentials; print type only.
         print(f'Warning: bridge defaults unchanged ({type(error).__name__}); continuing', file=sys.stderr)

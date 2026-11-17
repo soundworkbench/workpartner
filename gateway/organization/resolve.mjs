@@ -31,6 +31,18 @@ function quickLineModel(value) {
   return value || undefined;
 }
 
+/** Messaging-app model list in display order; with slug, only entries open to that user, without the person filter. */
+export function feishuCatalog(entries, slug) {
+  if (entries === undefined) return undefined;
+  const text = value => typeof value === 'string' && value.trim() && !/[\r\n]/.test(value);
+  if (!Array.isArray(entries) || !entries.length || entries.some(entry => !entry || Object.getPrototypeOf(entry) !== Object.prototype
+    || !text(entry.name) || !text(entry.key)
+    || (entry.only !== undefined && (!Array.isArray(entry.only) || !entry.only.length || entry.only.some(value => !text(value)))))) {
+    throw new Error('model.catalog.feishu must be a nonempty array of entries with name, key and an optional nonempty only array of user slugs');
+  }
+  return entries.filter(entry => !entry.only || entry.only.includes(slug)).map(({ name, key }) => ({ name, key }));
+}
+
 /** Read non-secret release data without requiring deployment endpoints during a build. */
 export function organizationData(environment = process.env) {
   const directory = environment.WORKPARTNER_ORG_DIR ? resolve(environment.WORKPARTNER_ORG_DIR) : fileURLToPath(new URL('../../org/default/', import.meta.url));
@@ -56,6 +68,7 @@ export function organizationData(environment = process.env) {
   }
   quickLineModel(data.model.quickLineModel);
   fallbackDefaults(data.model.fallbackDefaults);
+  feishuCatalog(data.model.catalog?.feishu);
   const userCatalog = data.model.userCatalog;
   if (userCatalog !== undefined) {
     if (!userCatalog || Object.getPrototypeOf(userCatalog) !== Object.prototype || Object.entries(userCatalog).some(([slug, added]) => !slug.trim()
@@ -123,6 +136,9 @@ export function nextModelConfig(data, environment = {}, slug) {
       return { id, key, name: entry.name || key.split('/').at(-1), also: entry.also || [] };
     });
   }
+  // An injected list is already this user's; otherwise keep entries open to everyone or listing this user.
+  const feishu = feishuCatalog(selected.catalog?.feishu, slug);
+  if (feishu?.length) catalog.feishu = feishu;
   const quickModel = quickLineModel(selected.quickLineModel);
   const fallback = fallbackDefaults(selected.fallbackDefaults);
   return { defaults, catalog, ...(quickModel ? { quickLineModel: quickModel } : {}), ...(fallback ? { fallbackDefaults: fallback } : {}) };

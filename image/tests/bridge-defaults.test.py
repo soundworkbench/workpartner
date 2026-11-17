@@ -242,6 +242,43 @@ name = "second"
             self.assertEqual(agent['options']['provider'], 'mine')
             self.assertEqual(agent['providers'][1]['model'], 'fixture-new')
 
+    def test_messaging_list_narrows_to_the_key_and_keeps_a_listed_choice(self):
+        claude = [{'id': 'fixture-claude', 'key': 'fixture-claude', 'name': 'Large', 'also': []}]
+        feishu = [{'name': 'Large', 'key': 'vendor/large'}, {'name': 'Other', 'key': 'other/model'},
+                  {'name': 'Other mini', 'key': 'other/mini'}]
+        config = {'defaults': {}, 'catalog': {'claude': claude, 'feishu': feishu}}
+        runtime = dict(ENV, WORKPARTNER_MODEL_CONFIG=json.dumps(config))
+
+        def provider(target):
+            agent = tomllib.loads(target.read_text())['projects'][0]['agent']
+            self.assertEqual(agent['options']['provider'], 'workpartner')
+            return agent['providers'][0]
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, runtime):
+            target = Path(directory) / 'config.toml'
+            target.write_bytes(self.old_config())
+            # A key without the first vendor gets the first entry it may call.
+            with patch.object(bridge, 'key_models', return_value=['other/*']):
+                self.assertTrue(bridge.refresh(target))
+                self.assertEqual(provider(target), {'name': 'workpartner', 'model': 'other/model', 'models': [
+                    {'model': 'other/model', 'alias': 'Other'}, {'model': 'other/mini', 'alias': 'Other mini'}]})
+                self.assertFalse(bridge.refresh(target))
+                # A choice made in the bridge survives while listed.
+                target.write_text(target.read_text().replace('model = "other/model"\nmodels', 'model = "other/mini"\nmodels'))
+                self.assertFalse(bridge.refresh(target))
+                self.assertEqual(provider(target)['model'], 'other/mini')
+            # Unknown key permissions keep the whole list; a choice no longer listed returns to the first entry.
+            config['catalog']['feishu'] = feishu[:2]
+            with patch.dict(os.environ, {'WORKPARTNER_MODEL_CONFIG': json.dumps(config)}), \
+                    patch.object(bridge, 'key_models', return_value=None):
+                self.assertTrue(bridge.refresh(target))
+                self.assertEqual(provider(target)['model'], 'vendor/large')
+                self.assertEqual(len(provider(target)['models']), 2)
+            # A key allowed none of the list leaves the web catalog in place.
+            with patch.object(bridge, 'key_models', return_value=['third/*']):
+                self.assertTrue(bridge.refresh(target))
+                self.assertEqual(provider(target)['models'], [{'model': 'fixture-claude', 'alias': 'Large'}])
+
     def test_failure_never_partially_writes_or_prints_credentials(self):
         for source in (b'[broken fixture-private-value', self.old_config()):
             with self.subTest(source=source[:20]), tempfile.TemporaryDirectory() as directory:

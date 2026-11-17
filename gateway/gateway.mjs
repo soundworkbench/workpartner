@@ -102,6 +102,7 @@ import { createFeedback } from './feedback.mjs';
 import { createMyKey } from './my-key.mjs';
 import { createVoice } from './voice.mjs';
 import { createFeishuBot } from './feishu-bot.mjs';
+import { createFeishuModel } from './feishu-model.mjs';
 voice = createVoice({ organization, organizationData, authenticate: req => userFor(req).user });
 feedback = organization.features.feedback ? createFeedback({ organization, organizationData,
   authenticate: req => userFor(req).user, tokenAuthenticate: req => tokenUser(req, SESSION_KEY, users()),
@@ -115,6 +116,10 @@ myKey = organization.features.myKey === true ? createMyKey({ organization, organ
 
 feishuBot = createFeishuBot({ organization, organizationData,
   authenticate: req => userFor(req).user, runtime,
+});
+
+const feishuModel = createFeishuModel({ organization, organizationData,
+  authenticate: req => userFor(req).user, keyFor: modelKeyFor, runtime,
 });
 
 function sessionOf(req) {
@@ -315,6 +320,7 @@ const server = http.createServer(async (req, res) => {
     if (myKey && await myKey(req, res, url)) return;
     if (await voice(req, res, url)) return;
     if (await feishuBot(req, res, url)) return;
+    if (await feishuModel(req, res, url)) return;
     if (url.pathname === "/_wp/logout") {
       res.setHeader("set-cookie", [...new Set(["wp_sid", ...(legacy?.sessionCookieNames || [])])].map(name => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`));
       return welcome(res, { title: "已退出登录", lines: ["此浏览器已退出工作伙伴。"], action: { href: "/_wp/login", text: "重新登录" } });
