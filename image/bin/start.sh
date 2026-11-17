@@ -87,7 +87,25 @@ mark configured
 service_pids=("$!")
 python3 -I /opt/workpartner/bin/wp-agent sync || echo "警告：未同步助手说明，继续启动" >&2
 # 守护进程等待扫码配置落盘；消息桥退出只触发局部重启。
-python3 -I /opt/workpartner/bin/wp-feishu-bot.py supervise --started "${started:0:-6}.${started: -6}" &
+# 守护进程自己退出时按 5 秒起、最长 60 秒退避重新拉起；连续运行满 5 分钟后退避复位。
+supervise_bridge() {
+  local delay=5 began status reason child=''
+  trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' TERM
+  while :; do
+    began=$SECONDS
+    python3 -I /opt/workpartner/bin/wp-feishu-bot.py supervise --started "${started:0:-6}.${started: -6}" &
+    child=$!
+    wait "$child"; status=$?
+    if [ $((SECONDS - began)) -ge 300 ]; then delay=5; fi
+    if [ "$status" -gt 128 ]; then reason="信号 $(kill -l $((status - 128)))"; else reason="退出码 $status"; fi
+    echo "消息桥守护进程退出（$reason），${delay} 秒后重启" >&2
+    sleep "$delay" & child=$!
+    wait "$child"
+    delay=$((delay * 2 > 60 ? 60 : delay * 2))
+    echo "消息桥守护进程重启" >&2
+  done
+}
+supervise_bridge &
 bridge_supervisor_pid=$!
 
 # 每次启动校正助手（只开 ChatGPT 和 Claude，ChatGPT 排第一；没有 Claude 权限就只开 ChatGPT），第一次还写中文和默认助手。
