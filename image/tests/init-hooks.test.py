@@ -310,8 +310,8 @@ exec ''' + shlex.quote(timeout) + ' --foreground --kill-after=0.2s 1s "$@"\n')
         self.assertEqual(result.stdout.splitlines(), [self.env['PATH'], 'shopt -u nullglob'])
         self.assertEqual(list(self.data.iterdir()), [])
 
-    def wait_for(self, predicate, process):
-        deadline = time.monotonic() + 5
+    def wait_for(self, predicate, process, timeout=5):
+        deadline = time.monotonic() + timeout
         while not predicate():
             if process.poll() is not None or time.monotonic() >= deadline:
                 self.fail('startup did not reach expected state')
@@ -329,6 +329,9 @@ exec ''' + shlex.quote(timeout) + ' --foreground --kill-after=0.2s 1s "$@"\n')
 
     def test_entrypoint_term_stops_bridge(self):
         self.exercise_startup(('aionui', 'bridge', 'relay'), 'TERM')
+
+    def test_bridge_supervisor_exit_is_restarted(self):
+        self.exercise_startup(('aionui', 'bridge', 'relay'), 'supervisor')
 
     def exercise_startup(self, services, exiting, published=False):
         with tempfile.TemporaryDirectory(dir=self.root) as temporary:
@@ -401,6 +404,14 @@ fi
                         for name in PUBLISHED[1:]:
                             self.assertEqual(os.readlink(data / name), str(self.published / name))
                         self.assertEqual(list(data.glob('.wp-published.*')), [])
+                    if exiting == 'supervisor':
+                        bridge = int((state / 'bridge-pids').read_text().split()[0])
+                        supervisor = int(Path(f'/proc/{bridge}/stat').read_text().rsplit(')', 1)[1].split()[1])
+                        os.kill(supervisor, signal.SIGTERM)
+                        self.wait_for(lambda: len((state / 'bridge-pids').read_text().splitlines()) >= 2, process, 10)
+                        self.assertIn('消息桥守护进程退出（退出码 0），5 秒后重启', log.read_text())
+                        self.assertIn('消息桥守护进程重启', log.read_text())
+                        exiting = 'TERM'
                     if exiting == 'TERM':
                         pid = int((data / '.cc-connect/run/bridge.pid').read_text())
                         process.terminate()
