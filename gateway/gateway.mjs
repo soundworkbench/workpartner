@@ -16,6 +16,7 @@ import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMat
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
 import { createChatTitles } from "./title.mjs";
 import { isNavigation, notReady, updatingText } from "./starting.mjs";
+import { guidHideGuardClient } from './guid-hide-guard-client.mjs';
 
 import { createSharedSkillStore, createSharedSkillsHandler } from './market-shared.mjs';
 import { marketNotifications } from './market-notifications.mjs';
@@ -87,7 +88,7 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
 });
 const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
 let feedback, myKey, voice, feishuBot; // Preview callbacks run per request after feature initialization.
-const services = await createGatewayServices({ extraClient: user => (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || '')
+const services = await createGatewayServices({ extraClient: user => (user ? guidHideGuardClient() : '') + (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || '')
   + (voice?.clientFor(user) || '')
   + (feishuBot?.clientFor(user) || ''), dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
@@ -305,7 +306,7 @@ const server = http.createServer(async (req, res) => {
     if (await preview?.handle(req, res, url)) return;
     if (!preview && url.pathname === "/_wp/preview/client.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
-      return res.end("// Workspace preview is disabled." + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || "")
+      return res.end("// Workspace preview is disabled." + (userFor(req).user ? guidHideGuardClient() : '') + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || "")
         + (voice?.clientFor(userFor(req).user) || "")
         + (feishuBot?.clientFor(userFor(req).user) || ""));
     }

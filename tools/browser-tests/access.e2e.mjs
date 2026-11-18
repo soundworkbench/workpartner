@@ -13,6 +13,7 @@ const CLIENT = '/_wp/preview/client.js';
 const ALLOW = ['member', 'member2'];
 const ENTRY = '.wp-settings-menu [data-wp-feedback]';
 const { feedbackClient } = await import(pathToFileURL(path.join(repo, 'gateway/feedback-client.mjs')).href);
+const { guidHideGuardClient } = await import(pathToFileURL(path.join(repo, 'gateway/guid-hide-guard-client.mjs')).href);
 const { installPreviewClient } = await import(pathToFileURL(path.join(repo, 'preview/client.mjs')).href);
 
 const suite = createSuite('access', async s => {
@@ -48,7 +49,7 @@ test('client.js: byte-identical to a gateway without feedback for everyone who m
       assert.equal(plain[who].status, 200);
       assert.equal(plain[who].headers['cache-control'], 'no-store');
       assert.ok(!/feedback/i.test(body), step + 'no trace of feedback');
-      if (preview === 'off') assert.equal(body, '// Workspace preview is disabled.', step + 'exact body');
+      if (preview === 'off') assert.equal(body, '// Workspace preview is disabled.' + guidHideGuardClient(), step + 'exact body');
       else assert.ok(body.startsWith(`(${installPreviewClient.toString()})(`) && body.endsWith(');'), step + 'only the preview client');
     }
     // Feature on: the plain script plus exactly the feedback part; that part carries two numbers and no identities.

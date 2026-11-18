@@ -12,8 +12,10 @@ import { organizationData, nextModelConfig } from '../gateway/organization/resol
 import crypto from 'node:crypto';
 import { installPreviewClient } from '../preview/client.mjs';
 import { feedbackClient } from '../gateway/feedback-client.mjs';
+import { guidHideGuardClient } from '../gateway/guid-hide-guard-client.mjs';
 import { issueToken, tokenUser } from '../gateway/market-auth.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
+const GUID_HIDE_GUARD = guidHideGuardClient();
 
 function fixtureOrganization(t) {
   const baseline = structuredClone(organizationData({}));
@@ -311,7 +313,7 @@ test('organization switches disable integrations without loading private code or
   }
   const client = await f.request('/_wp/preview/client.js', { headers });
   assert.equal(client.status, 200);
-  assert.equal(client.body, '// Workspace preview is disabled.');
+  assert.equal(client.body, '// Workspace preview is disabled.' + GUID_HIDE_GUARD);
   assert.ok(!fs.existsSync(f.org.runtime.stateDirectory));
   assert.ok(!fs.existsSync(f.org.runtime.nextDirectory));
 });
@@ -793,9 +795,9 @@ test('client.js preview on/off × admission preserves original bytes and only ap
     fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key');
     fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
     fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
-    const baseline = user => preview
+    const baseline = user => (preview
       ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});`
-      : '// Workspace preview is disabled.';
+      : '// Workspace preview is disabled.') + (user ? GUID_HIDE_GUARD : '');
     const script = `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -905,7 +907,7 @@ test('my key preview on and off preserve original serializer bytes unless admitt
     const people = [{ slug: 'member', unionId: 'union-member', backend: 'legacy' }, { slug: 'outsider', unionId: 'union-outsider', backend: 'legacy' }];
     fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key'); fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
     fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
-    const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');
+    const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (user ? GUID_HIDE_GUARD : '') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');
     const script = `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -953,7 +955,7 @@ test('feishu bot preview on and off preserve original serializer bytes unless ad
       { slug: 'legacy-member', unionId: 'union-legacy', backend: 'legacy' }];
     fs.writeFileSync(org.runtime.sessionKeyFile, 'fixture-session-key'); fs.writeFileSync(org.runtime.usersFile, JSON.stringify(people));
     fs.writeFileSync(path.join(dir, 'organization.json'), JSON.stringify(org));
-    const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');
+    const baseline = user => (preview ? `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost: 'preview.example.test', scope: crypto.createHmac('sha256', 'fixture-session-key').update('preview-origin-v1:' + user.unionId).digest('hex').slice(0, 24) })});` : '// Workspace preview is disabled.') + (user ? GUID_HIDE_GUARD : '') + (feedbackEnabled && user.slug === 'member' ? feedbackClient() : '');
     const script = `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
