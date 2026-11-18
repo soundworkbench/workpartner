@@ -759,29 +759,35 @@
   var FOOTER_ITEMS = ['反馈问题', '喜欢我们？点个星吧', '远程连接', 'Report Issue', 'Like us? Give us a star!', 'Remote Connection'];
 
   // 从只含这个文字的叶子节点向上爬，到“整行”为止（行内只剩图标，没有别的文字）
+  function protectedHideTarget(el) {
+    return !!(el && ((el.matches && el.matches('[data-testid="guid-input"],textarea'))
+      || (el.querySelector && el.querySelector('[data-testid="guid-input"],textarea,[class*="guidContainer"]'))
+      || (el.matches && el.matches('[class*="guidContainer"]'))));
+  }
   function rowOf(el) {
     var t = (el.textContent || '').trim();
     var n = el;
     for (var i = 0; i < 4; i++) {
       var p = n.parentElement;
       if (!p || p === document.body) break;
-      if ((p.textContent || '').trim() !== t || p.querySelector('textarea,input,[contenteditable]') || p.querySelectorAll('button').length > 1) break;
+      if ((p.textContent || '').trim() !== t || p.querySelector('textarea,input,[contenteditable]') || p.querySelectorAll('button').length > 1
+        || protectedHideTarget(p)) break;
       n = p;
     }
     return n;
   }
-  function leaves(texts, root) {
+  function leaves(texts, root, includeModelLabels) {
     var out = [];
     var all = (root || document).querySelectorAll('span,div,p,a,button');
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (el.children.length) continue;
       var t = (el.textContent || '').trim();
-      if (texts.indexOf(t) >= 0 || /^(选择模型|权限\s*·.*|(claude|codex)\/[\w.-]+)$/.test(t)) out.push(el);
+      if (texts.indexOf(t) >= 0 || (includeModelLabels && /^(选择模型|权限\s*·.*|(claude|codex)\/[\w.-]+)$/.test(t))) out.push(el);
     }
     return out;
   }
-  function hide(el) { if (el && !el.classList.contains('wp-hide')) el.classList.add('wp-hide'); }
+  function hide(el) { if (el && !protectedHideTarget(el) && !el.classList.contains('wp-hide')) el.classList.add('wp-hide'); }
   function commonAncestor(a, b) {
     for (var n = a; n; n = n.parentElement) if (n.contains(b)) return n;
     return null;
@@ -823,7 +829,7 @@
     // 侧栏“团队”分组标题行
     document.querySelectorAll('[data-testid="team-section-toggle"]').forEach(function (el) { hide(el.parentElement); });
     // 首页：智能体选择条保留（只开了 Claude Code 和 Codex）；模型、权限、工作目录隐藏
-    leaves(HOME_ITEMS).forEach(function (el) { hide(rowOf(el)); });
+    leaves(HOME_ITEMS, null, true).forEach(function (el) { hide(rowOf(el)); });
     var ws = document.querySelector('[data-testid="workspace-selector-btn"]');
     if (ws) hide(ws.parentElement);
     // 只隐藏原生反馈入口；按坐标隐藏 SVG 会误伤同在右上角的文件栏开关。
