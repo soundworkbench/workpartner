@@ -167,6 +167,13 @@ async function resolve(req) {
   return result;
 }
 
+// Large or unsized request bodies (file uploads) are piped to the workspace instead of buffered in memory.
+const STREAM_BODY_BYTES = 1024 * 1024;
+const UPLOAD_REQUEST_TIMEOUT_MS = 60 * 60 * 1000;
+const streamsBody = req => req.headers["transfer-encoding"] !== undefined
+  || Number(req.headers["content-length"] || 0) > STREAM_BODY_BYTES;
+
+/** body is a Buffer for buffered requests; undefined means pipe req itself, which cannot be replayed after a 401. */
 function proxy(req, res, r, body, retried) {
   // 静态文件：浏览器带的 If-None-Match 与按镜像 ID + 路径算出的 ETag 相同，网关直接答 304，不转发。
   const etag = r.etag?.(req);
@@ -179,11 +186,13 @@ function proxy(req, res, r, body, retried) {
   if (titleCreate) headers["accept-encoding"] = "identity";
   const up = http.request({ ...r.up.address, path: req.url, method: req.method,
     headers }, async (ur) => {
-    if (ur.statusCode === 401 && !retried) {
+    if (ur.statusCode === 401 && !retried && body !== undefined) {
       ur.resume();
       r.cookie = await r.relogin();
       return proxy(req, res, r, body, true);
     }
+    // A streamed body is already consumed: refresh the session so the browser's retry succeeds, and pass the 401 on.
+    if (ur.statusCode === 401 && body === undefined) r.relogin().catch(() => {});
     res.writeHead(ur.statusCode, r.responseHeaders(ur.headers, etag, ur.statusCode));
     if (titleCreate && ur.statusCode >= 200 && ur.statusCode < 300) {
       const parts = []; let size = 0;
@@ -193,7 +202,10 @@ function proxy(req, res, r, body, retried) {
     ur.pipe(res);
   });
   up.on("error", () => { r.lost(); if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。"); });
-  up.end(body);
+  if (body !== undefined) return up.end(body);
+  req.on("error", () => up.destroy());
+  req.on("close", () => { if (!req.complete) up.destroy(); });
+  req.pipe(up);
 }
 
 // 网关以本人身份直接调 旧版后端 接口的兼容逻辑在组织的可选扩展中。
@@ -367,6 +379,11 @@ const server = http.createServer(async (req, res) => {
       if (r.updating) return preparing(req, res, ...updatingText(req));
       return preparing(req, res, "正在准备你的工作空间", "通常不超过半分钟，页面会自动刷新。");
     }
+    if (streamsBody(req)) {
+      const titleWrite = chatTitles.before(req, r, "");
+      if (titleWrite) await titleWrite;
+      return proxy(req, res, r);
+    }
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", async () => {
@@ -408,4 +425,6 @@ server.on("upgrade", async (req, socket, head) => {
   }
 });
 
+// Node's default five-minute whole-request limit cuts off large uploads on slow links; header limits stay default.
+server.requestTimeout = UPLOAD_REQUEST_TIMEOUT_MS;
 server.listen(PORT, "0.0.0.0", () => console.log(`工作伙伴网关 :${PORT}`));
