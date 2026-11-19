@@ -22,7 +22,7 @@ export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [],
   const seen = new Set(), files = [], warnings = new Set(); let size = 0, scripts = 0;
   for (const file of bundle.files) {
     if (typeof file.path !== 'string' || !file.path || file.path.length > 512 || file.path.split('/').some(p => !p || p === '.' || p === '..' || /[\\:\x00-\x1f]/.test(p)) || seen.has(file.path)) throw fail(400, '技能包含无效或重复的文件路径。');
-    if (typeof file.content !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.content)) throw fail(400, '技能文件无法读取。');
+    if (typeof file.content !== 'string' || file.content.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.content)) throw fail(400, '技能文件无法读取。');
     const content = Buffer.from(file.content, 'base64'); size += content.length;
     if (size > 10 * 1024 * 1024) throw fail(413, '分享的技能总计不能超过 10 MB。');
     const source = content.toString('utf8');
