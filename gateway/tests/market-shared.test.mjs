@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { Readable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
 import { marketNotifications } from '../market-notifications.mjs';
 import { createSharedSkillStore, createSharedSkillsHandler, inspectSkill } from '../market-shared.mjs';
@@ -41,7 +42,8 @@ test('real worker lifecycle: private draft, review, both engine paths, approved 
   const duplicate = await f.store.submit(alice, await f.execute(alice, 'export', { name: first.name }), meta);
   assert.equal(duplicate.version, first.version);
   await f.store.review(it, first.name, first.version, 'approve');
-  await Promise.all([f.store.install(bob, first.name, f.execute), f.store.install(bob, first.name, f.execute)]);
+  const installs = await Promise.all([f.store.install(bob, first.name, f.execute), f.store.install(bob, first.name, f.execute)]);
+  assert.deepEqual(installs.map(result => ({ installed: result.installed, changed: result.changed })), [{ installed: true, changed: true }, { installed: true, changed: false }]);
   assert.equal(f.store.list(bob).company[0].installs, 1);
   const files = ['.claude/skills', '.codex/skills'].map(directory => path.join(f.root, 'bob', directory, first.name, 'SKILL.md'));
   for (const file of files) assert.match(fs.readFileSync(file, 'utf8'), /整理会议方法/);
@@ -51,7 +53,7 @@ test('real worker lifecycle: private draft, review, both engine paths, approved 
   await f.store.review(it, next.name, next.version, 'approve');
   for (const file of files) assert.match(fs.readFileSync(file, 'utf8'), /新版方法/);
   await assert.rejects(f.store.withdraw(bob, first.name), /作者或审批人/);
-  await f.store.uninstall(bob, first.name, f.execute);
+  assert.equal((await f.store.uninstall(bob, first.name, f.execute)).installed, false);
   assert.equal(f.store.list(bob).company[0].installs, 0);
   await f.store.install(bob, first.name, f.execute);
   assert.equal(f.store.list(bob).company[0].installs, 1);
@@ -68,6 +70,54 @@ test('real worker lifecycle: private draft, review, both engine paths, approved 
   assert.equal((await f.execute(bob, 'list')).skills[0].shared, false);
   assert.equal(fs.lstatSync(path.join(f.root, 'bob/.claude/skills')).isDirectory(), true);
   assert.equal(f.store.list(bob).company.length, 0);
+});
+
+test('slow container work and notifications do not hold the catalog queue', async t => {
+  const carol = { slug: 'carol', unionId: 'reader-d', name: '读者丙', backend: 'aionui' };
+  const f = fixture(t);
+  const first = await f.store.submit(alice, await f.local(), meta);
+  await f.store.review(it, first.name, first.version, 'approve');
+  const slow = async () => { await new Promise(resolve => setTimeout(resolve, 2000)); return { changed: true }; };
+  const waiting = f.store.install(bob, first.name, slow);
+  await new Promise(resolve => setImmediate(resolve));
+  const started = Date.now();
+  const listed = f.store.list(carol);
+  const submitted = await f.store.submit(carol, { ...await f.local(alice), name: 'queue-check' }, { ...meta, displayName: '队列检查' });
+  assert.ok(listed && submitted.status === 'pending');
+  assert.ok(Date.now() - started < 500, `catalog operation waited ${Date.now() - started}ms`);
+  await waiting;
+
+  let notifyStarted;
+  const notified = fixture(t, { notifyAuthor: async () => {
+    notifyStarted = Date.now(); await new Promise(resolve => setTimeout(resolve, 2000));
+  } });
+  const notifyBundle = await notified.local();
+  const draft = await notified.store.submit(alice, notifyBundle, meta);
+  const review = notified.store.review(it, draft.name, draft.version, 'approve');
+  await new Promise(resolve => setImmediate(resolve));
+  const duringNotify = Date.now(); notified.store.list(bob);
+  await notified.store.submit(bob, { ...notifyBundle, name: 'notify-queue-check' }, { ...meta, displayName: '通知队列检查' });
+  assert.ok(Date.now() - duringNotify < 500);
+  await review;
+  assert.ok(notifyStarted);
+});
+
+test('a personal same-name conflict returns 409 and logs only the user slug', async t => {
+  const f = fixture(t);
+  const first = await f.store.submit(alice, await f.local(), meta);
+  await f.store.review(it, first.name, first.version, 'approve');
+  await f.local(bob);
+  const handler = createSharedSkillsHandler({ store: f.store, execute: f.execute, origin: 'https://partner.example',
+    authenticate: () => bob, tokenAuthenticate: () => null });
+  const logs = []; t.mock.method(console, 'warn', line => logs.push(line));
+  const req = Readable.from([Buffer.from(JSON.stringify({ action: 'install', name: first.name }))]);
+  req.method = 'POST'; req.headers = { origin: 'https://partner.example', 'content-type': 'application/json' };
+  const response = { status: 0, body: null, writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } };
+  await handler(req, response, new URL('https://partner.example/_wp/market/shared'));
+  assert.equal(response.status, 409); assert.match(response.body.message, /同名/);
+  assert.equal(logs.length, 1); const entry = JSON.parse(logs[0]);
+  assert.equal(entry.event, 'market_shared_error'); assert.equal(entry.action, 'install'); assert.equal(entry.user, 'bob');
+  assert.equal(entry.status, 409); assert.doesNotMatch(logs[0], /reader-b|author-a|unionId/);
 });
 
 test('each version is approved separately; rejection reasons, ownership and notification failures survive restart', async t => {

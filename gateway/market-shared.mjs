@@ -45,6 +45,14 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
   if (state.version !== 1 || !state.skills || Array.isArray(state.skills)) throw new Error('Unsupported skill market state');
   let queue = Promise.resolve();
   const serial = work => { const result = queue.then(work); queue = result.catch(() => {}); return result; };
+  const keyedQueues = new Map();
+  const keyedSerial = (key, work) => {
+    const result = (keyedQueues.get(key) || Promise.resolve()).then(work);
+    const settled = result.catch(() => {});
+    keyedQueues.set(key, settled);
+    void settled.then(() => { if (keyedQueues.get(key) === settled) keyedQueues.delete(key); });
+    return result;
+  };
   function save() {
     const temporary = `${stateFile}.${crypto.randomUUID()}`;
     try { fs.writeFileSync(temporary, JSON.stringify(state), { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, stateFile); }
@@ -96,14 +104,16 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
     status: version.status, reason: version.reason || '', warnings: version.warnings, scripts: version.scripts,
     reviewNotice: version.reviewNotice, authorNotice: version.authorNotice, createdAt: version.createdAt });
   async function sendReview(name, row, version) {
-    try { await notify({ ...summary(name, row, version), approvers }); version.reviewNotice = 'sent'; }
-    catch (error) { version.reviewNotice = 'failed'; }
-    save();
+    let notice = 'sent';
+    try { await notify({ ...summary(name, row, version), approvers }); }
+    catch (error) { notice = 'failed'; }
+    await serial(() => { version.reviewNotice = notice; save(); });
   }
   async function sendAuthor(name, row, version) {
-    try { await notifyAuthor({ ...summary(name, row, version), unionId: row.author }); version.authorNotice = 'sent'; }
-    catch (error) { version.authorNotice = 'failed'; }
-    save();
+    let notice = 'sent';
+    try { await notifyAuthor({ ...summary(name, row, version), unionId: row.author }); }
+    catch (error) { notice = 'failed'; }
+    await serial(() => { version.authorNotice = notice; save(); });
   }
   return {
     admin,
@@ -120,16 +130,18 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
       return { company: company.sort((a, b) => b.installs - a.installs || a.name.localeCompare(b.name)), mine, pending, reviewed,
         isApprover: admin(user), submissionsEnabled: approvers.length > 0 };
     },
-    submit(user, bundle, meta) { return serial(async () => {
+    async submit(user, bundle, meta) {
+      const name = bundle?.name;
+      const outcome = await serial(async () => {
       if (!approvers.length) throw fail(403, '管理员尚未开放技能分享。');
       if (!text(meta.displayName, 80) || !text(meta.description, 300) || !text(meta.example, 500)) throw fail(400, '请填写技能中文名、一句话说明和一个例句。');
-      const checked = inspectSkill(bundle, protectedNames, reservedPrefixes, meta.displayName), name = bundle.name;
+      const checked = inspectSkill(bundle, protectedNames, reservedPrefixes, meta.displayName);
       checked.warnings = [...new Set([...checked.warnings, ...scanContent([name, meta.displayName, meta.description, meta.example].join('\n'))])];
       const old = Object.hasOwn(state.skills, name) ? state.skills[name] : undefined;
       if (old && old.author !== user.unionId) throw fail(409, '这个名称已由其他作者使用，请改名。');
       const digest = crypto.createHash('sha256').update(JSON.stringify({ displayName: meta.displayName, description: meta.description, example: meta.example, files: bundle.files })).digest('hex');
       const duplicate = old && Object.values(old.versions).find(v => v.digest === digest && ['pending', 'approved'].includes(v.status));
-      if (duplicate) return summary(name, old, duplicate);
+      if (duplicate) return { row: old, version: duplicate, notify: false };
       const id = crypto.randomUUID(), location = path.join(stateDir, 'submissions', name, id);
       fs.mkdirSync(location, { recursive: true });
       for (const file of checked.files) {
@@ -140,15 +152,18 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
       const version = { id, digest, displayName: meta.displayName, description: meta.description, example: meta.example,
         warnings: checked.warnings, scripts: checked.scripts, status: 'pending', createdAt: new Date().toISOString() };
       row.versions[id] = version; state.skills[name] = row; save();
-      await sendReview(name, row, version);
-      return summary(name, row, version);
-    }); },
-    review(user, name, id, action, reason = '') { return serial(async () => {
+      return { row, version, notify: true };
+      });
+      if (outcome.notify) await sendReview(name, outcome.row, outcome.version);
+      return summary(name, outcome.row, outcome.version);
+    },
+    async review(user, name, id, action, reason = '') {
+      const outcome = await serial(async () => {
       if (!admin(user)) throw fail(403, '只有配置的审批人可以审批。');
       const row = get(name), version = Object.hasOwn(row.versions, id) ? row.versions[id] : undefined;
       if (!version || !['approve', 'reject', 'resend', 'notify-author'].includes(action)) throw fail(400, '审批参数无效。');
-      if (action === 'notify-author') { if (version.status === 'pending') throw fail(409, '请先完成审批。'); await sendAuthor(name, row, version); return summary(name, row, version); }
-      if (action === 'resend') { if (version.status !== 'pending') throw fail(409, '这个版本已经审批。'); await sendReview(name, row, version); return summary(name, row, version); }
+      if (action === 'notify-author') { if (version.status === 'pending') throw fail(409, '请先完成审批。'); return { row, version, notice: 'author' }; }
+      if (action === 'resend') { if (version.status !== 'pending') throw fail(409, '这个版本已经审批。'); return { row, version, notice: 'review' }; }
       if (version.status !== 'pending') {
         const status = { approved: '已通过', rejected: '未通过', withdrawn: '已下架' }[version.status] || version.status;
         throw fail(409, `这个版本当前状态为“${status}”，不能重复审批，请刷新市场查看。`);
@@ -160,9 +175,12 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
       }
       version.status = action === 'approve' ? 'approved' : 'rejected'; version.reason = action === 'reject' ? reason : '';
       version.reviewedAt = new Date().toISOString(); version.reviewer = user.unionId;
-      save(); reconcile(name); await sendAuthor(name, row, version);
-      return summary(name, row, version);
-    }); },
+      save(); reconcile(name); return { row, version, notice: 'author' };
+      });
+      if (outcome.notice === 'review') await sendReview(name, outcome.row, outcome.version);
+      else if (outcome.notice === 'author') await sendAuthor(name, outcome.row, outcome.version);
+      return summary(name, outcome.row, outcome.version);
+    },
     withdraw(user, name) { return serial(() => {
       const row = get(name);
       if (!admin(user) && row.author !== user.unionId) throw fail(403, '只有作者或审批人可以下架。');
@@ -170,20 +188,24 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
       for (const version of Object.values(row.versions)) if (['approved', 'pending'].includes(version.status)) version.status = 'withdrawn';
       save(); reconcile(name); return { name };
     }); },
-    install(user, name, execute) { return serial(async () => {
-      const row = get(name); if (!row.live) throw fail(404, '这个技能已经下架。');
-      reconcile(name);
+    install(user, name, execute) { return keyedSerial(`${user.slug}:${name}`, async () => {
+      await serial(async () => {
+        const row = get(name); if (!row.live) throw fail(404, '这个技能已经下架。');
+        reconcile(name);
+      });
       const result = await execute(user, 'shared-install', { name });
-      if (result.error) throw fail(409, result.message);
-      if (result.changed) { row.installs++; save(); }
-      return { name };
+      if (result.error) throw Object.assign(fail(409, result.message), { code: result.error });
+      await serial(() => {
+        if (result.changed && Object.hasOwn(state.skills, name)) { state.skills[name].installs++; save(); }
+      });
+      return { name, installed: true, changed: Boolean(result.changed) };
     }); },
-    uninstall(user, name, execute) { return serial(async () => {
+    uninstall(user, name, execute) { return keyedSerial(`${user.slug}:${name}`, async () => {
       const result = await execute(user, 'delete', { name });
       if (!result.error && result.shared && Object.hasOwn(state.skills, name)) {
-        state.skills[name].installs = Math.max(0, state.skills[name].installs - 1); save();
+        await serial(() => { state.skills[name].installs = Math.max(0, state.skills[name].installs - 1); save(); });
       }
-      return result;
+      return { ...result, installed: false };
     }); },
     source(user, name, id) {
       if (!admin(user)) throw fail(403, '只有审批人可以查看待审内容。');
@@ -207,8 +229,19 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
   const json = (res, status, data) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(data)); };
   return async (req, res, url) => {
     if (url.pathname !== prefix && url.pathname !== `${prefix}/review`) return false;
+    const started = Date.now(); let action = req.method === 'GET' ? 'list' : 'unknown';
+    let skillName = url.searchParams.get('name') || undefined; let actor;
+    const logError = (error, status) => {
+      const httpStatus = Number.isInteger(status) ? status : 503;
+      const unknown = !Number.isInteger(error?.status);
+      const entry = { event: 'market_shared_error', action, name: skillName, status: httpStatus,
+        code: unknown ? (error?.name || 'Error') : (error?.code || `HTTP_${httpStatus}`),
+        message: String(error?.message || '操作失败').slice(0, 300), durationMs: Date.now() - started, user: actor };
+      (httpStatus >= 400 && httpStatus < 500 ? console.warn : console.error)(JSON.stringify(entry));
+    };
     try {
       const signed = tokenAuthenticate(req), user = signed || authenticate(req);
+      actor = user?.slug;
       if (!user) {
         if (req.method === 'GET' && url.pathname.endsWith('/review')) {
           res.writeHead(302, { location: '/_wp/login?next=' + encodeURIComponent(url.pathname + url.search), 'cache-control': 'no-store' }); res.end(); return true;
@@ -232,6 +265,7 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
       for await (const chunk of req) { size += chunk.length; if (size > 16384) throw fail(413, '请求过大。'); chunks.push(chunk); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (error) { throw fail(400, '请求格式无效。'); }
       if (!body || typeof body.name !== 'string' || !NAME.test(body.name)) throw fail(400, '技能名称无效。');
+      action = body.action || 'unknown'; skillName = body.name;
       if (['submit', 'install'].includes(body.action) && (user.backend !== 'aionui' || !/^[a-zA-Z0-9_-]+$/.test(user.slug))) throw fail(403, '请先开通新版工作伙伴。');
       let result;
       if (body.action === 'submit') {
@@ -243,7 +277,11 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
       else if (body.action === 'withdraw') result = await store.withdraw(user, body.name);
       else result = await store.review(user, body.name, body.version, body.action, body.reason);
       json(res, 200, result);
-    } catch (error) { json(res, error.status || 503, { message: error.status ? error.message : '操作尚未确认完成，请刷新市场核实。' }); }
+    } catch (error) {
+      const status = error.status || 503;
+      logError(error, status);
+      json(res, status, { message: error.status ? error.message : '操作尚未确认完成，请刷新市场核实。' });
+    }
     return true;
   };
 }

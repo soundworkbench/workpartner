@@ -5,7 +5,7 @@
     'zh-CN': { add: '添加技能', loading: '正在加载技能…', empty: '暂无技能', official: '官方', company: '公司技能', mine: '我的',
       preinstalled: '预装', personal: '仅自己', myShare: '我分享的', remove: '删除', uninstall: '卸载', retry: '刷新列表', busy: '正在处理…', install: '安装', installedBadge: '已安装',
       overwrite: '已有同名技能“{name}”，要覆盖吗？', confirmDelete: '删除技能“{name}”？删除后 Claude 和 ChatGPT 都将无法使用。',
-      installed: '已安装，开新对话后生效；飞书个人智能体请发 /new。', removed: '已移除技能。', failed: '操作尚未确认完成，请刷新列表后重试。',
+      installed: '已安装，开新对话后生效；飞书个人智能体请发 /new。', removed: '已移除技能。', failed: '操作尚未确认完成，请刷新列表后重试。', nameConflict: '你已有同名的个人技能，请先改名或删除后再安装',
       file: '请选择 .zip 或单个 SKILL.md 文件。', large: '技能文件不能超过 10 MB。', submit: '分享给公司', submitted: '已提交 IT 审批，自己的版本仍可使用。',
       pending: '待审批', approved: '已通过', rejected: '未通过', withdrawn: '已下架', withdrawnRemovable: '已下架，可移除', removeLink: '移除', withdraw: '下架', confirmWithdraw: '下架后所有安装者都将无法使用，要继续吗？',
       tryIt: '试一试', source: '数据来源：', author: '作者：', installs: ' 人已安装', review: '审批', reviewTitle: '待我审批', title: '中文名', description: '一句话说明', example: '例句', cancel: '取消',
@@ -14,7 +14,7 @@
     'en-US': { add: 'Add skill', loading: 'Loading skills…', empty: 'No skills yet', official: 'Official', company: 'Company skills', mine: 'Mine',
       preinstalled: 'Preinstalled', personal: 'Only you', myShare: 'Shared by me', remove: 'Delete', uninstall: 'Uninstall', retry: 'Refresh list', busy: 'Working…', install: 'Install', installedBadge: 'Installed',
       overwrite: 'A skill named “{name}” already exists. Replace it?', confirmDelete: 'Delete “{name}”? Claude and ChatGPT will no longer be able to use it.',
-      installed: 'Start a new chat to use the skill. Send /new in your personal messaging agent.', removed: 'Skill removed.', failed: 'The operation is unconfirmed. Refresh the list before retrying.',
+      installed: 'Start a new chat to use the skill. Send /new in your personal messaging agent.', removed: 'Skill removed.', failed: 'The operation is unconfirmed. Refresh the list before retrying.', nameConflict: 'You already have a personal skill with this name. Rename or delete it before installing.',
       file: 'Choose a .zip file or a single SKILL.md file.', large: 'Skill files must be 10 MB or smaller.', submit: 'Share with company', submitted: 'Submitted for IT review. Your copy remains available.',
       pending: 'Pending review', approved: 'Approved', rejected: 'Rejected', withdrawn: 'Withdrawn', withdrawnRemovable: 'Withdrawn, can be removed', removeLink: 'Remove', withdraw: 'Withdraw', confirmWithdraw: 'All installers will lose access. Continue?',
       tryIt: 'Try it', source: 'Source: ', author: 'Author: ', installs: ' installs', review: 'Review', reviewTitle: 'Awaiting my review', title: 'Display name', description: 'Short description', example: 'Example', cancel: 'Cancel',
@@ -43,11 +43,30 @@
       catch (error) { if (!disposed) message(error.message || copy.failed, true); }
       finally { if (!disposed) pending(false); }
     }
+    function cardError(cardNode, text) {
+      var previous = cardNode.querySelector && cardNode.querySelector('.wp-skills-error');
+      if (previous) previous.textContent = text;
+      else cardNode.appendChild(element('p', 'wp-skills-error', text));
+    }
+    function discard(node) {
+      if (node.remove) node.remove();
+      else node.hidden = true;
+    }
+    async function cardAction(cardNode, actionButton, work, success, apply) {
+      if (busy) return; pending(true); actionButton.disabled = true; actionButton.textContent = copy.busy; message(copy.busy);
+      try {
+        var result = await work();
+        if (!disposed) { apply(result); message(success); }
+      } catch (error) {
+        if (!disposed) { actionButton.disabled = false; actionButton.textContent = actionButton.dataset.label || copy.install; cardError(cardNode, error.message || copy.failed); message(error.message || copy.failed, true); }
+      } finally { if (!disposed) pending(false); }
+    }
     function button(card, label, callback, className) { var node = element('button', className || 'wp-skill-action', label); node.type = 'button'; node.addEventListener('click', callback); card.appendChild(node); return node; }
     function section(title) { var area = element('section', 'wp-skills-section'); area.appendChild(element('h2', 'wp-skills-heading', title)); var cards = element('div', 'wp-skills-list'); area.appendChild(cards); list.appendChild(area); return cards; }
     function card(area, skill, badge) {
       var node = element('article', 'wp-skill-card'); node.dataset.skill = skill.name || skill.id;
-      var top = element('div', 'wp-skill-top'); top.append(element('h3', 'wp-skill-name', skill.displayName || skill.name), element('span', 'wp-skill-badge', badge));
+      var top = element('div', 'wp-skill-top'), badgeNode = element('span', 'wp-skill-badge', badge); top.append(element('h3', 'wp-skill-name', skill.displayName || skill.name), badgeNode);
+      node._wpBadge = badgeNode;
       node.append(top, element('p', 'wp-skill-description', skill.displayDescription || skill.description));
       if (skill.source) {
         var source = element('p', 'wp-skill-source', copy.source), link = element('a', '', skill.source.name + (context.locale === 'en-US' ? ' (' : '（') + skill.source.url.replace(/^https:\/\/([^/?#]+).*$/, '$1') + (context.locale === 'en-US' ? ')' : '）'));
@@ -56,10 +75,12 @@
       area.appendChild(node); return node;
     }
     function remove(cardNode, skill) {
-      button(cardNode, skill.withdrawn ? copy.removeLink : skill.shared ? copy.uninstall : copy.remove, function () {
+      var label = skill.withdrawn ? copy.removeLink : skill.shared ? copy.uninstall : copy.remove, removeButton;
+      removeButton = button(cardNode, label, function () {
         if (!skill.withdrawn && !window.confirm(copy.confirmDelete.replace('{name}', skill.name))) return;
-        void action(function () { return request('/_wp/market/skills', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: skill.id }) }); }, copy.removed);
+        void cardAction(cardNode, removeButton, function () { return request('/_wp/market/skills', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: skill.id }) }); }, copy.removed, function () { discard(cardNode); });
       }, 'wp-skill-delete');
+      removeButton.dataset.label = label;
     }
     function submit(skill) {
       if (busy) return;
@@ -89,9 +110,19 @@
       });
       market.company.forEach(function (skill) {
         var authored = market.mine.some(function (s) { return s.name === skill.name; });
+        var personalConflict = personal.some(function (s) { return s.name === skill.name && !s.shared && !s.preinstalled; });
         var installed = personal.some(function (s) { return s.name === skill.name && s.shared; }), node = card(company, skill, authored ? copy.myShare : installed ? copy.installedBadge : copy.company);
         node.appendChild(element('p', 'wp-skill-meta', copy.author + skill.author + ' · ' + skill.installs + copy.installs));
-        if (!authored && !installed) button(node, copy.install, function () { void action(function () { return shared({ action: 'install', name: skill.name }); }, copy.installed); });
+        if (personalConflict) node.appendChild(element('p', 'wp-skills-error', copy.nameConflict));
+        if (!authored && !installed && !personalConflict) {
+          var installButton;
+          installButton = button(node, copy.install, function () {
+            void cardAction(node, installButton, function () { return shared({ action: 'install', name: skill.name }); }, copy.installed, function () {
+              node._wpBadge.textContent = copy.installedBadge; discard(installButton);
+            });
+          });
+          installButton.dataset.label = copy.install;
+        }
         if (skill.example) { node.appendChild(element('p', 'wp-skill-example', skill.example)); button(node, copy.tryIt, function () { window.wpMarket.tryExample(skill.example); }); }
         if (skill.canWithdraw) button(node, copy.withdraw, function () { if (window.confirm(copy.confirmWithdraw)) void action(function () { return shared({ action: 'withdraw', name: skill.name }); }, copy.withdrawn); });
       });
