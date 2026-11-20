@@ -61,20 +61,27 @@ test('official skills use translated names in Chinese and their own names in Eng
 
 async function companyView(locale, personal, company, postResult) {
   let render;
+  let currentPersonal = personal.slice(), refreshes = 0, posts = 0;
   const context = {
     window: { wpMarket: { register(name, callback) { assert.equal(name, 'skills'); render = callback; }, tryExample() {} }, confirm: () => true },
     AbortController, document: { createElement: tag => new Element(tag) },
     fetch: async (url, options) => {
-      if (url === '/_wp/market/skills' && !options?.method) return Response.json({ skills: personal });
-      if (url === '/_wp/market/shared' && !options?.method) return Response.json({ submissionsEnabled: false, company, mine: [], isApprover: false });
-      if (options?.method === 'POST') return Response.json(postResult || { name: company[0].name, installed: true, changed: true });
+      if (url === '/_wp/market/skills' && !options?.method) { refreshes++; return Response.json({ skills: currentPersonal }); }
+      if (url === '/_wp/market/shared' && !options?.method) { refreshes++; return Response.json({ submissionsEnabled: false, company, mine: [], isApprover: false }); }
+      if (options?.method === 'POST') {
+        posts++;
+        if (typeof postResult === 'function') return postResult(posts, currentPersonal, value => { currentPersonal = value; });
+        currentPersonal = [{ name: company[0].name, id: company[0].name, shared: true, preinstalled: false, description: company[0].description }];
+        return Response.json(postResult || { name: company[0].name, installed: true, changed: true });
+      }
+      if (options?.method === 'DELETE') { currentPersonal = []; return Response.json({ shared: true, installed: false }); }
       assert.fail(`Unexpected request: ${url}`);
     },
   };
   runInNewContext(readFileSync(new URL('../image/rebrand/overlay/wp-skills.js', import.meta.url), 'utf8'), context);
   const host = new Element('main'), dispose = render(host, { locale });
   await new Promise(resolve => setTimeout(resolve, 0));
-  return { host, dispose, card: find(host, 'wp-skills-section')[1] && find(find(host, 'wp-skills-section')[1], 'wp-skill-card')[0] };
+  return { host, dispose, card: find(host, 'wp-skills-section')[1] && find(find(host, 'wp-skills-section')[1], 'wp-skill-card')[0], refreshes: () => refreshes };
 }
 
 test('company install changes the card immediately and same-name personal skills suppress install', async () => {
@@ -94,4 +101,46 @@ test('company install changes the card immediately and same-name personal skills
     assert.equal(find(conflict.card, 'wp-skill-action').length, 0);
     assert.match(find(conflict.card, 'wp-skills-error')[0].textContent, /personal skill/);
   } finally { conflict.dispose(); }
+});
+
+test('successful card actions refresh the whole market and uninstall removes the company badge', async () => {
+  const company = [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0 }];
+  const installed = await companyView('zh-CN', [{ name: 'meeting-notes', id: 'meeting-notes', shared: true, preinstalled: false, description: 'Mine' }], company);
+  try {
+    const mine = find(installed.host, 'wp-skills-section')[2];
+    const remove = find(mine, 'wp-skill-delete')[0];
+    remove.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(find(installed.host, 'wp-skills-section')[1] && find(find(installed.host, 'wp-skills-section')[1], 'wp-skill-badge')[0].textContent, '公司技能');
+    assert.ok(installed.refreshes() >= 4, `expected initial and post-action table loads, got ${installed.refreshes()}`);
+  } finally { installed.dispose(); }
+});
+
+test('deleting a same-name personal skill removes the company conflict after refresh', async () => {
+  const company = [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0 }];
+  const conflict = await companyView('zh-CN', [{ name: 'meeting-notes', id: 'meeting-notes', shared: false, preinstalled: false, description: 'Mine' }], company);
+  try {
+    const mine = find(conflict.host, 'wp-skills-section')[2];
+    find(mine, 'wp-skill-delete')[0].click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const companyCard = find(conflict.host, 'wp-skills-section')[1];
+    assert.equal(find(companyCard, 'wp-skills-error').length, 0);
+    assert.equal(find(companyCard, 'wp-skill-action').length, 1);
+  } finally { conflict.dispose(); }
+});
+
+test('a failed card action shows its error and the next attempt clears it', async () => {
+  const company = [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0 }];
+  const view = await companyView('zh-CN', [], company, (attempt, current, setPersonal) => {
+    if (attempt === 1) return Response.json({ message: '安装失败', error: 'exists' }, { status: 409 });
+    setPersonal([{ name: 'meeting-notes', id: 'meeting-notes', shared: true, preinstalled: false, description: 'Mine' }]);
+    return Response.json({ name: 'meeting-notes', installed: true, changed: true });
+  });
+  try {
+    let card = view.card, install = find(card, 'wp-skill-action')[0];
+    install.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    assert.match(find(card, 'wp-skills-error')[0].textContent, /安装失败/);
+    install = find(card, 'wp-skill-action')[0]; install.click();
+    assert.equal(find(card, 'wp-skills-error').length, 0);
+  } finally { view.dispose(); }
 });

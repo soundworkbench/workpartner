@@ -12,6 +12,13 @@ const alice = { slug: 'alice', unionId: 'author-a', name: '作者甲', backend: 
 const bob = { slug: 'bob', unionId: 'reader-b', name: '读者乙', backend: 'aionui' };
 const it = { slug: 'it', unionId: 'reviewer-c', name: 'IT', backend: 'aionui' };
 const meta = { displayName: '会议整理', description: '整理会议里的行动项', example: '请整理这次会议的行动项' };
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail('condition was not reached');
+}
 function fixture(t, extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-market-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -73,7 +80,7 @@ test('real worker lifecycle: private draft, review, both engine paths, approved 
 });
 
 test('slow container work and notifications do not hold the catalog queue', async t => {
-  const carol = { slug: 'carol', unionId: 'reader-d', name: '读者丙', backend: 'aionui' };
+  const carol = { slug: 'carol', name: '读者丙', backend: 'aionui' };
   const f = fixture(t);
   const first = await f.store.submit(alice, await f.local(), meta);
   await f.store.review(it, first.name, first.version, 'approve');
@@ -100,6 +107,89 @@ test('slow container work and notifications do not hold the catalog queue', asyn
   assert.ok(Date.now() - duringNotify < 500);
   await review;
   assert.ok(notifyStarted);
+});
+
+test('an install that races withdrawal returns 404 and other users are not blocked by slow execution', async t => {
+  const carol = { slug: 'carol', unionId: 'reader-d', name: '读者丙', backend: 'aionui' };
+  const f = fixture(t);
+  const first = await f.store.submit(alice, await f.local(), meta);
+  await f.store.review(it, first.name, first.version, 'approve');
+  let begin, finish;
+  const started = new Promise(resolve => { begin = resolve; });
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const raced = f.store.install(bob, first.name, async () => {
+    begin(); await waiting; return { error: 'not_found', message: '这个技能已经下架，请刷新市场。' };
+  });
+  await started;
+  await f.store.withdraw(alice, first.name);
+  finish();
+  await assert.rejects(raced, error => error.status === 404 && error.message === '这个技能已经下架。');
+
+  const second = await f.store.submit(alice, { ...await f.local(), name: 'slow-install' }, { ...meta, displayName: '慢安装' });
+  await f.store.review(it, second.name, second.version, 'approve');
+  let slowBegin, slowFinish;
+  const slowStarted = new Promise(resolve => { slowBegin = resolve; });
+  const slowWaiting = new Promise(resolve => { slowFinish = resolve; });
+  const slow = f.store.install(bob, second.name, async () => { slowBegin(); await slowWaiting; return { changed: true }; });
+  await slowStarted;
+  const startedAt = Date.now();
+  await f.store.install(carol, second.name, async () => ({ changed: true }));
+  assert.ok(Date.now() - startedAt < 500, 'another user install waited for slow execution');
+  slowFinish(); await slow;
+});
+
+test('an execute failure clears the user queue and uninstall keeps installed counts accurate', async t => {
+  const f = fixture(t);
+  const first = await f.store.submit(alice, await f.local(), meta);
+  await f.store.review(it, first.name, first.version, 'approve');
+  await assert.rejects(f.store.install(bob, first.name, async () => { throw new Error('worker failed'); }), /worker failed/);
+  const installed = await f.store.install(bob, first.name, async () => ({ changed: true }));
+  assert.equal(installed.installed, true); assert.equal(f.store.list(bob).company[0].installs, 1);
+  const noOp = await f.store.uninstall(bob, first.name, async () => ({ shared: false }));
+  assert.equal(noOp.installed, false); assert.equal(f.store.list(bob).company[0].installs, 1);
+  const removed = await f.store.uninstall(bob, first.name, async () => ({ shared: true }));
+  assert.equal(removed.installed, false); assert.equal(f.store.list(bob).company[0].installs, 0);
+});
+
+test('old review and author notification results cannot overwrite a newer notification batch', async t => {
+  const reviewGates = [];
+  const f = fixture(t, { notify: async payload => {
+    let resolve; const done = new Promise(r => { resolve = r; }); reviewGates.push({ payload, resolve }); await done;
+  } });
+  const submitting = f.store.submit(alice, await f.local(), meta);
+  await waitFor(() => reviewGates.length === 1);
+  const state = () => JSON.parse(fs.readFileSync(path.join(f.root, 'state/catalog.json')));
+  const version = Object.keys(state().skills['meeting-notes'].versions)[0];
+  const writeFile = fs.writeFileSync;
+  let failSave = true;
+  t.mock.method(fs, 'writeFileSync', (...args) => {
+    if (failSave) { failSave = false; throw new Error('simulated save failure'); }
+    return writeFile(...args);
+  });
+  await assert.rejects(f.store.withdraw(alice, 'meeting-notes'), /simulated save failure/);
+  const resending = f.store.review(it, 'meeting-notes', version, 'resend');
+  await waitFor(() => reviewGates.length === 2);
+  reviewGates[0].resolve();
+  const first = await submitting;
+  assert.equal(first.reviewNotice, undefined); assert.equal('reviewNoticeId' in first, false);
+  reviewGates[1].resolve();
+  const second = await resending;
+  assert.equal(second.reviewNotice, 'sent'); assert.equal('reviewNoticeId' in second, false);
+  assert.equal(state().skills['meeting-notes'].versions[version].reviewNotice, 'sent');
+
+  const authorGates = [];
+  const authored = fixture(t, { notifyAuthor: async payload => {
+    let resolve; const done = new Promise(r => { resolve = r; }); authorGates.push({ payload, resolve }); await done;
+  } });
+  const draft = await authored.store.submit(alice, await authored.local(), meta);
+  const approving = authored.store.review(it, draft.name, draft.version, 'approve');
+  await waitFor(() => authorGates.length === 1);
+  const notifyingAgain = authored.store.review(it, draft.name, draft.version, 'notify-author');
+  await waitFor(() => authorGates.length === 2);
+  authorGates[0].resolve(); await approving;
+  authorGates[1].resolve();
+  const authorResult = await notifyingAgain;
+  assert.equal(authorResult.authorNotice, 'sent'); assert.equal('authorNoticeId' in authorResult, false);
 });
 
 test('a personal same-name conflict returns 409 and logs only the user slug', async t => {
