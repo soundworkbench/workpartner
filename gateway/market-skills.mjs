@@ -38,17 +38,31 @@ export function createMarketSkills({ authenticate, runtime, origin, uid = 1001, 
   };
   return async (req, res, url) => {
     if (url.pathname !== PREFIX) return false;
+    const started = Date.now(); let action = req.method === 'GET' ? 'list' : req.method === 'POST' ? 'install' : req.method === 'DELETE' ? 'uninstall' : 'unknown';
+    let skillName = url.searchParams.get('name') || undefined; let actor;
+    const logError = (error, status) => {
+      const httpStatus = Number.isInteger(status) ? status : 503;
+      const unknown = !Number.isInteger(error?.status);
+      const entry = { event: 'market_skills_error', action, name: typeof skillName === 'string' && NAME.test(skillName) ? skillName : undefined, status: httpStatus,
+        code: unknown ? (error?.name || 'Error') : (error?.code || `HTTP_${httpStatus}`),
+        message: unknown ? undefined : String(error?.message || '技能操作失败').slice(0, 300), durationMs: Date.now() - started, user: actor };
+      (httpStatus >= 400 && httpStatus < 500 ? console.warn : console.error)(JSON.stringify(entry));
+    };
     const user = authenticate(req);
-    if (!user) { json(res, 401, { error: 'login_required', message: '请先登录工作伙伴。' }); return true; }
+    actor = user?.slug;
+    if (!user) { const error = Object.assign(new Error('请先登录工作伙伴。'), { status: 401 }); logError(error, 401); json(res, 401, { error: 'login_required', message: error.message }); return true; }
     if (user.backend !== 'aionui' || !/^[a-zA-Z0-9_-]+$/.test(user.slug)) {
+      const error = Object.assign(new Error('请在新版工作伙伴中管理技能。'), { status: 404 }); logError(error, 404);
       json(res, 404, { error: 'unavailable', message: '请在新版工作伙伴中管理技能。' }); return true;
     }
     if (!['GET', 'POST', 'DELETE'].includes(req.method)) {
+      const error = Object.assign(new Error('不支持此操作。'), { status: 405 }); logError(error, 405);
       json(res, 405, { error: 'method', message: '不支持此操作。' }); return true;
     }
     const mutation = req.method !== 'GET';
     const contentType = req.method === 'POST' ? /^application\/octet-stream(?:;|$)/i : /^application\/json(?:;|$)/i;
     if (mutation && (req.headers.origin !== origin || !contentType.test(req.headers['content-type'] || ''))) {
+      const error = Object.assign(new Error('请从工作伙伴页面操作。'), { status: 403 }); logError(error, 403);
       json(res, 403, { error: 'same_origin_required', message: '请从工作伙伴页面操作。' }); return true;
     }
     let data = {};
@@ -57,7 +71,7 @@ export function createMarketSkills({ authenticate, runtime, origin, uid = 1001, 
         const chunks = []; let size = 0;
         for await (const chunk of req) {
           size += chunk.length;
-          if (size > (req.method === 'POST' ? MAX_UPLOAD : 16384)) { json(res, 413, { error: 'body_too_large', message: '请求过大，请重新选择技能文件。' }); return true; }
+          if (size > (req.method === 'POST' ? MAX_UPLOAD : 16384)) { const error = Object.assign(new Error('请求过大，请重新选择技能文件。'), { status: 413 }); logError(error, 413); json(res, 413, { error: 'body_too_large', message: error.message }); return true; }
           chunks.push(chunk);
         }
         if (req.method === 'POST') {
@@ -69,19 +83,23 @@ export function createMarketSkills({ authenticate, runtime, origin, uid = 1001, 
           const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('invalid body');
           if (typeof body.name !== 'string' || !NAME.test(body.name)) throw new Error('invalid name');
-          data = { name: body.name };
+          data = { name: body.name }; skillName = body.name;
         }
-      } catch (error) { json(res, 400, { error: 'invalid_request', message: '请选择有效的技能文件或技能名称。' }); return true; }
+      } catch (error) { const invalid = Object.assign(new Error('请选择有效的技能文件或技能名称。'), { status: 400 }); logError(invalid, 400); json(res, 400, { error: 'invalid_request', message: invalid.message }); return true; }
     }
     try {
       const result = await execute(user, req.method === 'GET' ? 'list' : req.method === 'POST' ? 'install' : 'delete', data);
       if (result.error) {
-        json(res, ERROR_STATUS[result.error] || 400, { error: result.error, message: result.message, ...(result.name ? { name: result.name } : {}) });
+        const status = ERROR_STATUS[result.error] || 400;
+        skillName = result.name || skillName;
+        logError(Object.assign(new Error(result.message || result.error), { status, code: result.error }), status);
+        json(res, status, { error: result.error, message: result.message, ...(result.name ? { name: result.name } : {}) });
       } else if (req.method === 'GET') {
         json(res, 200, { skills: result.skills.map(({ id, name, description, displayName, displayDescription, source, preinstalled, shared, withdrawn }) =>
           ({ id, name, description, displayName, displayDescription, source, preinstalled, shared, withdrawn })) });
       } else json(res, 200, { name: result.name });
     } catch (error) {
+      logError(error, 503);
       json(res, 503, { error: 'temporarily_unavailable', message: '技能操作尚未确认完成，请刷新列表后重试。' });
     }
     return true;
