@@ -37,13 +37,20 @@ async function setupPicker(page, { hasClaude = true, convBackend = 'codex', mobi
     { id: 'thought_level', category: 'thought_level', current_value: convEffort,
       options: ['low', 'medium', 'high', 'xhigh', ...(convBackend === 'claude' ? ['max'] : [])].map(v => ({ value: v })) },
   ];
+  await page.route('**/api/agents/management', route => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ success: true, data: [
+      { id: '8e1acf31', backend: 'codex', yolo_id: 'agent-full-access' },
+      { id: '2d23ff1c', backend: 'claude', yolo_id: 'bypassPermissions' },
+    ] }),
+  }));
   await page.route('**/api/settings/client', route => route.fulfill({
     status: 200, contentType: 'application/json',
     body: JSON.stringify({ success: true, data: {
       'wp.modelConfig': MODEL_CONFIG, 'wp.models': models,
       'wp.engineModels': { codex: 'gpt-6.1-sol', claude: 'claude-opus-5-5' },
       'wp.effort': { codex: 'medium', claude: 'medium' },
-      'assistants.enabledOrder': hasClaude ? ['bare:codex-cli', 'bare:claude-code'] : ['bare:codex-cli'],
+      'assistants.enabledOrder': hasClaude ? ['bare:8e1acf31', 'bare:2d23ff1c'] : ['bare:8e1acf31'],
     } }),
   }));
   await page.route('**/api/conversations/c1/runtime/ensure', route => route.fulfill({

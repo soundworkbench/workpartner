@@ -47,7 +47,9 @@ async function modelPicker(t, permissions, config, engineModels = {}, saved = {}
     if (String(url).includes('/api/agents/management')) {
       return { json: async () => ({ data: [
         { id: 'codex-cli', backend: 'codex', yolo_id: 'agent-full-access' },
-        { id: 'claude-code', backend: 'claude', yolo_id: 'bypassPermissions' }
+        { id: 'claude-code', backend: 'claude', yolo_id: 'bypassPermissions' },
+        { id: '8e1acf31', backend: 'codex', yolo_id: 'agent-full-access' },
+        { id: '2d23ff1c', backend: 'claude', yolo_id: 'bypassPermissions' }
       ] }) };
     }
     if (String(url).includes('/api/conversations')) {
@@ -132,6 +134,10 @@ test('hasClaudeAccess respects home buttons, enabledOrder, and wp.models in conv
   assert.equal(convKeyOnlyCodex.hasClaudeAccess(), false);
   const convAllowed = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5']), null, {}, {}, { hash: '#/conversation/c1', enabledOrder: ['bare:codex-cli', 'bare:claude-code'] });
   assert.equal(convAllowed.hasClaudeAccess(), true);
+  const convHexBoth = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5']), null, {}, {}, { hash: '#/conversation/c1', enabledOrder: ['bare:8e1acf31', 'bare:2d23ff1c'] });
+  assert.equal(convHexBoth.hasClaudeAccess(), true);
+  const convHexOnlyCodex = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5']), null, {}, {}, { hash: '#/conversation/c1', enabledOrder: ['bare:8e1acf31'] });
+  assert.equal(convHexOnlyCodex.hasClaudeAccess(), false);
   const convUnknownKey = await modelPicker(t, null, null, {}, {}, { hash: '#/conversation/c1' });
   assert.equal(convUnknownKey.hasClaudeAccess(), true);
 });

@@ -369,13 +369,16 @@
     });
   }
   var EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-  var keyModels = null, enabledOrder = null, engineEffort = {}, engineModels = {};
+  var keyModels = null, enabledOrder = null, agentMap = null, engineEffort = {}, engineModels = {};
   var modelSettingsReady = rawFetch.call(window, '/api/settings/client').then(function (r) { return r.json(); })
     .then(function (j) {
       var d = j.data || j;
       if (d['wp.modelConfig']) applyModelConfig(d['wp.modelConfig']);
       if (Array.isArray(d['wp.models'])) keyModels = d['wp.models'];
-      if (Array.isArray(d['assistants.enabledOrder'])) enabledOrder = d['assistants.enabledOrder'];
+      if (Array.isArray(d['assistants.enabledOrder'])) {
+        enabledOrder = d['assistants.enabledOrder'];
+        if (enabledOrder.length) agentInfo();
+      }
       if (d['wp.effort'] && typeof d['wp.effort'] === 'object') engineEffort = d['wp.effort'];
       engineModels = d['wp.engineModels'] || {};
       ['codex', 'claude'].forEach(function (backend) {
@@ -389,11 +392,19 @@
     if (catalog.some(function (m) { return keyModels.indexOf(m.key) >= 0; })) return true;
     return backend === 'claude' && keyModels.some(function (k) { return /^claude(?:[\/-]|$)/i.test(String(k)); });
   }
+  function enabledOrderAllowsClaude() {
+    if (!Array.isArray(enabledOrder) || !enabledOrder.length) return true;
+    if (enabledOrder.some(function (id) { return /claude/i.test(String(id)); })) return true;
+    if (!agentMap) return null;
+    var known = enabledOrder.filter(function (id) { return !!agentMap[String(id).replace(/^bare:/, '')]; });
+    if (!known.length) return null;
+    return known.some(function (id) { return agentMap[String(id).replace(/^bare:/, '')].backend === 'claude'; });
+  }
   function hasClaudeAccess() {
     if (!(MODELS.claude && MODELS.claude.length)) return false;
     var homeBtns = document.querySelectorAll('[data-assistant-backend]');
     if (homeBtns.length) return !!document.querySelector('[data-assistant-backend="claude"]');
-    if (Array.isArray(enabledOrder) && enabledOrder.length && !enabledOrder.some(function (id) { return /claude/i.test(String(id)); })) return false;
+    if (enabledOrderAllowsClaude() === false) return false;
     return keyAllowsBackend('claude');
   }
   // 菜单里的模型：[{id: 显示和打勾用的模型, value: 切换时发给对话的值, name}]。当前模型始终在列表里。
@@ -489,6 +500,7 @@
     if (!agents) agents = rawFetch.call(window, '/api/agents/management').then(function (r) { return r.json(); }).then(function (j) {
       var m = {};
       (j.data || []).forEach(function (a) { m[a.id] = { yolo: a.yolo_id, backend: a.backend }; });
+      if (Object.keys(m).length) { agentMap = m; schedule(); }
       return m;
     }).catch(function () { agents = null; return {}; });
     return agents;
