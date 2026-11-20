@@ -148,6 +148,29 @@ class BridgeDefaultsTest(unittest.TestCase):
         projects = tomllib.loads(content.decode())['projects']
         self.assertEqual([p['agent']['options']['stream_partial_text'] for p in projects], [True, False])
 
+    def test_project_key_upgrades_reach_every_project_and_keep_personal_values(self):
+        template = self.template().replace(b'show_context_indicator = false',
+                                           b'show_context_indicator = false\nreset_on_idle_mins = 720')
+        second = self.old_config().split(b'[[projects]]', 1)[1].replace(b'__PROJECT__', b'second')
+        third = second.replace(b'name = "second"', b'name = "third"\nreset_on_idle_mins = 0')
+        source = self.old_config() + b'\n[[projects]]' + second + b'\n[[projects]]' + third
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'template.toml').write_bytes(template)
+            (root / 'organization.json').write_text(json.dumps(
+                {'bridge': {'upgradeKeys': [{'key': 'projects.reset_on_idle_mins'}]}}))
+            target = root / 'config.toml'
+            target.write_bytes(source)
+            with patch.dict(os.environ, dict(ENV, WORKPARTNER_ORG_DIR=directory)), \
+                    patch.object(bridge, 'TEMPLATE', root / 'template.toml'):
+                self.assertTrue(bridge.refresh(target))
+                content = target.read_bytes()
+                self.assertFalse(bridge.refresh(target))
+        self.check_agent(content)
+        projects = tomllib.loads(content.decode())['projects']
+        self.assertEqual([p.get('reset_on_idle_mins') for p in projects], [720, 720, 0])
+        self.assertEqual([p['name'] for p in projects][1:], ['second', 'third'])
+
     def test_only_the_bridge_ends_turns_for_background_work(self):
         sync = module('wp-sync-instructions')
         end_turn = '然后结束本轮'

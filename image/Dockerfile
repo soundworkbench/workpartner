@@ -88,9 +88,14 @@ ENV PATH=/opt/workpartner/bin:/opt/claude/bin:/opt/playwright/bin:/data/.local/b
     NODE_PATH=/opt/playwright/lib/node_modules \
     NODE_OPTIONS= \
     DISABLE_AUTOUPDATER=1 \
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 \
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 \
     WORKPARTNER_ORG_DIR=/opt/workpartner/organization/selected \
     HOME=/data \
     PIP_BREAK_SYSTEM_PACKAGES=1
+# 省额度(11-20)：子代理一律用 CLAUDE_CODE_SUBAGENT_MODEL(忽略调用时指定的型号)；Claude 压缩窗口 20 万。
+# Codex 系统层配置只给默认值，个人 config.toml 里设了同名项仍以个人为准。
+RUN mkdir -p /etc/codex && printf 'model_auto_compact_token_limit = 200000\n' > /etc/codex/config.toml
 # Login shells reset PATH in /etc/profile, and Codex runs commands through one; keep the image PATH there.
 RUN printf 'PATH=%s\nexport PATH\n' "$PATH" > /etc/profile.d/workpartner-path.sh
 USER 1001:1001
