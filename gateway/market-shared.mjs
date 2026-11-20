@@ -9,7 +9,7 @@ const text = (value, limit) => typeof value === 'string' && value.trim() && valu
 
 function scanContent(source) {
   const warnings = [];
-  if (/(?:sk-|ghp_)[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+\/-]{8,}|(?:口令|密码|password|secret)\s*[:=：]\s*["']?[A-Za-z0-9!@#$%^&*_-]{6,}|(?<!\d)1[3-9]\d{9}(?!\d)|(?<!\d)\d{17}[\dXx](?!\d)/u.test(source)) throw fail(400, '技能疑似包含密钥、口令或个人证件信息，请去掉后重新提交。');
+  if (/(?:sk-|ghp_)[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+\/-]{8,}|(?:口令|密码|password|secret)\s*[:=：]\s*["']?[A-Za-z0-9!@#$%^&*_-]{6,}|(?<![0-9A-Za-z])1[3-9]\d{9}(?![0-9A-Za-z])|(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])/u.test(source)) throw fail(400, '技能疑似包含密钥、口令或个人证件信息，请去掉后重新提交。');
   if (/(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)|https?:\/\/[^\s/]+\.(?:internal|local|corp)(?:[./:\s]|$)|(?:\/Users\/|\/home\/|\/data\/|\/srv\/|[A-Za-z]:\\)/u.test(source)) warnings.push('含内部地址或本机路径，请核对是否已换成占位说明。');
   return warnings;
 }
@@ -22,7 +22,7 @@ export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [],
   const seen = new Set(), files = [], warnings = new Set(); let size = 0, scripts = 0;
   for (const file of bundle.files) {
     if (typeof file.path !== 'string' || !file.path || file.path.length > 512 || file.path.split('/').some(p => !p || p === '.' || p === '..' || /[\\:\x00-\x1f]/.test(p)) || seen.has(file.path)) throw fail(400, '技能包含无效或重复的文件路径。');
-    if (typeof file.content !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.content)) throw fail(400, '技能文件无法读取。');
+    if (typeof file.content !== 'string' || file.content.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.content)) throw fail(400, '技能文件无法读取。');
     const content = Buffer.from(file.content, 'base64'); size += content.length;
     if (size > 10 * 1024 * 1024) throw fail(413, '分享的技能总计不能超过 10 MB。');
     const source = content.toString('utf8');

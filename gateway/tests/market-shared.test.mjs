@@ -118,6 +118,31 @@ test('closed submissions, protected names, secrets, personal details and unsafe 
   assert.equal(fs.existsSync(path.join(f.root, 'state/catalog.json')), false);
 });
 
+test('hexadecimal digests do not trigger embedded phone or ID digit sequences', () => {
+  const bundle = content => ({ name: 'market-scan', description: '扫描测试', files: [{ path: 'SKILL.md', content: Buffer.from(content).toString('base64') }] });
+  const phoneDigest = 'a13812345678b' + 'c'.repeat(51);
+  const idDigest = 'd123456789012345678e' + 'f'.repeat(44);
+  assert.match(phoneDigest, /^[0-9a-f]{64}$/);
+  assert.match(idDigest, /^[0-9a-f]{64}$/);
+  assert.doesNotThrow(() => inspectSkill(bundle(phoneDigest)));
+  assert.doesNotThrow(() => inspectSkill(bundle(idDigest)));
+
+  for (const phone of [' 13812345678 ', '中文13812345678中文', '"13812345678"', ':13812345678:']) {
+    assert.throws(() => inspectSkill(bundle(phone)), /疑似/);
+  }
+  assert.throws(() => inspectSkill(bundle('身份证：11010519491231002X。')), /疑似/);
+});
+
+test('large base64 files are validated without regex backtracking and malformed base64 is still rejected', () => {
+  const bundle = files => ({ name: 'market-large', description: '大文件测试', files: [{ path: 'SKILL.md', content: Buffer.from('# ok').toString('base64') }, ...files] });
+  const large = Buffer.alloc(6 * 1024 * 1024, 0xa7).toString('base64');
+  assert.doesNotThrow(() => inspectSkill(bundle([{ path: 'assets/big.bin', content: large }])));
+  for (const content of ['', 'QQ==', 'QUI=', 'QUJD']) assert.doesNotThrow(() => inspectSkill(bundle([{ path: 'a.bin', content }])));
+  for (const content of ['Q===', 'QQ=', 'QQ==QQ==', 'Q@==', 'QUJD\n', 'QUJ']) {
+    assert.throws(() => inspectSkill(bundle([{ path: 'a.bin', content }])), /无法读取/);
+  }
+});
+
 test('HTTP: cookie CSRF and signed container identity use one submission and approval service', async t => {
   const f = fixture(t); await f.local();
   const handler = createSharedSkillsHandler({ store: f.store, execute: f.execute, origin: 'https://partner.example',
