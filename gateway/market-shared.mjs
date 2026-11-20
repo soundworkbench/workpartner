@@ -103,17 +103,47 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
     description: version.description, example: version.example, author: row.authorName, installs: row.installs,
     status: version.status, reason: version.reason || '', warnings: version.warnings, scripts: version.scripts,
     reviewNotice: version.reviewNotice, authorNotice: version.authorNotice, createdAt: version.createdAt });
-  async function sendReview(name, row, version) {
+  async function sendReview(name, id) {
+    const request = await serial(() => {
+      const row = state.skills[name], version = row?.versions?.[id];
+      if (!row || !version) return null;
+      const noticeId = crypto.randomUUID();
+      version.reviewNoticeId = noticeId;
+      delete version.reviewNotice;
+      save();
+      return { noticeId, payload: { ...summary(name, row, version), approvers } };
+    });
+    if (!request) return;
     let notice = 'sent';
-    try { await notify({ ...summary(name, row, version), approvers }); }
+    try { await notify(request.payload); }
     catch (error) { notice = 'failed'; }
-    await serial(() => { version.reviewNotice = notice; save(); });
+    await serial(() => {
+      const row = state.skills[name], version = row?.versions?.[id];
+      if (!version || version.reviewNoticeId !== request.noticeId) return;
+      version.reviewNotice = notice;
+      save();
+    });
   }
-  async function sendAuthor(name, row, version) {
+  async function sendAuthor(name, id) {
+    const request = await serial(() => {
+      const row = state.skills[name], version = row?.versions?.[id];
+      if (!row || !version) return null;
+      const noticeId = crypto.randomUUID();
+      version.authorNoticeId = noticeId;
+      delete version.authorNotice;
+      save();
+      return { noticeId, payload: { ...summary(name, row, version), unionId: row.author } };
+    });
+    if (!request) return;
     let notice = 'sent';
-    try { await notifyAuthor({ ...summary(name, row, version), unionId: row.author }); }
+    try { await notifyAuthor(request.payload); }
     catch (error) { notice = 'failed'; }
-    await serial(() => { version.authorNotice = notice; save(); });
+    await serial(() => {
+      const row = state.skills[name], version = row?.versions?.[id];
+      if (!version || version.authorNoticeId !== request.noticeId) return;
+      version.authorNotice = notice;
+      save();
+    });
   }
   return {
     admin,
@@ -154,8 +184,8 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
       row.versions[id] = version; state.skills[name] = row; save();
       return { row, version, notify: true };
       });
-      if (outcome.notify) await sendReview(name, outcome.row, outcome.version);
-      return summary(name, outcome.row, outcome.version);
+      if (outcome.notify) await sendReview(name, outcome.version.id);
+      return serial(() => summary(name, state.skills[name], state.skills[name].versions[outcome.version.id]));
     },
     async review(user, name, id, action, reason = '') {
       const outcome = await serial(async () => {
@@ -177,9 +207,9 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
       version.reviewedAt = new Date().toISOString(); version.reviewer = user.unionId;
       save(); reconcile(name); return { row, version, notice: 'author' };
       });
-      if (outcome.notice === 'review') await sendReview(name, outcome.row, outcome.version);
-      else if (outcome.notice === 'author') await sendAuthor(name, outcome.row, outcome.version);
-      return summary(name, outcome.row, outcome.version);
+      if (outcome.notice === 'review') await sendReview(name, outcome.version.id);
+      else if (outcome.notice === 'author') await sendAuthor(name, outcome.version.id);
+      return serial(() => summary(name, state.skills[name], state.skills[name].versions[outcome.version.id]));
     },
     withdraw(user, name) { return serial(() => {
       const row = get(name);
@@ -194,7 +224,11 @@ export function createSharedSkillStore({ stateDir, sharedDir, approvers = [], re
         reconcile(name);
       });
       const result = await execute(user, 'shared-install', { name });
-      if (result.error) throw Object.assign(fail(409, result.message), { code: result.error });
+      if (result.error) {
+        const status = result.error === 'not_found' ? 404 : 409;
+        const message = result.error === 'not_found' ? '这个技能已经下架。' : result.message;
+        throw Object.assign(fail(status, message), { code: result.error });
+      }
       await serial(() => {
         if (result.changed && Object.hasOwn(state.skills, name)) { state.skills[name].installs++; save(); }
       });

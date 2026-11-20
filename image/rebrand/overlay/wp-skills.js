@@ -48,15 +48,19 @@
       if (previous) previous.textContent = text;
       else cardNode.appendChild(element('p', 'wp-skills-error', text));
     }
+    function clearCardError(cardNode) {
+      var previous = cardNode.querySelector && cardNode.querySelector('.wp-skills-error');
+      if (previous) previous.remove();
+    }
     function discard(node) {
       if (node.remove) node.remove();
       else node.hidden = true;
     }
     async function cardAction(cardNode, actionButton, work, success, apply) {
-      if (busy) return; pending(true); actionButton.disabled = true; actionButton.textContent = copy.busy; message(copy.busy);
+      if (busy) return; clearCardError(cardNode); pending(true); actionButton.disabled = true; actionButton.textContent = copy.busy; message(copy.busy);
       try {
         var result = await work();
-        if (!disposed) { apply(result); message(success); }
+        if (!disposed) { apply(result); message(success); void load(undefined, false).catch(function () {}); }
       } catch (error) {
         if (!disposed) { actionButton.disabled = false; actionButton.textContent = actionButton.dataset.label || copy.install; cardError(cardNode, error.message || copy.failed); message(error.message || copy.failed, true); }
       } finally { if (!disposed) pending(false); }
@@ -147,7 +151,7 @@
         });
       }
     }
-    async function load(success) { var results = await Promise.all([request('/_wp/market/skills'), request('/_wp/market/shared')]); if (!disposed) { render(results[0].skills, results[1]); message(success || ''); } }
+    async function load(success, announce) { var results = await Promise.all([request('/_wp/market/skills'), request('/_wp/market/shared')]); if (!disposed) { render(results[0].skills, results[1]); if (announce !== false) message(success || ''); } }
     function install(file, overwrite) { return request('/_wp/market/skills?filename=' + encodeURIComponent(file.name) + (overwrite ? '&overwrite=true' : ''), { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file }); }
     add.addEventListener('click', function () { if (!busy) input.click(); }); retry.addEventListener('click', function () { void action(function () {}, ''); });
     input.addEventListener('change', async function () {
