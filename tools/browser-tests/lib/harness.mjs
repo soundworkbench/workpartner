@@ -27,7 +27,7 @@ export const USERS = [
   { slug: 'handler', unionId: 'union-handler', name: 'Test Handler', backend: 'aionui' },
   { slug: 'outsider', unionId: 'union-outsider', name: 'Test Outsider', backend: 'aionui' },
 ];
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
 
 export const MODEL_KEYS = Object.fromEntries(USERS.map((user, index) =>
   [user.slug, `sk-fixture-${user.slug}-${'x'.repeat(40)}m00${index + 1}`]));

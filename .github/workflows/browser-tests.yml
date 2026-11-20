@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [menu, flow, access, my-key, voice, feishu-bot, feishu-subagents]
+        group: [menu, flow, access, my-key, voice, feishu-bot, feishu-subagents, model-picker]
     defaults:
       run:
         shell: bash
