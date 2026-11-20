@@ -164,6 +164,10 @@ def template_upgrades(config, template, upgrades):
             wanted = template.get('projects', [{}])[0].get('agent', {}).get('options', {})
             targets = [(('projects', i, 'agent', 'options'), project.get('agent', {}).get('options', {}), wanted)
                        for i, project in enumerate(config.get('projects', []))]
+        elif table == ['projects']:
+            # Project-level keys (reset_on_idle_mins…) take the template project's value in every project.
+            wanted = template.get('projects', [{}])[0]
+            targets = [(('projects', i), project, wanted) for i, project in enumerate(config.get('projects', []))]
         else:
             current, source = config, template
             for part in table:
