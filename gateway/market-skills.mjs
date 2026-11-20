@@ -43,9 +43,9 @@ export function createMarketSkills({ authenticate, runtime, origin, uid = 1001, 
     const logError = (error, status) => {
       const httpStatus = Number.isInteger(status) ? status : 503;
       const unknown = !Number.isInteger(error?.status);
-      const entry = { event: 'market_skills_error', action, name: skillName, status: httpStatus,
+      const entry = { event: 'market_skills_error', action, name: typeof skillName === 'string' && NAME.test(skillName) ? skillName : undefined, status: httpStatus,
         code: unknown ? (error?.name || 'Error') : (error?.code || `HTTP_${httpStatus}`),
-        message: String(error?.message || '技能操作失败').slice(0, 300), durationMs: Date.now() - started, user: actor };
+        message: unknown ? undefined : String(error?.message || '技能操作失败').slice(0, 300), durationMs: Date.now() - started, user: actor };
       (httpStatus >= 400 && httpStatus < 500 ? console.warn : console.error)(JSON.stringify(entry));
     };
     const user = authenticate(req);

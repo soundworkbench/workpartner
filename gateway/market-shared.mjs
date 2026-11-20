@@ -234,9 +234,9 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
     const logError = (error, status) => {
       const httpStatus = Number.isInteger(status) ? status : 503;
       const unknown = !Number.isInteger(error?.status);
-      const entry = { event: 'market_shared_error', action, name: skillName, status: httpStatus,
+      const entry = { event: 'market_shared_error', action, name: typeof skillName === 'string' && NAME.test(skillName) ? skillName : undefined, status: httpStatus,
         code: unknown ? (error?.name || 'Error') : (error?.code || `HTTP_${httpStatus}`),
-        message: String(error?.message || '操作失败').slice(0, 300), durationMs: Date.now() - started, user: actor };
+        message: unknown ? undefined : String(error?.message || '操作失败').slice(0, 300), durationMs: Date.now() - started, user: actor };
       (httpStatus >= 400 && httpStatus < 500 ? console.warn : console.error)(JSON.stringify(entry));
     };
     try {
@@ -265,7 +265,7 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
       for await (const chunk of req) { size += chunk.length; if (size > 16384) throw fail(413, '请求过大。'); chunks.push(chunk); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (error) { throw fail(400, '请求格式无效。'); }
       if (!body || typeof body.name !== 'string' || !NAME.test(body.name)) throw fail(400, '技能名称无效。');
-      action = body.action || 'unknown'; skillName = body.name;
+      action = ['install', 'uninstall', 'withdraw', 'approve', 'reject', 'resend', 'notify-author', 'submit'].includes(body.action) ? body.action : 'unknown'; skillName = body.name;
       if (['submit', 'install'].includes(body.action) && (user.backend !== 'aionui' || !/^[a-zA-Z0-9_-]+$/.test(user.slug))) throw fail(403, '请先开通新版工作伙伴。');
       let result;
       if (body.action === 'submit') {
