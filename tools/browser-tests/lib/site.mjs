@@ -229,5 +229,10 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
   fs.writeFileSync(path.join(site, 'wp-web-tools.js'), read(overlay, 'wp-web-tools.js'));
   fs.writeFileSync(path.join(site, 'assets/native-shim.js'), shim);
   fs.writeFileSync(path.join(site, 'assets/fixture-chat.js'), 'export {};\n');
+  const agentsDir = path.join(repo, 'org/default/appearance/agents');
+  fs.mkdirSync(path.join(site, 'assets/wp-agents'), { recursive: true });
+  for (const name of fs.readdirSync(agentsDir)) {
+    fs.copyFileSync(path.join(agentsDir, name), path.join(site, 'assets/wp-agents', name));
+  }
   return site;
 }

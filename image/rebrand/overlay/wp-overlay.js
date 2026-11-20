@@ -369,12 +369,13 @@
     });
   }
   var EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-  var keyModels = null, engineEffort = {}, engineModels = {};
+  var keyModels = null, enabledOrder = null, engineEffort = {}, engineModels = {};
   var modelSettingsReady = rawFetch.call(window, '/api/settings/client').then(function (r) { return r.json(); })
     .then(function (j) {
       var d = j.data || j;
       if (d['wp.modelConfig']) applyModelConfig(d['wp.modelConfig']);
       if (Array.isArray(d['wp.models'])) keyModels = d['wp.models'];
+      if (Array.isArray(d['assistants.enabledOrder'])) enabledOrder = d['assistants.enabledOrder'];
       if (d['wp.effort'] && typeof d['wp.effort'] === 'object') engineEffort = d['wp.effort'];
       engineModels = d['wp.engineModels'] || {};
       ['codex', 'claude'].forEach(function (backend) {
@@ -382,6 +383,19 @@
       });
       schedule();
     }).catch(function () {});
+  function keyAllowsBackend(backend) {
+    if (!Array.isArray(keyModels)) return true;
+    var catalog = MODELS[backend] || [];
+    if (catalog.some(function (m) { return keyModels.indexOf(m.key) >= 0; })) return true;
+    return backend === 'claude' && keyModels.some(function (k) { return /^claude(?:[\/-]|$)/i.test(String(k)); });
+  }
+  function hasClaudeAccess() {
+    if (!(MODELS.claude && MODELS.claude.length)) return false;
+    var homeBtns = document.querySelectorAll('[data-assistant-backend]');
+    if (homeBtns.length) return !!document.querySelector('[data-assistant-backend="claude"]');
+    if (Array.isArray(enabledOrder) && enabledOrder.length && !enabledOrder.some(function (id) { return /claude/i.test(String(id)); })) return false;
+    return keyAllowsBackend('claude');
+  }
   // 菜单里的模型：[{id: 显示和打勾用的模型, value: 切换时发给对话的值, name}]。当前模型始终在列表里。
   function modelsFor(backend, values, current) {
     var cur = current ? sameModel(backend, current) : null, list = [], available = [], matched = false;
@@ -520,7 +534,17 @@
         if (!ws || ws.indexOf('/data/aionui-data/') === 0) { b.extra.workspace = WORKDIR; b.extra.custom_workspace = true; }
         var o = b.assistant && b.assistant.conversation_overrides;
         if (o) {
-          var a = ids[String(b.assistant.id || '').replace(/^bare:/, '')] || {};
+          var rawId = String(b.assistant.id || '');
+          var a = ids[rawId.replace(/^bare:/, '')] || {};
+          if (wantedBackend && Date.now() - wantedBackendAt < 2000 && a.backend && a.backend !== wantedBackend) {
+            var matchedId = Object.keys(ids).filter(function (k) { return ids[k] && ids[k].backend === wantedBackend; })[0];
+            if (matchedId) {
+              b.assistant.id = (rawId.indexOf('bare:') === 0 ? 'bare:' : '') + matchedId;
+              a = ids[matchedId];
+              if (b.extra && b.extra.backend) b.extra.backend = a.backend;
+            }
+          }
+          wantedBackend = null; pendingHomeBackend = null;
           o.permission = a.yolo || PERM;
           var p = homePick(a.backend);
           o.thought_level = p.effort;
@@ -806,6 +830,7 @@
   }
 
   function apply() {
+    document.documentElement.classList.toggle('wp-admin', admin);
     document.documentElement.classList.toggle('wp-automation', /^#\/scheduled(?:\/|$)/.test(location.hash));
     if (document.title !== t('brand')) document.title = t('brand');
     renameOnPage();
@@ -828,8 +853,19 @@
     if (aside) leaves(SIDEBAR_ITEMS, aside).forEach(function (el) { if (!el.closest('.wp-nav')) hide(rowOf(el)); });
     // 侧栏“团队”分组标题行
     document.querySelectorAll('[data-testid="team-section-toggle"]').forEach(function (el) { hide(el.parentElement); });
-    // 首页：智能体选择条保留（只开了 Claude Code 和 Codex）；模型、权限、工作目录隐藏
+    // 首页：上方助手选择条已并入右下角模型菜单；模型、权限、工作目录一并隐藏
     leaves(HOME_ITEMS, null, true).forEach(function (el) { hide(rowOf(el)); });
+    document.querySelectorAll('[data-assistant-backend]').forEach(function (el) {
+      var target = el;
+      for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+        if (protectedHideTarget(p) || (p.matches && p.matches('[class*="_guidLayout"],[class*="_heroHeader"],[class*="_guidInputCardWrap"],[class*="_guidInputInner"]'))) break;
+        var allBtns = p.querySelectorAll ? p.querySelectorAll('button') : [];
+        var backendBtns = p.querySelectorAll ? p.querySelectorAll('[data-assistant-backend]') : [];
+        if (allBtns.length && allBtns.length !== backendBtns.length) break;
+        target = p;
+      }
+      hide(target);
+    });
     var ws = document.querySelector('[data-testid="workspace-selector-btn"]');
     if (ws) hide(ws.parentElement);
     // 只隐藏原生反馈入口；按坐标隐藏 SVG 会误伤同在右上角的文件栏开关。
@@ -1330,6 +1366,44 @@
     }).catch(function () { conv(id).waiting = false; setTimeout(function () { asked[id] = false; schedule(); }, 5000); });
     if (!conv(id).backend) api('GET', '/api/conversations/' + id).then(function (d) { remember(d); schedule(); }).catch(function () {});
   }
+  var BACKEND_META = {
+    codex: { name: 'ChatGPT', icon: CHATGPT_ICON, cls: 'wp-pick-icon wp-chatgpt' },
+    claude: { name: 'Claude', icon: CLAUDE_ICON, cls: 'wp-pick-icon' }
+  };
+  var LOCK_SVG = '<svg class="wp-pick-lock" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="5.4" width="7.6" height="5.2" rx="1.4"/><path d="M3.9 5.4V3.9a2.1 2.1 0 0 1 4.2 0v1.5"/></svg>';
+  var wantedBackend = null, wantedBackendAt = 0, pendingHomeBackend = null, pendingHomeUntil = 0, lastBackendClickAt = 0;
+  function escHtml(s) { return String(s || '').replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
+  function backendIconHtml(backend) {
+    var meta = BACKEND_META[backend];
+    return meta ? '<img class="' + meta.cls + '" src="' + meta.icon + '" alt="" aria-hidden="true">' : '';
+  }
+  function switchBackendHint(backendName) {
+    var tpl = t('switchBackendNewChat') || (locale() === 'zh-CN' ? '换 {backend} 请新建对话' : 'New chat for {backend}');
+    return tpl.replace('{backend}', backendName);
+  }
+  function clickHomeBackend(backend) {
+    var target = document.querySelector('[data-assistant-backend="' + backend + '"]');
+    if (!target) return false;
+    if (target.dataset && target.dataset.assistantSelected === 'true') return true;
+    lastBackendClickAt = Date.now();
+    target.click();
+    return true;
+  }
+  function syncHomeBackend() {
+    if (convId()) return;
+    var now = Date.now(), target = null;
+    if (pendingHomeBackend && now < pendingHomeUntil) target = pendingHomeBackend;
+    else { pendingHomeBackend = null; if (wantedBackend && now - wantedBackendAt < 2000) target = wantedBackend; else wantedBackend = null; }
+    if (!target) return;
+    var btn = document.querySelector('[data-assistant-backend="' + target + '"]');
+    if (!btn) return;
+    if (btn.dataset && btn.dataset.assistantSelected === 'true') {
+      if (pendingHomeBackend === target) pendingHomeBackend = null;
+      if (wantedBackend === target) wantedBackend = null;
+      return;
+    }
+    if (now - lastBackendClickAt > 120) clickHomeBackend(target);
+  }
   function pickerState() {
     var id = convId();
     if (id) {
@@ -1350,12 +1424,16 @@
         models: modelsFor(c.backend, values(mo), model), efforts: effortsFor(values(eo)) };
     }
     var sel = document.querySelector('[data-assistant-selected="true"]');
-    var backend = (sel && sel.dataset.assistantBackend) || 'codex';
+    var domBackend = sel && sel.dataset && sel.dataset.assistantBackend;
+    if (wantedBackend && (domBackend === wantedBackend || Date.now() - wantedBackendAt >= 2000)) wantedBackend = null;
+    var backend = wantedBackend || domBackend || 'codex';
     var p = homePick(backend);
     return { backend: backend, model: p.model, effort: p.effort, models: modelsFor(backend, null, p.model), efforts: effortsFor(learnedEfforts(backend)) };
   }
   function pickerLabel(st) {
-    return modelName(st.backend, st.model) + (st.effort ? '<span class="wp-pick-effort">' + effortName(st.effort) + '</span>' : '');
+    var name = '<span class="wp-pick-name">' + escHtml(modelName(st.backend, st.model)) + '</span>';
+    var effort = st.effort ? '<span class="wp-pick-effort">' + escHtml(effortName(st.effort)) + '</span>' : '';
+    return backendIconHtml(st.backend) + name + effort;
   }
   var menuOwner = null;
   function closeMenu() {
@@ -1363,12 +1441,17 @@
     if (menuOwner) menuOwner.setAttribute('aria-expanded', 'false');
     menuOwner = null;
   }
-  function placeMenu(m, btn) {
+  function placeMenu(m, btn, alignRight) {
     menuOwner = btn; btn.setAttribute('aria-expanded', 'true');
+    var pad = alignRight ? 12 : 8, gap = alignRight ? 8 : 6;
     var r = btn.getBoundingClientRect(), h = m.offsetHeight, w = m.offsetWidth;
-    m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
-    var top = r.top - h - 6 >= 8 ? r.top - h - 6 : r.bottom + 6;
-    m.style.top = Math.max(8, Math.min(top, window.innerHeight - h - 8)) + 'px';
+    var rawLeft = alignRight ? r.right - w : r.left;
+    m.style.left = Math.max(pad, Math.min(rawLeft, window.innerWidth - w - pad)) + 'px';
+    var spaceAbove = r.top - pad, spaceBelow = window.innerHeight - r.bottom - pad;
+    var top = alignRight
+      ? (spaceAbove >= h + gap || spaceAbove >= spaceBelow ? r.top - h - gap : r.bottom + gap)
+      : (r.top - h - gap >= pad ? r.top - h - gap : r.bottom + gap);
+    m.style.top = Math.max(pad, Math.min(top, Math.max(pad, window.innerHeight - h - pad))) + 'px';
   }
   var settingsBusy = false, settingsChange = Promise.resolve();
   async function openSettings(btn) {
@@ -1452,30 +1535,94 @@
       .catch(function () { btn.title = t('pickFailed'); btn.classList.add('wp-failed'); setTimeout(function () { btn.classList.remove('wp-failed'); }, 2000); })
       .then(function () { busyPick = false; btn.classList.remove('wp-busy'); schedule(); });
   }
+  function chooseHomeModel(st, backend, modelId) {
+    closeMenu();
+    var p = homeChosen(backend); p.model = modelId;
+    try { localStorage.setItem('wp_pick2_' + backend, JSON.stringify(p)); } catch (e) {}
+    if (backend !== st.backend) {
+      wantedBackend = backend; wantedBackendAt = Date.now();
+      pendingHomeBackend = backend; pendingHomeUntil = Date.now() + 5000;
+      clickHomeBackend(backend);
+    }
+    schedule();
+  }
   function openMenu(btn) {
     var st = pickerState(); if (!st) return;
     if (st.pending) { asked[st.conv] = false; ensure(st.conv); return; }
     closeMenu();
     var m = document.createElement('div');
-    m.className = 'wp-pick-menu'; m.setAttribute('role', 'menu');
-    var group = function (title, items, cur, kind) {
-      var h = document.createElement('div'); h.className = 'wp-pick-title'; h.textContent = title; m.appendChild(h);
-      items.forEach(function (it) {
+    m.className = 'wp-pick-menu wp-pick-model-menu'; m.setAttribute('role', 'menu');
+    var groups = (st.backend === 'claude' || hasClaudeAccess() ? ['codex', 'claude'] : ['codex']).map(function (bId) {
+      return { id: bId, list: bId === st.backend ? st.models : modelsFor(bId, null, homePick(bId).model) };
+    }).filter(function (g) { return g.list.length > 0; });
+    var showGroupHeads = groups.length > 1;
+    groups.forEach(function (g, idx) {
+      var bId = g.id, list = g.list;
+      if (idx > 0) { var sep = document.createElement('div'); sep.className = 'wp-pick-sep'; m.appendChild(sep); }
+      var locked = !!(st.conv && bId !== st.backend);
+      var meta = BACKEND_META[bId] || { name: bId };
+      var grp = document.createElement('div');
+      grp.className = 'wp-pick-group' + (locked ? ' is-locked' : ''); grp.dataset.backend = bId;
+      var head = document.createElement('div'); head.className = 'wp-pick-group-head';
+      if (showGroupHeads) {
+        head.innerHTML = '<span class="wp-pick-group-title">' + backendIconHtml(bId) + '<span>' + escHtml(meta.name) + '</span></span>';
+        if (locked) {
+          var hint = document.createElement('button'); hint.type = 'button'; hint.className = 'wp-pick-lock-hint';
+          hint.innerHTML = LOCK_SVG + '<span>' + escHtml(switchBackendHint(meta.name)) + '</span>';
+          hint.addEventListener('click', function (e) {
+            e.stopPropagation();
+            pendingHomeBackend = bId; pendingHomeUntil = Date.now() + 5000;
+            wantedBackend = bId; wantedBackendAt = Date.now();
+            closeMenu(); location.hash = '#/guid'; schedule();
+          });
+          head.appendChild(hint);
+        }
+      } else {
+        head.innerHTML = '<span class="wp-pick-group-title">' + escHtml(t('model')) + '</span>';
+      }
+      grp.appendChild(head);
+      list.forEach(function (x) {
         var b = document.createElement('button');
-        b.type = 'button'; b.setAttribute('role', 'menuitemradio'); b.className = 'wp-pick-item';
-        var on = it[0] === (kind === 'model' ? sameModel(st.backend, cur) : cur);
+        b.type = 'button'; b.setAttribute('role', 'menuitemradio');
+        var on = !locked && bId === st.backend && x.id === sameModel(st.backend, st.model);
+        b.className = 'wp-pick-item' + (on ? ' is-selected' : '');
         b.setAttribute('aria-checked', on ? 'true' : 'false');
-        b.innerHTML = '<span class="wp-pick-check" aria-hidden="true">' + (on ? '✓' : '') + '</span><span></span>';
-        b.lastChild.textContent = it[1];
-        b.addEventListener('click', function (e) { e.stopPropagation(); if (!on) choose(st, kind, it[2] || it[0], btn); else closeMenu(); });
-        m.appendChild(b);
+        if (locked) { b.disabled = true; b.setAttribute('aria-disabled', 'true'); }
+        else if (busyPick) b.disabled = true;
+        b.innerHTML = '<span class="wp-pick-check" aria-hidden="true">' + (on ? '✓' : '') + '</span><span class="wp-pick-item-label"></span>';
+        b.lastChild.textContent = x.name;
+        if (!locked) {
+          b.addEventListener('click', function (e) {
+            e.stopPropagation();
+            if (on) { closeMenu(); return; }
+            if (!st.conv) chooseHomeModel(st, bId, x.id);
+            else choose(st, 'model', x.value || x.id, btn);
+          });
+        }
+        grp.appendChild(b);
       });
-    };
-    group(t('model'), st.models.map(function (x) { return [x.id, x.name, x.value]; }), st.model, 'model');
-    var sep = document.createElement('div'); sep.className = 'wp-pick-sep'; m.appendChild(sep);
-    group(t('effort'), st.efforts, st.effort, 'effort');
+      m.appendChild(grp);
+    });
+    if (st.efforts && st.efforts.length) {
+      var sep2 = document.createElement('div'); sep2.className = 'wp-pick-sep'; m.appendChild(sep2);
+      var wrap = document.createElement('div'); wrap.className = 'wp-pick-eff-wrap';
+      var eh = document.createElement('div'); eh.className = 'wp-pick-eff-head'; eh.textContent = t('effort'); wrap.appendChild(eh);
+      var seg = document.createElement('div'); seg.className = 'wp-pick-eff-seg'; seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', t('effort'));
+      st.efforts.forEach(function (it) {
+        var b = document.createElement('button');
+        b.type = 'button'; b.setAttribute('role', 'menuitemradio');
+        var on = it[0] === st.effort;
+        b.className = 'wp-pick-eff-opt' + (on ? ' is-selected' : '');
+        b.setAttribute('aria-checked', on ? 'true' : 'false');
+        b.textContent = it[1];
+        if (busyPick) b.disabled = true;
+        b.addEventListener('click', function (e) { e.stopPropagation(); if (!on) choose(st, 'effort', it[0], btn); else closeMenu(); });
+        seg.appendChild(b);
+      });
+      wrap.appendChild(seg); m.appendChild(wrap);
+    }
     document.body.appendChild(m);
-    placeMenu(m, btn);
+    placeMenu(m, btn, true);
   }
   document.addEventListener('click', function (e) {
     var m = document.querySelector('.wp-pick-menu');
@@ -1485,6 +1632,7 @@
   window.addEventListener('resize', closeMenu);
   window.addEventListener('hashchange', closeMenu);
   function modelPicker() {
+    syncHomeBackend();
     var slot = document.querySelector('.sendbox-panel .sendbox-actions') || document.querySelector('[class*="_guidInputInner"] [class*="_actionSubmit"]');
     var panel = document.querySelector('.sendbox-panel');
     if (slot && panel) panel.querySelectorAll(':scope > .wp-pick-row').forEach(function (row) { row.remove(); });
@@ -1499,7 +1647,7 @@
     if (!btn) {
       btn = document.createElement('button');
       btn.type = 'button'; btn.className = 'wp-pick-btn'; btn.setAttribute('aria-haspopup', 'menu');
-      btn.addEventListener('click', function (e) { e.stopPropagation(); if (document.querySelector('.wp-pick-menu')) closeMenu(); else openMenu(btn); });
+      btn.addEventListener('click', function (e) { e.stopPropagation(); if (document.querySelector('.wp-pick-model-menu')) closeMenu(); else openMenu(btn); });
       slot.insertBefore(btn, slot.firstChild);
     }
     btn.style.display = '';

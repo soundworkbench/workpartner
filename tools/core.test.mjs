@@ -29,7 +29,7 @@ print(json.dumps(sorted({name for model in json.load(sys.stdin) for name in scop
   return JSON.parse(result.stdout);
 }
 
-async function modelPicker(t, permissions, config, engineModels = {}, saved = {}) {
+async function modelPicker(t, permissions, config, engineModels = {}, saved = {}, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-picker-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = organizationData({});
@@ -37,20 +37,47 @@ async function modelPicker(t, permissions, config, engineModels = {}, saved = {}
   const overlay = fs.readFileSync(path.join(root, 'image/rebrand/overlay/wp-overlay.js'), 'utf8')
     .replace('  /* __WP_COPY__ */', fs.readFileSync(path.join(dir, 'copy.js'), 'utf8'));
   const window = new EventTarget();
-  const fetch = async () => ({ json: async () => ({ data: { 'wp.models': permissions, 'wp.modelConfig': config || nextModelConfig(org), 'wp.engineModels': engineModels } }) });
+  const posted = [];
+  const store = new Map();
+  const fetch = async (url, init) => {
+    if (String(url).includes('/api/settings/client')) {
+      return { json: async () => ({ data: { 'wp.models': permissions, 'wp.modelConfig': config || nextModelConfig(org),
+        'wp.engineModels': engineModels, ...(extra.enabledOrder !== undefined ? { 'assistants.enabledOrder': extra.enabledOrder } : {}) } }) };
+    }
+    if (String(url).includes('/api/agents/management')) {
+      return { json: async () => ({ data: [
+        { id: 'codex-cli', backend: 'codex', yolo_id: 'agent-full-access' },
+        { id: 'claude-code', backend: 'claude', yolo_id: 'bypassPermissions' }
+      ] }) };
+    }
+    if (String(url).includes('/api/conversations')) {
+      posted.push(JSON.parse(init.body));
+      return { ok: true, json: async () => ({ data: { id: 'c1' } }) };
+    }
+    return { ok: true, json: async () => ({ data: {} }) };
+  };
   window.fetch = fetch;
   window.WpSmoothText = { SmoothText: class {}, protectedLines: () => [], repairStreamingMarkdown: s => s };
-  const context = vm.createContext({ window, fetch, Event,
-    document: { body: {}, documentElement: {}, querySelector: () => null, querySelectorAll: () => [], addEventListener() {} },
-    location: { hash: '#/guid' }, innerWidth: 320, localStorage: { getItem: key => key.startsWith('wp_pick2_') ? JSON.stringify(saved) : null },
-    MutationObserver: class { observe() {} }, requestAnimationFrame() {},
-    setTimeout() {}, clearTimeout() {}, setInterval() {},
-  });
+  const homeBtns = (extra.homeBackends || []).map(b => ({ dataset: { assistantBackend: b, assistantSelected: b === (extra.selected || 'codex') ? 'true' : 'false' }, clicks: 0, click() { this.clicks++; } }));
+  const document = { body: {}, documentElement: {}, addEventListener() {},
+    querySelectorAll: s => s === '[data-assistant-backend]' ? homeBtns : [],
+    querySelector: s => {
+      const m = /^\[data-assistant-backend="([^"]+)"\]$/.exec(s);
+      if (m) return homeBtns.find(b => b.dataset.assistantBackend === m[1]) || null;
+      if (s === '[data-assistant-selected="true"]') return homeBtns.find(b => b.dataset.assistantSelected === 'true') || null;
+      return null;
+    } };
+  const localStorage = {
+    getItem: key => store.has(key) ? store.get(key) : (key.startsWith('wp_pick2_') ? JSON.stringify(saved) : null),
+    setItem: (key, val) => store.set(key, String(val)),
+  };
+  const context = vm.createContext({ window, fetch, Event, document, location: { hash: extra.hash || '#/guid' }, innerWidth: 320, localStorage,
+    MutationObserver: class { observe() {} }, requestAnimationFrame() {}, setTimeout() {}, clearTimeout() {}, setInterval() {} });
   const end = overlay.lastIndexOf('})();');
   assert.ok(end > 0);
-  vm.runInContext(overlay.slice(0, end) + 'window.picker = { modelsFor, homePick, sameModel, get MODELS() { return MODELS; } };' + overlay.slice(end), context);
+  vm.runInContext(overlay.slice(0, end) + 'window.picker = { modelsFor, homePick, sameModel, hasClaudeAccess, chooseHomeModel, pickerState, get MODELS() { return MODELS; } };' + overlay.slice(end), context);
   await new Promise(resolve => setImmediate(resolve));
-  return window.picker;
+  return Object.assign(window.picker, { window, posted, homeBtns });
 }
 
 test('prefixed model permissions retain both default models and exclude unavailable models', async t => {
@@ -92,6 +119,40 @@ test('runtime picker updates defaults and preserves saved personal choices witho
   assert.equal(engine.homePick('codex').model, 'engine-personal');
   assert.equal(engine.sameModel('claude', 'default'), 'claude-personal');
   assert.ok(engine.modelsFor('codex', null, engine.homePick('codex').model).some(m => m.id === 'runtime-codex'));
+});
+
+test('hasClaudeAccess respects home buttons, enabledOrder, and wp.models in conversations', async t => {
+  const homeBoth = await modelPicker(t, seedModels(['codex/gpt-6.1-sol']), null, {}, {}, { homeBackends: ['codex', 'claude'] });
+  assert.equal(homeBoth.hasClaudeAccess(), true);
+  const homeOnlyCodex = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5']), null, {}, {}, { homeBackends: ['codex'] });
+  assert.equal(homeOnlyCodex.hasClaudeAccess(), false);
+  const convOrderOnlyCodex = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5']), null, {}, {}, { hash: '#/conversation/c1', enabledOrder: ['bare:codex-cli'] });
+  assert.equal(convOrderOnlyCodex.hasClaudeAccess(), false);
+  const convKeyOnlyCodex = await modelPicker(t, seedModels(['codex/gpt-6.1-sol']), null, {}, {}, { hash: '#/conversation/c1' });
+  assert.equal(convKeyOnlyCodex.hasClaudeAccess(), false);
+  const convAllowed = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5']), null, {}, {}, { hash: '#/conversation/c1', enabledOrder: ['bare:codex-cli', 'bare:claude-code'] });
+  assert.equal(convAllowed.hasClaudeAccess(), true);
+  const convUnknownKey = await modelPicker(t, null, null, {}, {}, { hash: '#/conversation/c1' });
+  assert.equal(convUnknownKey.hasClaudeAccess(), true);
+});
+
+test('cross-backend home switch clicks native backend and guards immediate conversation creation', async t => {
+  const picker = await modelPicker(t, seedModels(['codex/gpt-6.1-sol', 'claude/claude-sonnet-5-5']), null, {}, {}, { homeBackends: ['codex', 'claude'], selected: 'codex' });
+  const before = picker.pickerState();
+  assert.equal(before.backend, 'codex');
+  picker.chooseHomeModel(before, 'claude', 'sonnet');
+  assert.equal(picker.homeBtns.find(b => b.dataset.assistantBackend === 'claude').clicks, 1);
+  assert.equal(picker.pickerState().backend, 'claude');
+  assert.equal(picker.pickerState().model, 'sonnet');
+  await picker.window.fetch('/api/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ assistant: { id: 'bare:codex-cli', conversation_overrides: {} }, extra: { backend: 'codex' } }),
+  });
+  assert.equal(picker.posted.length, 1);
+  assert.equal(picker.posted[0].assistant.id, 'bare:claude-code');
+  assert.equal(picker.posted[0].extra.backend, 'claude');
+  assert.equal(picker.posted[0].assistant.conversation_overrides.model, 'sonnet');
+  assert.equal(picker.posted[0].assistant.conversation_overrides.permission, 'bypassPermissions');
 });
 
 test('home composer draft is restored by the page pass, expires, and is cleared on send and logout', async t => {
