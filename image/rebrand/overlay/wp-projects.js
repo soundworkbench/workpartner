@@ -16,7 +16,7 @@
   };
   function icon(key) { return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[key] || ICONS.folder) + '</svg>'; }
   var COLORS = ['#9b9b87', '#9b8f87', '#879b9b', '#9b8794', '#8f9b87', '#93879b', '#9b9687', '#87919b'];
-  var COPY = { 'zh-CN': { project: '项目', pinned: '置顶', newProject: '新建项目', recent: '最近对话', today: '今天', yesterday: '昨天', week: '前 7 天', earlier: '更早', all: '查看全部', chats: '条对话', newChat: '新建对话', newIn: '在此项目新建对话', projectHome: '打开项目主页', settings: '项目设置', remove: '删除项目', rename: '重命名', move: '移到项目', out: '移出项目', pin: '置顶', unpin: '取消置顶', del: '删除', back: '返回', name: '项目名称', icon: '图标', color: '颜色', description: '项目说明', save: '保存', cancel: '取消', files: '项目文件', conversations: '项目内对话', upload: '上传文件', noChats: '还没有对话', noFiles: '还没有文件', noDescription: '还没有项目说明', archive: '归档', cron: '创建定时任务', createFailed: '新建对话失败，请重试。输入内容已保留', loadFailed: '项目清单读取失败，请刷新后重试', noProjects: '还没有项目', undo: '撤销', moved: '已移动', deleted: '已删除', message: '在「{name}」里新建对话', saveFailed: '保存失败，请重试', fileFailed: '文件操作失败' }, 'en-US': { project: 'Projects', pinned: 'Pinned', newProject: 'New project', recent: 'Recent chats', today: 'Today', yesterday: 'Yesterday', week: 'Previous 7 days', earlier: 'Earlier', all: 'View all', chats: ' chats', newChat: 'New chat', newIn: 'New chat in this project', projectHome: 'Open project home', settings: 'Project settings', remove: 'Delete project', rename: 'Rename', move: 'Move to project', out: 'Remove from project', pin: 'Pin', unpin: 'Unpin', del: 'Delete', back: 'Back', name: 'Project name', icon: 'Icon', color: 'Color', description: 'Project instructions', save: 'Save', cancel: 'Cancel', files: 'Project files', conversations: 'Project chats', upload: 'Upload file', noChats: 'No chats yet', noFiles: 'No files yet', noDescription: 'No instructions yet', archive: 'Archive', cron: 'Create scheduled task', createFailed: 'Could not create chat. Your draft was kept.', loadFailed: 'Could not load projects. Reload to retry.', noProjects: 'No projects yet', undo: 'Undo', moved: 'Moved', deleted: 'Deleted', message: 'New chat in “{name}”', saveFailed: 'Could not save. Try again.', fileFailed: 'File operation failed' } };
+  var COPY = { 'zh-CN': { project: '项目', pinned: '置顶', newProject: '新建项目', recent: '最近对话', today: '今天', yesterday: '昨天', week: '前 7 天', earlier: '更早', all: '查看全部', chats: '条对话', newChat: '新建对话', newIn: '在此项目新建对话', projectHome: '打开项目主页', settings: '项目设置', remove: '删除项目', rename: '重命名', move: '移到项目', out: '移出项目', pin: '置顶', unpin: '取消置顶', del: '删除', back: '返回', name: '项目名称', icon: '图标', color: '颜色', description: '项目说明', save: '保存', loading: '读取中', conflict: '保存冲突，请重试', cancel: '取消', files: '项目文件', conversations: '项目内对话', upload: '上传文件', noChats: '还没有对话', noFiles: '还没有文件', noDescription: '还没有项目说明', archive: '归档', cron: '创建定时任务', createFailed: '新建对话失败，请重试。输入内容已保留', loadFailed: '项目清单读取失败，请刷新后重试', noProjects: '还没有项目', undo: '撤销', moved: '已移动', deleted: '已删除', message: '在「{name}」里新建对话', saveFailed: '保存失败，请重试', fileFailed: '文件操作失败' }, 'en-US': { project: 'Projects', pinned: 'Pinned', newProject: 'New project', recent: 'Recent chats', today: 'Today', yesterday: 'Yesterday', week: 'Previous 7 days', earlier: 'Earlier', all: 'View all', chats: ' chats', newChat: 'New chat', newIn: 'New chat in this project', projectHome: 'Open project home', settings: 'Project settings', remove: 'Delete project', rename: 'Rename', move: 'Move to project', out: 'Remove from project', pin: 'Pin', unpin: 'Unpin', del: 'Delete', back: 'Back', name: 'Project name', icon: 'Icon', color: 'Color', description: 'Project instructions', save: 'Save', loading: 'Loading', conflict: 'Save conflict. Try again.', cancel: 'Cancel', files: 'Project files', conversations: 'Project chats', upload: 'Upload file', noChats: 'No chats yet', noFiles: 'No files yet', noDescription: 'No instructions yet', archive: 'Archive', cron: 'Create scheduled task', createFailed: 'Could not create chat. Your draft was kept.', loadFailed: 'Could not load projects. Reload to retry.', noProjects: 'No projects yet', undo: 'Undo', moved: 'Moved', deleted: 'Deleted', message: 'New chat in “{name}”', saveFailed: 'Could not save. Try again.', fileFailed: 'File operation failed' } };
   function lang() { return window.wpUI && window.wpUI.isChinese && window.wpUI.isChinese() ? 'zh-CN' : 'en-US'; }
   function t(key) { return COPY[lang()][key] || key; }
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
@@ -41,17 +41,35 @@
     else { value = JSON.parse(value); if (!value || !Array.isArray(value.projects)) throw new Error('invalid manifest'); }
     return { version: 1, rev: Number.isFinite(value.rev) ? value.rev : 0, updatedAt: value.updatedAt || null, projects: L.normalizeProjects(value) };
   }
-  async function saveProjects(operation) {
-    // Every mutation starts from the current server manifest. This keeps a
-    // second page from replacing projects created by the first page.
-    var manifest = await readManifest(), projects = operation(manifest.projects.slice());
-    projects = L.normalizeProjects({ projects: projects });
-    var next = { version: 1, rev: manifest.rev + 1, updatedAt: new Date().toISOString(), projects: projects };
-    await fileWrite(FILE, next);
-    state.projects = projects; state.manifestRev = next.rev; state.manifestUpdatedAt = next.updatedAt;
-    try { localStorage.setItem('wp-projects-cache', JSON.stringify(next)); } catch (e) {}
+  function sameProjects(first, second) { return JSON.stringify(L.normalizeProjects({ projects: first })) === JSON.stringify(L.normalizeProjects({ projects: second })); }
+  function waitRandomly() { return new Promise(function (resolve) { setTimeout(resolve, 50 + Math.floor(Math.random() * 251)); }); }
+  function publishManifest(manifest) {
+    state.projects = manifest.projects; state.manifestRev = manifest.rev; state.manifestUpdatedAt = manifest.updatedAt;
+    try { localStorage.setItem('wp-projects-cache', JSON.stringify(manifest)); } catch (e) {}
     renderSoon();
-    return projects;
+  }
+  async function saveProjects(operation) {
+    // fs/write has no CAS. Write, read back immediately, then do one delayed
+    // read to catch a page that wrote between our verification and its own
+    // verification. A mismatch is reapplied to the newest manifest.
+    var retries = 3, observed = null;
+    for (var attempt = 0; attempt <= retries; attempt++) {
+      var manifest = await readManifest(), projects = L.normalizeProjects({ projects: operation(manifest.projects.slice()) });
+      var next = { version: 1, rev: manifest.rev + 1, updatedAt: new Date().toISOString(), projects: projects };
+      await fileWrite(FILE, next);
+      observed = await readManifest();
+      var matches = sameProjects(observed.projects, projects);
+      if (matches) {
+        await waitRandomly();
+        observed = await readManifest();
+        matches = sameProjects(observed.projects, projects);
+      }
+      if (matches) { publishManifest(observed); return observed.projects; }
+      publishManifest(observed);
+      if (attempt < retries) await waitRandomly();
+    }
+    var conflict = new Error('manifest save conflict'); conflict.manifestConflict = true;
+    throw conflict;
   }
   async function loadProjects() {
     var serial = ++projectLoadSerial;
@@ -169,6 +187,7 @@
     if (undo) { var b = document.createElement('button'); b.type = 'button'; b.textContent = t('undo'); b.addEventListener('click', function () { undo(); el.remove(); }); el.appendChild(b); }
     document.body.appendChild(el); setTimeout(function () { if (el.isConnected) el.remove(); }, 4200);
   }
+  function saveError(error) { return error && error.manifestConflict ? t('conflict') : t('saveFailed'); }
   function menuButton(label, action, disabled) { var b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.disabled = !!disabled; b.addEventListener('click', function (e) { e.stopPropagation(); action(); }); return b; }
   function openProjectMenu(anchor, project) {
     closeMenu(); var menu = state.menu = document.createElement('div'); menu.className = 'wp-project-menu'; menu.setAttribute('role', 'menu');
@@ -241,9 +260,9 @@
           await saveProjects(function (projects) { return projects.some(function (p) { return p.id === project.id; }) ? projects : projects.concat(project); });
           await Promise.all(affected.map(function (c) { return patchConversation(c, { wp_project_id: project.id }); }));
         }
-        catch (e) { toast(t('saveFailed')); }
+        catch (e) { toast(saveError(e)); }
       });
-    } catch (e) { toast(t('saveFailed')); }
+    } catch (e) { toast(saveError(e)); }
   }
   function make(tag, cls, content) { var el = document.createElement(tag); if (cls) el.className = cls; if (content != null) el.textContent = content; return el; }
   function relative(value) {
@@ -297,7 +316,7 @@
     if (!state.conversations.length) fragment.appendChild(make('p', 'wp-project-empty', t('noChats')));
     root.replaceChildren(fragment); root.wpSignature = signature;
   }
-  async function persistProject(project) {
+  async function persistProject(project, options) {
     await ensureDirectory(project);
     var claudePath = projectPath(project) + '/CLAUDE.md', agentsPath = projectPath(project) + '/AGENTS.md';
     var oldClaude = await fileRead(claudePath), oldAgents = await fileRead(agentsPath);
@@ -305,22 +324,31 @@
     // CLAUDE.md is the canonical displayed description. A name/icon/order edit
     // therefore leaves user supplied instruction files untouched.
     var oldDescription = typeof oldClaude === 'string' ? oldClaude : (exists ? (state.descriptions[project.id] || state.projects.find(function (p) { return p.id === project.id; }).description || '') : '');
-    var descriptionChanged = !exists || project.description !== oldDescription;
+    var descriptionEdited = options && options.descriptionEdited !== undefined ? !!options.descriptionEdited : (!exists || project.description !== oldDescription);
+    var loadedDescription = options && typeof options.loadedDescription === 'string' ? options.loadedDescription : oldDescription;
+    var descriptionChanged = descriptionEdited && project.description !== loadedDescription && project.description !== oldDescription;
     var written = [];
     async function rollback() {
       var inconsistent = false;
       for (var i = written.length - 1; i >= 0; i--) {
-        try { await fileWrite(written[i].path, written[i].old == null ? '' : written[i].old); } catch (e) { inconsistent = true; }
+        try {
+          if (written[i].old == null) {
+            // AionUI 2.1.47 exposes fs/mkdir and fs/rename, but no verified
+            // fs/delete (or fs/remove) action. Keep the existing empty-file
+            // fallback until a native deletion RPC is available.
+            await fileWrite(written[i].path, '');
+          } else await fileWrite(written[i].path, written[i].old);
+        } catch (e) { inconsistent = true; }
       }
       return inconsistent;
     }
     try {
       if (descriptionChanged) {
-        written.push({ path: claudePath, old: oldClaude }); await fileWrite(claudePath, project.description);
-        written.push({ path: agentsPath, old: oldAgents }); await fileWrite(agentsPath, project.description);
+        if (oldClaude !== project.description) { written.push({ path: claudePath, old: oldClaude }); await fileWrite(claudePath, project.description); }
+        if (oldAgents !== project.description) { written.push({ path: agentsPath, old: oldAgents }); await fileWrite(agentsPath, project.description); }
       }
       await saveProjects(function (projects) { return projects.some(function (p) { return p.id === project.id; }) ? projects.map(function (p) { return p.id === project.id ? project : p; }) : projects.concat(project); });
-      state.descriptions[project.id] = project.description;
+      if (descriptionEdited) state.descriptions[project.id] = project.description;
     } catch (error) {
       var inconsistent = await rollback();
       if (inconsistent) { error.instructionsInconsistent = true; }
@@ -330,26 +358,34 @@
   function openProjectModal(project, moveConversationAfter) {
     closeMenu(); if (state.modal) state.modal.remove(); var backdrop = state.modal = make('div', 'wp-project-backdrop'); var dialog = make('form', 'wp-project-dialog'); dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.innerHTML = '<h2>' + esc(project ? t('settings') : t('newProject')) + '</h2><label>' + esc(t('name')) + '<input name="name" maxlength="120" required></label><label>' + esc(t('icon')) + '<span class="wp-project-options wp-project-icons"></span></label><label>' + esc(t('color')) + '<span class="wp-project-options wp-project-colors"></span></label><label>' + esc(t('description')) + '<textarea name="description" maxlength="4000" rows="4"></textarea></label><div class="wp-project-dialog-actions"><button type="button" data-cancel>' + esc(t('cancel')) + '</button><button type="submit">' + esc(t('save')) + '</button></div>';
     var draftId = project ? project.id : id();
-    var name = dialog.elements.name, desc = dialog.elements.description, selectedIcon = project ? project.icon : 'folder', selectedColor = project ? project.color : COLORS[0]; name.value = project ? project.name : ''; desc.value = project ? descriptionFor(project) : '';
+    var name = dialog.elements.name, desc = dialog.elements.description, save = dialog.querySelector('[type=submit]'), selectedIcon = project ? project.icon : 'folder', selectedColor = project ? project.color : COLORS[0]; name.value = project ? project.name : ''; desc.value = project ? t('loading') : '';
+    var descriptionLoaded = !project, descriptionReadValue = '';
+    if (!project) desc.value = '';
     Object.keys(ICONS).forEach(function (key) { var b = make('button', 'wp-project-option'); b.innerHTML = icon(key); b.setAttribute('aria-label', key); b.type = 'button'; b.dataset.value = key; b.classList.toggle('selected', key === selectedIcon); b.addEventListener('click', function () { selectedIcon = key; dialog.querySelectorAll('.wp-project-icons .wp-project-option').forEach(function (x) { x.classList.toggle('selected', x === b); }); }); dialog.querySelector('.wp-project-icons').appendChild(b); });
     COLORS.forEach(function (color) { var b = make('button', 'wp-project-option wp-color-option', ''); b.type = 'button'; b.dataset.value = color; b.style.background = color; b.classList.toggle('selected', color === selectedColor); b.addEventListener('click', function () { selectedColor = color; dialog.querySelectorAll('.wp-project-colors .wp-project-option').forEach(function (x) { x.classList.toggle('selected', x === b); }); }); dialog.querySelector('.wp-project-colors').appendChild(b); });
     dialog.querySelector('[data-cancel]').addEventListener('click', closeModal);
     backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeModal(); });
     dialog.addEventListener('submit', async function (e) {
-      e.preventDefault(); var value = name.value.trim(), save = dialog.querySelector('[type=submit]'); if (!value || save.disabled) return;
+      e.preventDefault(); var value = name.value.trim(); if (!value || save.disabled) return;
       save.disabled = true;
       var p = Object.assign({}, project || { id: draftId, order: state.projects.length });
       Object.assign(p, { name: value.slice(0, 120), icon: selectedIcon, color: selectedColor, description: desc.value.slice(0, 4000), directory: project ? project.directory : L.safeDirectory(value, p.id), updatedAt: new Date().toISOString() });
       try {
-        await persistProject(p);
+        await persistProject(p, { descriptionEdited: !!desc.dataset.wpTouched, descriptionLoaded: descriptionLoaded, loadedDescription: descriptionReadValue });
         delete state.files[p.id]; closeModal(); renderSoon();
         if (moveConversationAfter) await moveConversation(moveConversationAfter, p);
-      } catch (error) { toast(t('saveFailed') + (error.instructionsInconsistent ? '；说明文件可能不一致，请重试保存' : '')); }
+      } catch (error) { toast(error.manifestConflict ? t('conflict') : t('saveFailed') + (error.instructionsInconsistent ? '；说明文件可能不一致，请重试保存' : '')); }
       finally { save.disabled = false; }
     }); backdrop.appendChild(dialog); document.body.appendChild(backdrop); name.focus();
     if (project) {
+      save.disabled = true; save.textContent = t('loading'); desc.placeholder = t('loading');
       loadDescription(project, true).then(function (value) {
-        if (state.modal === backdrop && !desc.dataset.wpTouched) desc.value = value;
+        if (state.modal === backdrop) {
+          descriptionReadValue = typeof value === 'string' ? value : '';
+          descriptionLoaded = true;
+          if (!desc.dataset.wpTouched) desc.value = descriptionReadValue;
+          save.disabled = false; save.textContent = t('save'); desc.placeholder = '';
+        }
       });
       desc.addEventListener('input', function () { desc.dataset.wpTouched = '1'; });
     }

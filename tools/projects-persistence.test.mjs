@@ -6,10 +6,10 @@ import vm from 'node:vm';
 const logic = fs.readFileSync(new URL('../image/rebrand/overlay/wp-projects-logic.js', import.meta.url), 'utf8');
 const script = fs.readFileSync(new URL('../image/rebrand/overlay/wp-projects.js', import.meta.url), 'utf8').replaceAll('__WP_WORKDIR__', '/data/work');
 const FILE = '/data/work/.workpartner-projects.json';
-function setup({ expose = true, files: sharedFiles } = {}) {
+function setup({ expose = true, files: sharedFiles, manifestGate, readDelay = 0, label = '' } = {}) {
   const listeners = {}, notices = [], requests = [], files = sharedFiles || new Map(), dirs = new Set(['/data/work']);
   const c = { id: 'chat', project_id: 'native-root', updated_at: 1000, extra: { workspace: '/data/work', backend: 'codex' } };
-  const db = { c, files, dirs, requests, empty: false, temporaryDeleted: false, failMkdir: false, failWrite: '', messageAt: 500, notices };
+  const db = { c, files, dirs, requests, empty: false, temporaryDeleted: false, failMkdir: false, failWrite: '', messageAt: 500, notices, manifestGate, readDelay, label };
   const context = {
     Math, Date, Map, Set, TextEncoder, FormData, Blob, Promise, Response,
     location: { hash: '#/guid', protocol: 'https:', host: 'fixture.test' },
@@ -35,9 +35,22 @@ function setup({ expose = true, files: sharedFiles } = {}) {
         assert.equal(init.method, 'POST'); assert.equal(body.root, '/data/work');
         if (!dirs.has(body.dir)) status = 404;
         data = [...dirs, ...files.keys()].filter(p => p.slice(0, p.lastIndexOf('/')) === body.dir).map(p => ({ name: p.slice(p.lastIndexOf('/') + 1), is_dir: dirs.has(p), full_path: p }));
-      } else if (url === '/api/fs/read') { data = files.get(body.path) ?? null; }
+      } else if (url === '/api/fs/read') {
+        if (db.readDelay && body.path.endsWith('/CLAUDE.md')) await new Promise(resolve => setTimeout(resolve, db.readDelay));
+        if (body.path === FILE && db.manifestGate) {
+          db.manifestGate.reads++;
+          if (db.manifestGate.reads === 2) db.manifestGate.release();
+          if (db.manifestGate.reads <= 2) await db.manifestGate.promise;
+        }
+        data = files.get(body.path) ?? null;
+      }
       else if (url === '/api/fs/write') {
         assert.deepEqual(Object.keys(body).sort(), ['data', 'path']); assert.equal(typeof body.data, 'string');
+        if (body.path === FILE && db.manifestGate && db.manifestGate.writeOrder) {
+          if (db.label === 'B' && db.manifestGate.writes === 0) await db.manifestGate.aWrote;
+          if (db.label === 'A' && db.manifestGate.writes === 0) { db.manifestGate.writes++; db.manifestGate.releaseA(); }
+          else if (db.label === 'B' && db.manifestGate.writes === 1) db.manifestGate.writes++;
+        }
         if (!dirs.has(body.path.slice(0, body.path.lastIndexOf('/'))) || db.failWrite && body.path.endsWith(db.failWrite)) status = 500;
         else files.set(body.path, body.data);
         data = true;
@@ -54,7 +67,7 @@ function setup({ expose = true, files: sharedFiles } = {}) {
   };
   context.window = context;
   vm.createContext(context); vm.runInContext(logic, context);
-  const hooks = `window.__test = {state, loadProjects, persistProject, moveConversation, deleteProject, loadConversations, pinConversation, fileWrite};
+  const hooks = `window.__test = {state, loadProjects, persistProject, saveProjects, moveConversation, deleteProject, loadConversations, pinConversation, fileWrite};
     renderSoon = function () {}; toast = function (message, undo) { window.__notices.push({message, undo}); }; confirmProject = async function () { return true; };`;
   context.__notices = notices;
   vm.runInContext(expose ? script.replace('  function start() {', hooks + '\n  function start() {') : script, context);
@@ -131,6 +144,16 @@ test('separate pages merge project mutations against the latest manifest', async
   assert.equal(JSON.parse(files.get(FILE)).rev, 2);
 });
 
+test('interleaved page reads and writes retain both projects after readback retry', async () => {
+  let releaseReads, releaseA;
+  const manifestGate = { reads: 0, promise: new Promise(resolve => { releaseReads = resolve; }), release: () => releaseReads(), writes: 0, writeOrder: true, aWrote: new Promise(resolve => { releaseA = resolve; }), releaseA: () => releaseA() };
+  const files = new Map(), first = setup({ files, manifestGate, label: 'A' }), second = setup({ files, manifestGate, label: 'B' });
+  const a = first.api.saveProjects(projects => projects.some(p => p.id === 'p1') ? projects : projects.concat({ id: 'p1', name: '甲', directory: 'project-p1' }));
+  const b = second.api.saveProjects(projects => projects.some(p => p.id === 'p2') ? projects : projects.concat({ id: 'p2', name: '乙', directory: 'project-p2' }));
+  await Promise.all([a, b]);
+  assert.deepEqual(JSON.parse(files.get(FILE)).projects.map(p => p.id).sort(), ['p1', 'p2']);
+});
+
 test('renaming after a CLAUDE.md upload preserves the uploaded instructions', async () => {
   const { api, files, requests } = setup();
   const original = { id: 'p1', name: '项目', directory: 'project-p1', description: '清单旧说明' };
@@ -143,6 +166,18 @@ test('renaming after a CLAUDE.md upload preserves the uploaded instructions', as
   assert.equal(files.get('/data/work/project-p1/CLAUDE.md'), '用户上传的说明');
   assert.equal(requests.filter(r => r.url === '/api/fs/write').length, writesBefore + 1);
   assert.equal(JSON.parse(files.get(FILE)).projects[0].name, '改名');
+});
+
+test('a slow CLAUDE.md read cannot make a quick rename overwrite instructions', async () => {
+  const { api, files } = setup({ readDelay: 25 });
+  const original = { id: 'p1', name: '项目', directory: 'project-p1', description: '旧说明' };
+  await api.persistProject(original);
+  files.set('/data/work/project-p1/CLAUDE.md', '用户保留的说明');
+  files.set('/data/work/project-p1/AGENTS.md', '用户保留的说明');
+  await api.persistProject({ ...original, name: '快速改名', description: '旧清单说明' }, { descriptionEdited: false });
+  assert.equal(files.get('/data/work/project-p1/CLAUDE.md'), '用户保留的说明');
+  assert.equal(files.get('/data/work/project-p1/AGENTS.md'), '用户保留的说明');
+  assert.equal(JSON.parse(files.get(FILE)).projects[0].name, '快速改名');
 });
 
 test('a failed second instruction write rolls CLAUDE.md back to its old content', async () => {
