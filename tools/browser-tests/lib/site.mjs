@@ -89,6 +89,8 @@ export function buildSite(repo, out, { voice = false, feishuNav = false } = {}) 
     js = js.replace(modelPickerSignature, `${modelPickerSignature} if (document.querySelector("#voice-composer")) return;`);
   }
   for (const file of ['wp-skills.js', 'wp-tools.js', 'wp-data-tools.js', 'wp-mcp-tools.js']) js += '\n' + read(overlay, file);
+  js += '\n' + read(overlay, 'wp-projects-logic.js');
+  js += '\n' + read(overlay, 'wp-projects.js').replaceAll('__WP_WORKDIR__', '/data/work');
   js += '\n' + read(overlay, 'wp-slash-skills.js')
     .replace('__WP_SKILLS_ZH__', JSON.stringify(JSON.parse(read(repo, 'image/skills-zh.json'))));
   if (skin.bridgeEnabled) js += '\n' + read(overlay, 'wp-feishu-auth.js');
@@ -205,7 +207,7 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       function showRoute() {
         ${feishuNav ? `// Match the real HashRouter: queries do not participate in path matching; '*' replaces unknown routes.
         const pathname = location.hash.slice(1).split('?')[0];
-        if (!/^\\/(guid|market|scheduled(?:\\/[^/]+)?|conversation\\/[^/]+)$/.test(pathname)) location.replace('#/guid');` : ''}
+        if (!/^\\/(guid|market|wp-project\\/[A-Za-z0-9_-]+|scheduled(?:\\/[^/]+)?|conversation\\/[^/]+)$/.test(pathname)) location.replace('#/guid');` : ''}
         document.getElementById('fixture-route').textContent = 'route=' + location.hash; window.__routes.push(location.href);
       }
       ${feishuNav ? `

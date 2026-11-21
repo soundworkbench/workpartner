@@ -544,6 +544,10 @@
         b.extra = b.extra || {};
         var ws = b.extra.workspace || '';
         if (!ws || ws.indexOf('/data/aionui-data/') === 0) { b.extra.workspace = WORKDIR; b.extra.custom_workspace = true; }
+        // Projects created by the sidebar use the same native workspace binding and
+        // carry their sidebar label in extra. Existing chats keep their workspace.
+        var wpProject = window.wpProjects && window.wpProjects.newConversationExtra && window.wpProjects.newConversationExtra();
+        if (wpProject) Object.keys(wpProject).forEach(function (key) { b.extra[key] = wpProject[key]; });
         var o = b.assistant && b.assistant.conversation_overrides;
         if (o) {
           var rawId = String(b.assistant.id || '');

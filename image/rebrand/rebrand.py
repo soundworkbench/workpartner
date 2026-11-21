@@ -77,7 +77,7 @@ UI_PATCHES = [
      't.useEffect(()=>{s&&window.wpComposerFocus.request()},[s]);'),
     # Register the overlay-owned page inside the existing authenticated layout.
     ('r.createElement(ve,{path:"/guid",element:Ie(aRo)})',
-     'r.createElement(ve,{path:"/market",element:r.createElement("div",{"data-wp-market-host":!0})}),r.createElement(ve,{path:"/guid",element:Ie(aRo)})'),
+     'r.createElement(ve,{path:"/market",element:r.createElement("div",{"data-wp-market-host":!0})}),r.createElement(ve,{path:"/wp-project/:id",element:r.createElement("div",{"data-wp-project-host":!0})}),r.createElement(ve,{path:"/guid",element:Ie(aRo)})'),
     # 完成边沿同时收起；历史初始收起，完成后仍能手动展开。
     ('i.useEffect(()=>{t&&s(!0)},[t])',
      'i.useEffect(()=>{s(t)},[t])'),
@@ -456,6 +456,8 @@ s = s.replace('<link rel="icon" type="image/png" href="./pwa/icon-192.png" />',
 s = s.replace('<meta name="theme-color" content="#4E5969" />', f'<meta name="theme-color" content="{THEME_COLOR}" />')
 css = open(os.path.join(overlay, 'wp-overlay.css'), encoding='utf8').read().replace('__WP_APPEARANCE_NAME__', copy['appearanceName']).replace('__WP_AVATAR_COLOR__', skin['avatarColor']) + '\n' + pet_css
 js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
+js += '\n' + Path(overlay, 'wp-projects-logic.js').read_text()
+js += '\n' + Path(overlay, 'wp-projects.js').read_text().replace('__WP_WORKDIR__', WORKDIR)
 js = js.replace('__WP_CHAT_MODULE__', chat_modules[0]).replace('__WP_CHAT_STYLES__', json.dumps(chat_styles))
 js += '\n' + Path(overlay, 'wp-skills.js').read_text()
 js += '\n' + Path(overlay, 'wp-tools.js').read_text()
