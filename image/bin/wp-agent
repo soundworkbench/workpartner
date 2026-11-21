@@ -160,6 +160,12 @@ def instructions(record):
 
 
 def roster(record, records):
+    helper = runpy.run_path(str(Path(__file__).with_name('wp-sync-instructions.py')))
+    with helper['locked_instructions'](workspace(record['id'])):
+        _roster(record, records)
+
+
+def _roster(record, records):
     target = (workspace(record['id']) / 'CLAUDE.md').resolve()
     if record['id'] == 'main' and not target.exists():
         return

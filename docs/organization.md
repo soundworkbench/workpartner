@@ -74,6 +74,20 @@ Workspace limits default to `runtime.nextMemory` (or 3221225472 bytes) and `runt
 }
 ```
 
+The same `userResources[slug]` entry accepts optional `tier`, `tasks`, and `taskMemoryMiB` fields, independently of CPU and container memory. A missing `tier` means `standard`; memory alone never selects a tier. Older gateways ignore these three keys.
+
+| `tier` | Concurrent tasks | Memory per task (MiB) |
+| --- | --- | --- |
+| `standard` | 3 | 512 |
+| `open` | 5 | 1024 |
+| `unlimited` | unlimited (`null`) | 1024 |
+
+`tasks` overrides the count with a positive safe integer or `null`; `taskMemoryMiB` overrides the budget with a positive safe integer. Usually only `tier` is needed, for example `"fixture-person": {"memory":"6Gi","cpu":"4","tier":"open"}`. An unrecognized tier or any invalid task override resets all three task fields to the standard defaults and emits one warning for that entry; resource limits and requests remain independent.
+
+Each workspace creation or gateway ensure reconciles `<container>-tier` in the user namespace, with the same user labels and a `tier.json` data value such as `{"tier":"open","tasks":5,"taskMemoryMiB":1024}`. It only writes when that value changes. `ensureTier(slug)` updates this ConfigMap without changing a StatefulSet or Pod. Organization configuration is loaded at gateway startup: apply configuration changes by restarting the gateway. An external tier controller must keep its ConfigMap writes consistent with the configuration loaded by the gateway, or the next ensure will restore the configured tier.
+
+New StatefulSets mount the optional ConfigMap directory at `/run/workpartner/tier/`, without `subPath`. Existing StatefulSets without this volume retain their template until normal recreation for an image upgrade; a tier or missing volume never makes a workspace stale. The image syncs instructions at startup, then checks the file digest every five minutes. Kubelet projection delay is additional. Missing, unreadable or malformed tier files use standard defaults. Each task's rendered memory budget is capped at half the effective container memory limit. Instruction writes are atomic and skipped when bytes are unchanged. Sync removes only the obsolete external section headed exactly `## 本人的任务档位（2026-11-21 管理员设置）`, through the next `## ` heading or EOF; other personal content is preserved byte for byte.
+
 Repeated `create` preserves the current replica count and updates the template, clearing removed optional settings such as `runtime.k8s.userPriorityClass` and `runtime.k8s.newUserNodeSelector`. The StatefulSet uses `OnDelete`, so existing Pods need recreation to receive template changes. Model keys are mounted read-only from a Secret with `subPath`; updating the Secret also requires Pod recreation (for example, `restart`) before the new key becomes visible. One-off maintenance Pods retain the global requests and limits and return at most 1 MiB of logs. `stop` and `remove` wait for all of the user's Pods to disappear; timeout errors name remaining Pods, and unrelated one-off Pods are not deleted automatically.
 
 In Kubernetes mode every method on the legacy runtime throws `LegacyRuntimeUnavailable`. The following extension compatibility behavior applies to Docker deployments.

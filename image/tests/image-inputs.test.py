@@ -106,7 +106,7 @@ class InputsTest(unittest.TestCase):
 
     def test_released_instruction_block_upgrades_and_renders_personal_budget(self):
         source = ROOT / 'home/CLAUDE.md'
-        for memory, expected in ((3 * 2 ** 30, (3072, 512)), (2 ** 30, (1024, 256))):
+        for memory, expected in ((3 * 2 ** 30, (3072, 512)), (2 ** 30, (1024, 512))):
             with self.subTest(memory=memory), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 history = json.loads((ROOT / 'bin/legacy-instructions.json').read_text())
@@ -123,7 +123,7 @@ class InputsTest(unittest.TestCase):
                 rendered = updated.decode()
                 self.assertIn(f'内存上限为 {expected[0]} MiB', rendered)
                 self.assertIn(f'后台任务最多使用 {expected[1]} MiB', rendered)
-                for text in ('同一轮里等它们全部完成', '不要用睡眠或轮询', '同时最多运行 2 个', '互相独立的工作用子代理并行处理'):
+                for text in ('同一轮里等它们全部完成', '不要用睡眠或轮询', '同时最多运行 3 个', '互相独立的工作用子代理并行处理'):
                     self.assertEqual(rendered.count(text), 1)
                 self.assertNotIn('__MEMORY', rendered)
                 metadata = target.stat()

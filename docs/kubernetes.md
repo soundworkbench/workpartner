@@ -39,7 +39,7 @@
 | `newUserNodeSelector` | `{}` | 字符串映射；仅当 PVC 非 Bound 且没有 `spec.volumeName` 时加入模板。已绑定卷由卷的节点约束决定位置。 |
 | `memoryRequest` | `512Mi` | 用户主容器内存 request，Kubernetes quantity 字符串。 |
 | `cpuRequest` | `100m` | 用户主容器 CPU request。 |
-| `userResources` | 无（各用户 `{}`） | `{slug: {memory?, cpu?, memoryRequest?, cpuRequest?}}`；`memory`、`cpu` 分别覆盖用户主容器 `limits.memory`、`limits.cpu`，`memoryRequest`、`cpuRequest` 分别覆盖 `requests.memory`、`requests.cpu`。四个键独立，仅采用非空字符串或有限数值，写模板时转字符串；其他值（如 `null`、空串、对象、数组、布尔、`NaN`、无穷）忽略并回落到对应全局值，不因这些值抛错或影响其他用户。未配置或撤掉某个键后，下次 `create` 使用对应全局值；保留的键在重建时继续生效。一次性维护 Pod 的 requests 和 limits 仍用全局值。按人 request 不能超过实际生效的 limit（按人或全局），否则 API Server 会拒绝该用户的模板，`create` 报错。 |
+| `userResources` | 无（各用户 `{}`） | `{slug: {memory?, cpu?, memoryRequest?, cpuRequest?, tier?, tasks?, taskMemoryMiB?}}`；`memory`、`cpu` 分别覆盖用户主容器 `limits.memory`、`limits.cpu`，`memoryRequest`、`cpuRequest` 分别覆盖 `requests.memory`、`requests.cpu`。四个资源键独立，仅采用非空字符串或有限数值，写模板时转字符串；其他值（如 `null`、空串、对象、数组、布尔、`NaN`、无穷）忽略并回落到对应全局值，不因这些值抛错或影响其他用户。未配置或撤掉某个资源键后，下次 `create` 使用对应全局值；保留的键在重建时继续生效。一次性维护 Pod 的 requests 和 limits 仍用全局值。按人 request 不能超过实际生效的 limit（按人或全局），否则 API Server 会拒绝该用户的模板，`create` 报错。任务档位与资源键独立，见下文。 |
 | `userPriorityClass` | 无 | 可选的已有 PriorityClass；工具不会创建它。 |
 | `imageConfigMap` | `workpartner-images` | 系统命名空间的镜像登记；`data["images.json"]` 是 `{镜像引用: config摘要}`。 |
 | `governingService` | `workpartner-users` | 用户 StatefulSet 的 headless Service。 |
@@ -55,6 +55,23 @@
 | `loadGatewayExtension` | 未设置时不加载 | 默认行为不变；需要组织扩展提供的路由时设为 `true`。扩展不能依赖 Docker 传输；旧版运行时仍不可用。 |
 | `cacheMs` | `2000` | 经运行时透传给文件模块的发布 Secret 读取缓存毫秒，独立于 inspect 缓存。 |
 | `leaseTtlMs` | `1800000` | 文件模块暂存清理 lease 的有效期，毫秒，正整数且不超过 2147483647。 |
+
+按人任务档位写在 `runtime.k8s.userResources[slug]`：`tier` 缺省为 `standard`（3 个、512 MiB），`open` 为 5 个、1024 MiB，`unlimited` 为不限个数、1024 MiB；不按容器内存推断档位。可选 `tasks` 用正安全整数或 `null`（不限）覆盖个数，`taskMemoryMiB` 用正安全整数覆盖单任务内存。任一档位字段非法时，三个字段整体回到标准档，并记一条警告；旧网关会忽略这三个新键。详细示例见 [组织配置](organization.md)。
+
+网关每次确保或创建工作区时，按当前加载的组织配置同步用户命名空间内的 `<container>-tier` ConfigMap；它沿用用户资源标签，`data["tier.json"]` 为 `{"tier":"open","tasks":5,"taskMemoryMiB":1024}` 这样的 JSON 字符串（不限时 `tasks:null`），内容未变不写。外部升档程序必须与网关加载的组织配置保持一致，否则下一次确保工作区会覆盖它只写入 ConfigMap 的档位。
+
+新建 STS 将 ConfigMap 整目录只读挂到 `/run/workpartner/tier/`，`optional:true`、无 `subPath`，缺失也能启动。档位和卷均不参与过期判断，现有 STS 不追加卷、不因此重建；它们在下次正常换镜像重建后才具备热更新能力。新版镜像启动时同步一次，之后每 300 秒比对文件摘要；kubelet 投射后至多再等 5 分钟。文件不可读、损坏或非法时用标准档，单任务预算取档位预算与实际容器内存一半的较小值；文件原子替换，内容相同不重写。旧管理员追加段按固定完整标题删除，其他块外个人说明保持原始字节。
+
+上线前先渲染并 apply `deploy/k8s/rbac.yaml.tmpl` 对应的用户 Role：
+
+```sh
+node tools/k8s/render.mjs --org "$ORG_DIRECTORY" --only Role --output "$TIER_RBAC_DIR"
+kubectl apply -f "$TIER_RBAC_DIR/role_${USER_NAMESPACE}_workpartner-users.yaml"
+```
+
+该 Role 新增用户命名空间内 `configmaps` 的 `get/create/patch`，系统命名空间镜像注册表仍仅允许 `get`。再按人补充组织配置的 `tier`、发布网关并重新加载配置，然后发布用户镜像，沿用已有空闲重建机制；不要为本次档位功能批量滚动 STS。验收时检查 `<container>-tier` 的 `tier.json`、Pod 中 `/run/workpartner/tier/tier.json`，以及 `/data/work/CLAUDE.md` 的 `workpartner:background` 段是否一致，并确认旧追加标题已消失、个人特殊设置仍在。
+
+回退预算可将组织配置及 ConfigMap 恢复为标准档并让网关重新加载配置，已挂卷的新版镜像会自动同步。代码回退时先停外部升档写入，回退网关和用户镜像并沿用空闲重建；旧网关忽略新键，已有 ConfigMap/可选卷可暂时保留。旧追加段不会自动恢复，需要时由备份恢复；不要恢复整份旧 CLAUDE.md 覆盖后续个人修改。确认新网关已退出后才回收新增 RBAC 权限。
 
 ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`，使用其中的 `namespace`、`token`、`ca.crt`；每次请求重新读取令牌和 CA。API 地址取 `KUBERNETES_SERVICE_HOST`，端口依次取 `KUBERNETES_SERVICE_PORT_HTTPS`、`KUBERNETES_SERVICE_PORT`、443。`inCluster` 对象的四个成员可覆盖这些值；只写 `inCluster:false` 又不提供 JSON kubeconfig 会失败。JSON kubeconfig 必须内嵌 CA/客户端证书数据或 token；不支持外部证书文件、exec/auth-provider 或跳过 TLS 校验。工具的 `--kubeconfig` 才接受文件路径。
 

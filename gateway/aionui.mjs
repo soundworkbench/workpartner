@@ -194,6 +194,7 @@ export function createAionui(o) {
     const info = await runtime.inspect(slug);
     if (!owns(user) || jobs.has(slug)) return null;
     if (background && !info.running) return null;
+    await runtime.ensureTier?.(slug);
     const hasPass = fs.existsSync(passFile(slug));
     const modelConfig = o.modelConfig ? JSON.stringify(o.modelConfig(slug)) : null;
     let stale = await isStale(slug, info, modelConfig);
