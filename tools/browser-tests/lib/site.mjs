@@ -62,7 +62,7 @@ function voiceComposerFixture() {
   composer();
 }
 
-export function buildSite(repo, out, { voice = false, feishuNav = false } = {}) {
+export function buildSite(repo, out, { voice = false, feishuNav = false, projects = false } = {}) {
   const overlay = path.join(repo, 'image/rebrand/overlay');
   const brand = path.join(out, 'brand');
   const site = path.join(out, 'static');
@@ -88,6 +88,8 @@ export function buildSite(repo, out, { voice = false, feishuNav = false } = {}) 
     }
     js = js.replace(modelPickerSignature, `${modelPickerSignature} if (document.querySelector("#voice-composer")) return;`);
   }
+  js += '\n' + read(overlay, 'wp-projects-logic.js');
+  js += '\n' + read(overlay, 'wp-projects.js').replaceAll('__WP_WORKDIR__', '/data/work');
   for (const file of ['wp-skills.js', 'wp-tools.js', 'wp-data-tools.js', 'wp-mcp-tools.js']) js += '\n' + read(overlay, file);
   js += '\n' + read(overlay, 'wp-slash-skills.js')
     .replace('__WP_SKILLS_ZH__', JSON.stringify(JSON.parse(read(repo, 'image/skills-zh.json'))));
@@ -186,7 +188,7 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
           <header class="arco-layout-header" style="height:40px"></header>
           ${feishuNav ? '<main class="arco-layout-content layout-sider-content" style="display:flex;flex-direction:column;flex:1;min-height:0">' : ''}
           ${feishuNav ? '<div class="fixture-new-row"><button class="_newChatTrigger_fixture_" type="button">新对话</button></div>' : ''}
-          <div class="fixture-scroll-area" style="flex:1;overflow:auto">${feishuNav ? '<a class="chat-history__item" href="#/conversation/fixture">测试会话</a>' : ''}</div>
+          <div class="fixture-scroll-area${projects ? ' _scrollArea_fixture' : ''}" style="flex:1;overflow:auto">${feishuNav ? '<a class="chat-history__item" href="#/conversation/fixture">测试会话</a>' : ''}</div>
           ${feishuNav ? '</main>' : ''}
         </div>
       </aside>
@@ -205,7 +207,7 @@ ${read(overlay, 'wp-settings-bridge.js').trim()}(config, setTheme, setLanguage, 
       function showRoute() {
         ${feishuNav ? `// Match the real HashRouter: queries do not participate in path matching; '*' replaces unknown routes.
         const pathname = location.hash.slice(1).split('?')[0];
-        if (!/^\\/(guid|market|scheduled(?:\\/[^/]+)?|conversation\\/[^/]+)$/.test(pathname)) location.replace('#/guid');` : ''}
+        if (!/^\\/(guid|market|wp-project\\/[A-Za-z0-9_-]+|scheduled(?:\\/[^/]+)?|conversation\\/[^/]+)$/.test(pathname)) location.replace('#/guid');` : ''}
         document.getElementById('fixture-route').textContent = 'route=' + location.hash; window.__routes.push(location.href);
       }
       ${feishuNav ? `

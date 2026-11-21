@@ -172,7 +172,7 @@ export async function createHarness(group) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-browser-tests-'));
   const logs = path.join(outputRoot, 'logs');
   fs.mkdirSync(logs, { recursive: true });
-  const staticDir = buildSite(repo, path.join(work, 'site'), { voice: group === 'voice', feishuNav: group === 'feishu-bot' || group === 'feishu-subagents' });
+  const staticDir = buildSite(repo, path.join(work, 'site'), { projects: group === 'projects', voice: group === 'voice', feishuNav: group === 'feishu-bot' || group === 'feishu-subagents' });
   const { organizationData, nextModelConfig } = await import(pathToFileURL(path.join(repo, 'gateway/organization/resolve.mjs')).href);
   const sessionKey = crypto.randomBytes(24).toString('hex');
   const gateways = [];
@@ -183,6 +183,7 @@ export async function createHarness(group) {
   const upstream = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://upstream');
     if (url.pathname === '/login') { res.writeHead(200, { 'set-cookie': 'fixture-session=1; HttpOnly' }); return res.end('{}'); }
+    if (url.pathname === '/api/fs/read') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{"success":true,"data":null}'); }
     if (url.pathname.startsWith('/api/')) { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{"success":true,"data":[]}'); }
     const file = path.resolve(staticDir, url.pathname === '/' ? 'index.html' : url.pathname.slice(1));
     if (!file.startsWith(staticDir + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end('not found'); }
