@@ -537,6 +537,7 @@
       });
     }
     if (!(method === 'POST' && /\/api\/conversations(\?|$)/.test(url) && init && typeof init.body === 'string')) return rawFetch.call(this, input, init);
+    var projectDraft = document.querySelector('[data-testid="guid-input"]')?.value || '';
     ghostPosted = true;
     return modelSettingsReady.then(agentInfo).then(function (ids) {
       try {
@@ -546,7 +547,7 @@
         if (!ws || ws.indexOf('/data/aionui-data/') === 0) { b.extra.workspace = WORKDIR; b.extra.custom_workspace = true; }
         // Projects created by the sidebar use the same native workspace binding and
         // carry their sidebar label in extra. Existing chats keep their workspace.
-        var wpProject = window.wpProjects && window.wpProjects.newConversationExtra && window.wpProjects.newConversationExtra();
+        var wpProject = !b.extra.is_health_check && window.wpProjects && window.wpProjects.newConversationExtra && window.wpProjects.newConversationExtra();
         if (wpProject) Object.keys(wpProject).forEach(function (key) { b.extra[key] = wpProject[key]; });
         var o = b.assistant && b.assistant.conversation_overrides;
         if (o) {
@@ -568,7 +569,7 @@
         }
         init = Object.assign({}, init, { body: JSON.stringify(b) });
       } catch (e) {}
-      return rawFetch.call(window, input, init).then(function (r) { if (!r.ok) ghostClear(); return r; }, function (e) { ghostClear(); throw e; });
+      return rawFetch.call(window, input, init).then(function (r) { if (!r.ok) ghostClear(); if (wpProject && window.wpProjects) setTimeout(function () { window.wpProjects.creationResult(r.ok, projectDraft, wpProject); }, 0); return r; }, function (e) { ghostClear(); if (wpProject && window.wpProjects) window.wpProjects.creationResult(false, projectDraft, wpProject); throw e; });
     });
   };
 
@@ -1079,6 +1080,7 @@
       var toggle = titlebarButton(0); if (toggle) toggle.click();
     }
   }
+  window.wpCloseDrawer = function () { closeDrawer(document.querySelector('aside.layout-sider')); };
   function searchOpen(row) {
     if (searching) { searching.input.focus(); return; }
     if (!window.wpConversationSearch) return;

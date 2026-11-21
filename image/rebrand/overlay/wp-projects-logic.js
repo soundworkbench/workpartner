@@ -44,24 +44,39 @@
     var list = Array.isArray(value) ? value : value && Array.isArray(value.projects) ? value.projects : [];
     return list.map(normalizeProject).filter(Boolean).sort(function (a, b) { return a.order - b.order || a.name.localeCompare(b.name); });
   }
+  function pinned(c) {
+    var extra = c.extra || {};
+    return extra.pinned !== undefined ? !!extra.pinned : extra.wp_pinned === true;
+  }
+  function activityTime(c) {
+    return c.wp_last_message_at || c.extra && c.extra.wp_activity_at || c.modified_at || c.updated_at || c.created_at;
+  }
+
+  function safeFilename(value) {
+    var name = Array.from(text(value).replace(/[\\/\x00-\x1f\x7f-\x9f]/g, '').replace(/\.\./g, '')).slice(0, 100).join('');
+    // Linux names are limited by bytes, not characters.
+    while (new TextEncoder().encode(name).length > 240) name = Array.from(name).slice(0, -1).join('');
+    return name && name !== '.' ? name : 'file';
+  }
   function groupConversations(conversations, projects, now) {
     var byId = new Map((projects || []).map(function (project) { return [project.id, project]; }));
     var grouped = { projects: new Map(), pinned: [], recent: { today: [], yesterday: [], week: [], earlier: [] } };
     (conversations || []).forEach(function (conversation) {
-      if (!conversation || !conversation.id) return;
+      if (!conversation || !conversation.id || conversation.extra && conversation.extra.wp_archived) return;
       var projectId = conversation.extra && conversation.extra.wp_project_id;
       var project = byId.get(projectId);
-      if (project) {
+      if (pinned(conversation)) grouped.pinned.push(conversation);
+      else if (project) {
         if (!grouped.projects.has(project.id)) grouped.projects.set(project.id, []);
         grouped.projects.get(project.id).push(conversation);
-      } else if (conversation.extra && conversation.extra.wp_pinned === true) grouped.pinned.push(conversation);
-      else grouped.recent[bucket(conversation.modified_at || conversation.updated_at || conversation.created_at, now)].push(conversation);
+      }
+      else grouped.recent[bucket(activityTime(conversation), now)].push(conversation);
     });
-    grouped.projects.forEach(function (list) { list.sort(function (a, b) { return new Date(b.modified_at || b.updated_at || 0) - new Date(a.modified_at || a.updated_at || 0); }); });
-    grouped.pinned.sort(function (a, b) { return new Date(b.modified_at || b.updated_at || 0) - new Date(a.modified_at || a.updated_at || 0); });
-    Object.keys(grouped.recent).forEach(function (key) { grouped.recent[key].sort(function (a, b) { return new Date(b.modified_at || b.updated_at || 0) - new Date(a.modified_at || a.updated_at || 0); }); });
+    grouped.projects.forEach(function (list) { list.sort(function (a, b) { return new Date(activityTime(b) || 0) - new Date(activityTime(a) || 0); }); });
+    grouped.pinned.sort(function (a, b) { return (b.extra.pinned_at || 0) - (a.extra.pinned_at || 0); });
+    Object.keys(grouped.recent).forEach(function (key) { grouped.recent[key].sort(function (a, b) { return new Date(activityTime(b) || 0) - new Date(activityTime(a) || 0); }); });
     return grouped;
   }
-  root.WpProjectsLogic = { safeDirectory: safeDirectory, mergeExtra: mergeExtra, bucket: bucket,
+  root.WpProjectsLogic = { pinned: pinned, activityTime: activityTime, safeFilename: safeFilename, safeDirectory: safeDirectory, mergeExtra: mergeExtra, bucket: bucket,
     normalizeProject: normalizeProject, normalizeProjects: normalizeProjects, groupConversations: groupConversations };
 })(typeof window === 'object' ? window : globalThis);

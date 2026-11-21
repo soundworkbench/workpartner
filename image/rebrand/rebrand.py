@@ -160,6 +160,9 @@ UI_PATCHES = [
      'e.createElement(J.Item,{key:"wpArchive"},e.createElement("div",{className:"flex items-center gap-8px"},e.createElement("span",{dangerouslySetInnerHTML:{__html:window.wpArchive.icon}}),e.createElement("span",null,window.wpArchive.label("archive")))),e.createElement(J.Item,{key:"pin"}'),
     ('onClick:b=>{b.stopPropagation()}},e.createElement(Ne,{droplist:',
      'onClick:b=>{b.stopPropagation()}},!N&&e.createElement("button",{type:"button",className:"wp-archive-button sider-action-btn",title:window.wpArchive.label("archive"),"aria-label":window.wpArchive.label("archive"),"data-conversation":t.id,onClick:b=>{b.stopPropagation();window.wpArchive.toggle(t)},dangerouslySetInnerHTML:{__html:window.wpArchive.icon}}),e.createElement(Ne,{droplist:'),
+    # Reuse the native scheduled-task prefill action even for collapsed project rows.
+    ('handleCreateCronTask:q,handleRemoveProject:X',
+     'handleCreateCronTask:(window.wpProjectCreateCronTask=q),handleRemoveProject:X'),
     ('const Vt=new Eg,lu=', 'const Vt=window.wpChatEvents=new Eg,lu='),
     ('y=Kn(),$=I.length>0,K=P.length>0',
      'y=!1,$=!1,K=!1'),
