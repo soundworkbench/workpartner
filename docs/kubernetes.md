@@ -58,7 +58,7 @@
 
 按人任务档位写在 `runtime.k8s.userResources[slug]`：`tier` 缺省为 `standard`（3 个、512 MiB），`open` 为 5 个、1024 MiB，`unlimited` 为不限个数、1024 MiB；不按容器内存推断档位。可选 `tasks` 用正安全整数或 `null`（不限）覆盖个数，`taskMemoryMiB` 用正安全整数覆盖单任务内存。任一档位字段非法时，三个字段整体回到标准档，并记一条警告；旧网关会忽略这三个新键。详细示例见 [组织配置](organization.md)。
 
-网关每次确保或创建工作区时，按当前加载的组织配置同步用户命名空间内的 `<container>-tier` ConfigMap；它沿用用户资源标签，`data["tier.json"]` 为 `{"tier":"open","tasks":5,"taskMemoryMiB":1024}` 这样的 JSON 字符串（不限时 `tasks:null`），内容未变不写。外部升档程序必须与网关加载的组织配置保持一致，否则下一次确保工作区会覆盖它只写入 ConfigMap 的档位。
+网关每次确保或创建工作区时，按档位三项的当前文件内容同步用户命名空间内的 `<container>-tier` ConfigMap；它沿用用户资源标签，`data["tier.json"]` 为 `{"tier":"open","tasks":5,"taskMemoryMiB":1024}` 这样的 JSON 字符串（不限时 `tasks:null`），内容未变不写。设置 `WORKPARTNER_ORG_DIR` 时，网关按 `organization.json` 的 mtime、inode 和大小缓存解析结果，并在文件变化后热读取 `runtime.k8s.userResources[slug]` 的 `tier`、`tasks`、`taskMemoryMiB`，因此外部升降档程序先原子更新该文件再改 ConfigMap 后无需重启网关；读取失败沿用上一次成功的档位，首次读取失败则沿用启动档位。未设置该变量时沿用启动时的默认组织配置。内存、处理器和其他组织配置仍只在网关启动时读取，需要重启才能生效。
 
 新建 STS 将 ConfigMap 整目录只读挂到 `/run/workpartner/tier/`，`optional:true`、无 `subPath`，缺失也能启动。档位和卷均不参与过期判断，现有 STS 不追加卷、不因此重建；它们在下次正常换镜像重建后才具备热更新能力。新版镜像启动时同步一次，之后每 300 秒比对文件摘要；kubelet 投射后至多再等 5 分钟。文件不可读、损坏或非法时用标准档，单任务预算取档位预算与实际容器内存一半的较小值；文件原子替换，内容相同不重写。旧管理员追加段按固定完整标题删除，其他块外个人说明保持原始字节。
 

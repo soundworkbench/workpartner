@@ -138,6 +138,65 @@ test('userResources supplies the tier ConfigMap and optional directory mount, wi
   }
 });
 
+test('tier ensure hot-reads the current organization file after startup', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-tier-org-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const organizationFile = path.join(directory, 'organization.json');
+  fs.writeFileSync(organizationFile, JSON.stringify({ runtime: { k8s: { userResources: { person: { tier: 'standard' } } } } }));
+  const { runtime, client } = fixture(t, { organizationFile, userResources: { person: { tier: 'standard' } } });
+  const route = `${core}/configmaps/fixture-person-tier`;
+  await runtime.ensureTier('person');
+  assert.deepEqual(client.objects.get(route).data, { 'tier.json': '{"tier":"standard","tasks":3,"taskMemoryMiB":512}' });
+  fs.writeFileSync(organizationFile, JSON.stringify({ runtime: { k8s: { userResources: { person: { tier: 'open' } } } } }));
+  client.calls.length = 0;
+  await runtime.ensureTier('person');
+  assert.deepEqual(writes(client), [['patch', route,
+    { data: { 'tier.json': '{"tier":"open","tasks":5,"taskMemoryMiB":1024}' }, metadata: { labels: client.objects.get(route).metadata.labels } }, 'merge']]);
+});
+
+test('tier ensure does not patch an externally updated ConfigMap when organization.json agrees', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-tier-org-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const organizationFile = path.join(directory, 'organization.json');
+  fs.writeFileSync(organizationFile, JSON.stringify({ runtime: { k8s: { userResources: { person: { tier: 'open' } } } } }));
+  const { runtime, client } = fixture(t, { organizationFile, userResources: { person: { tier: 'standard' } } });
+  await runtime.ensureTier('person');
+  client.calls.length = 0;
+  await runtime.ensureTier('person');
+  assert.deepEqual(writes(client), []);
+});
+
+test('tier ensure keeps the last tier when organization.json is invalid and warns once', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-tier-org-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const organizationFile = path.join(directory, 'organization.json');
+  fs.writeFileSync(organizationFile, JSON.stringify({ runtime: { k8s: { userResources: { person: { tier: 'open' } } } } }));
+  const warnings = [];
+  const { runtime, client } = fixture(t, { organizationFile, warn: message => warnings.push(message), userResources: { person: { tier: 'standard' } } });
+  const route = `${core}/configmaps/fixture-person-tier`;
+  await runtime.ensureTier('person');
+  fs.writeFileSync(organizationFile, '{"runtime":');
+  client.calls.length = 0;
+  await runtime.ensureTier('person');
+  await runtime.ensureTier('person');
+  assert.deepEqual(writes(client), []);
+  assert.deepEqual(client.objects.get(route).data, { 'tier.json': '{"tier":"open","tasks":5,"taskMemoryMiB":1024}' });
+  assert.equal(warnings.length, 1);
+});
+
+test('tier ensure parses an unchanged organization file only once', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-tier-org-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const organizationFile = path.join(directory, 'organization.json');
+  fs.writeFileSync(organizationFile, JSON.stringify({ runtime: { k8s: { userResources: { person: { tier: 'open' } } } } }));
+  let reads = 0;
+  const { runtime } = fixture(t, { organizationFile, readFileSync: (...args) => { reads++; return fs.readFileSync(...args); },
+    userResources: { person: { tier: 'standard' } } });
+  await runtime.ensureTier('person');
+  await runtime.ensureTier('person');
+  assert.equal(reads, 1);
+});
+
 test('tier sync repairs missing or incorrect labels even when data matches', async t => {
   const { runtime, client } = fixture(t);
   await runtime.create({ slug: 'person' });

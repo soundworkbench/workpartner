@@ -62,6 +62,56 @@ export function createK8sRuntime(o = {}) {
     return value;
   };
   const caches = new Map(), generations = new Map(), locks = new Map();
+  const organizationFile = typeof o.organizationFile === 'string' && o.organizationFile ? o.organizationFile : null;
+  const startupResources = o.userResources ?? {};
+  const statOrganizationFile = o.statFile ?? fs.statSync;
+  const readOrganizationFile = o.readFileSync ?? fs.readFileSync;
+  const tierWarnings = new Set();
+  let tierFileState = { signature: undefined, resources: startupResources, success: false };
+  function tierWarning(key, message) {
+    if (tierWarnings.has(key)) return;
+    tierWarnings.add(key);
+    (o.warn ?? console.warn)(message);
+  }
+  const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  function tierResourcesFromOrganization(value) {
+    if (!plainObject(value)) throw new Error('organization.json must contain an object');
+    if (value.runtime === undefined) return {};
+    if (!plainObject(value.runtime)) throw new Error('organization.json runtime must be an object');
+    if (value.runtime.k8s === undefined) return {};
+    if (!plainObject(value.runtime.k8s)) throw new Error('organization.json runtime.k8s must be an object');
+    const resources = value.runtime.k8s.userResources;
+    if (resources === undefined) return {};
+    if (!plainObject(resources)) throw new Error('organization.json runtime.k8s.userResources must be an object');
+    for (const [slug, entry] of Object.entries(resources)) {
+      if (!plainObject(entry)) throw new Error(`organization.json userResources.${slug} must be an object`);
+    }
+    return resources;
+  }
+  function tierResources() {
+    if (!organizationFile) return startupResources;
+    let stat;
+    try { stat = statOrganizationFile(organizationFile); }
+    catch (error) {
+      tierWarning(`read:${error.code ?? error.name ?? error.message}`, `Cannot read current organization tier configuration; keeping the previous values (${error.message})`);
+      return tierFileState.success ? tierFileState.resources : startupResources;
+    }
+    const signature = [stat.dev, stat.ino, stat.size, stat.mtimeMs].join(':');
+    if (tierFileState.signature === signature) return tierFileState.success ? tierFileState.resources : startupResources;
+    try {
+      const value = tierResourcesFromOrganization(JSON.parse(readOrganizationFile(organizationFile, 'utf8')));
+      tierFileState = { signature, resources: value, success: true };
+    } catch (error) {
+      tierWarning(`read:${error.name ?? 'Error'}:${error.message}`, `Cannot read current organization tier configuration; keeping the previous values (${error.message})`);
+      tierFileState = { signature, resources: tierFileState.resources, success: tierFileState.success };
+    }
+    return tierFileState.success ? tierFileState.resources : startupResources;
+  }
+  function tierFor(slug) {
+    const resources = tierResources();
+    return taskTier(resources?.[slug], message => tierWarning(`tier:${slug}`, message));
+  }
   let images, imageGeneration = 0;
   function invalidate(slug) {
     caches.delete(slug);
@@ -144,7 +194,7 @@ export function createK8sRuntime(o = {}) {
     return patch ? c.patch(route, patch, 'merge') : existing;
   }
   async function syncTier(c, slug) {
-    const data = { 'tier.json': JSON.stringify(taskTier(o.userResources?.[slug])) };
+    const data = { 'tier.json': JSON.stringify(tierFor(slug)) };
     const expectedLabels = labels(slug);
     return ensure(c, `${core}/configmaps`, { apiVersion: 'v1', kind: 'ConfigMap',
       metadata: { name: names(slug).tier, labels: expectedLabels }, data },

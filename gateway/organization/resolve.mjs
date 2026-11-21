@@ -116,7 +116,11 @@ export function organizationData(environment = process.env) {
   }
   if (market.preinstalled.some(name => !/^[a-z0-9][a-z0-9-]{0,63}$/.test(name))) throw new Error('Invalid market.preinstalled');
   hubConfig(data.mcpHub);
-  return { ...data, directory };
+  const result = { ...data, directory };
+  if (environment.WORKPARTNER_ORG_DIR) Object.defineProperty(result, 'organizationFile', {
+    value: resolve(directory, 'organization.json'), enumerable: false,
+  });
+  return result;
 }
 
 /** Optional Claude Code models for keys without any model.defaults.claudePrefix model. */
@@ -203,7 +207,7 @@ export function nextEnvironment(data, environment = {}) {
  * @returns {import('./resolve.mjs').Organization} Effective non-secret values and secret file references.
  */
 export function resolveOrganization(environment = process.env) {
-  const { directory, ...data } = organizationData(environment);
+  const { directory, organizationFile, ...data } = organizationData(environment);
   const host = hostname(environment.PUBLIC_HOST || data.publicHost, 'PUBLIC_HOST');
   const projectHost = hostname(environment.MEEGLE_HOST || data.projectHost || '', 'MEEGLE_HOST', true);
   const previewHost = hostname(environment.PREVIEW_HOST || data.previewHost || '', 'PREVIEW_HOST', true);
@@ -220,7 +224,7 @@ export function resolveOrganization(environment = process.env) {
   if (!['http:', 'https:'].includes(modelUrl.protocol) || modelUrl.username || modelUrl.password) throw new Error('Invalid MODEL_BASE_URL');
   const keyPrefix = environment.MODEL_KEY_PREFIX || environment.MODEL_KEY_PREFIX || data.model.keyPrefix;
   if (!/^[a-zA-Z0-9_-]+$/.test(keyPrefix)) throw new Error('Invalid MODEL_KEY_PREFIX');
-  return {
+  const result = {
     ...data,
     directory,
     server: {
@@ -242,6 +246,8 @@ export function resolveOrganization(environment = process.env) {
       hostConfig: environment.HOST_PARTNER_CONFIG || environment.PARTNER_CONFIG || data.runtime.hostConfig || '',
     },
   };
+  if (organizationFile) Object.defineProperty(result, 'organizationFile', { value: organizationFile, enumerable: false });
+  return result;
 }
 
 /**
