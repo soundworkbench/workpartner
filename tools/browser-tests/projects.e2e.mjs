@@ -188,7 +188,7 @@ test('home titles, files, native archive and scheduled task actions, draft on fa
   await suite.session('home', { route: null }, async ({ page, log }) => {
     await fixture(page, db);
     const count = page.locator('.wp-project-count'); await count.hover(); await count.click();
-    assert.equal(await page.locator('.wp-project-arrow').textContent(), '⌄');
+    await page.waitForFunction(() => document.querySelector('.wp-project-arrow')?.textContent === '⌄');
     assert.equal(await page.evaluate(() => window.wpProjects.newConversationExtra()), null);
     await home(page);
     const title = await page.locator('.wp-project-home .wp-project-conversation-link').boundingBox(); assert.ok(title.width > 140);

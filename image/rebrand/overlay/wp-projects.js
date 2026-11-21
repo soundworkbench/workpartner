@@ -3,8 +3,8 @@
   'use strict';
   var L = window.WpProjectsLogic, request = window.fetch.bind(window);
   var FILE = '__WP_WORKDIR__/.workpartner-projects.json';
-  var state = { projects: [], conversations: [], files: {}, expanded: new Set(), collapsed: false, loaded: false,
-    drafts: {}, homeSubmission: null, pendingProject: null, modal: null, menu: null, home: null };
+  var state = { projects: [], conversations: [], files: {}, descriptions: {}, expanded: new Set(), collapsed: false, loaded: false,
+    manifestRev: 0, manifestUpdatedAt: null, drafts: {}, homeSubmission: null, pendingProject: null, modal: null, menu: null, home: null };
   var ICONS = {
     folder: '<path d="M3 6h6l2 2h10v12H3z"/>',
     star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/>',
@@ -34,18 +34,28 @@
     var data = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
     if (await post('/api/fs/write', { path: path, data: data }) !== true) throw new Error('file write not confirmed');
   }
-  async function saveProjects(projects) {
-    await fileWrite(FILE, { version: 1, projects: projects });
-    state.projects = projects;
-    try { localStorage.setItem('wp-projects-cache', JSON.stringify({ version: 1, projects: projects })); } catch (e) {}
+  async function readManifest() {
+    var value = await fileRead(FILE);
+    if (value === null) value = { version: 1, rev: 0, projects: [] };
+    else { value = JSON.parse(value); if (!value || !Array.isArray(value.projects)) throw new Error('invalid manifest'); }
+    return { version: 1, rev: Number.isFinite(value.rev) ? value.rev : 0, updatedAt: value.updatedAt || null, projects: L.normalizeProjects(value) };
+  }
+  async function saveProjects(operation) {
+    // Every mutation starts from the current server manifest. This keeps a
+    // second page from replacing projects created by the first page.
+    var manifest = await readManifest(), projects = operation(manifest.projects.slice());
+    projects = L.normalizeProjects({ projects: projects });
+    var next = { version: 1, rev: manifest.rev + 1, updatedAt: new Date().toISOString(), projects: projects };
+    await fileWrite(FILE, next);
+    state.projects = projects; state.manifestRev = next.rev; state.manifestUpdatedAt = next.updatedAt;
+    try { localStorage.setItem('wp-projects-cache', JSON.stringify(next)); } catch (e) {}
     renderSoon();
+    return projects;
   }
   async function loadProjects() {
     try {
-      var value = await fileRead(FILE);
-      if (value === null) value = { version: 1, projects: [] };
-      else { value = JSON.parse(value); if (!value || !Array.isArray(value.projects)) throw new Error('invalid manifest'); }
-      state.projects = L.normalizeProjects(value); state.loaded = true; renderSoon();
+      var value = await readManifest();
+      state.projects = value.projects; state.manifestRev = value.rev; state.manifestUpdatedAt = value.updatedAt; state.descriptions = {}; state.loaded = true; renderSoon();
     } catch (e) { toast(t('loadFailed')); }
   }
   // /fs/write validates an existing parent and does not mkdir. The native
@@ -84,7 +94,11 @@
   }
   async function uploadFile(project, file) {
     var name = L.safeFilename(file.name), form = new FormData();
-    if (/^(text\/|application\/(json|xml))/.test(file.type) || /\.(md|txt|csv|json|yaml|yml|js|ts|py|html|css)$/i.test(name)) { await fileWrite(projectPath(project) + '/' + name, await file.text()); delete state.files[project.id]; await loadFiles(project); return; }
+    if (/^(text\/|application\/(json|xml))/.test(file.type) || /\.(md|txt|csv|json|yaml|yml|js|ts|py|html|css)$/i.test(name)) {
+      var text = await file.text(); await fileWrite(projectPath(project) + '/' + name, text);
+      if (name === 'CLAUDE.md') { state.descriptions[project.id] = text; renderSoon(); }
+      delete state.files[project.id]; await loadFiles(project); return;
+    }
     form.append('file_name', name); form.append('file', file, name);
     var path = await json('/api/fs/upload', { method: 'POST', body: form });
     if (typeof path !== 'string' || !path) throw new Error('upload not confirmed');
@@ -123,6 +137,19 @@
       if (Array.isArray(items)) state.files[project.id] = items.map(function (item) { return typeof item === 'string' ? item : item.name; }).filter(Boolean);
       renderSoon();
     } catch (e) { state.files[project.id] = []; toast(t('fileFailed')); }
+  }
+  function descriptionFor(project) {
+    return Object.prototype.hasOwnProperty.call(state.descriptions, project.id) ? state.descriptions[project.id] : project.description || '';
+  }
+  async function loadDescription(project, force) {
+    if (!force && Object.prototype.hasOwnProperty.call(state.descriptions, project.id)) return state.descriptions[project.id];
+    try {
+      var value = await fileRead(projectPath(project) + '/CLAUDE.md');
+      if (typeof value === 'string') state.descriptions[project.id] = value;
+      else state.descriptions[project.id] = project.description || '';
+    } catch (e) { state.descriptions[project.id] = project.description || ''; }
+    renderSoon();
+    return state.descriptions[project.id];
   }
   function currentProject() { var m = location.hash.match(/^#\/wp-project\/([A-Za-z0-9_-]+)/); return m && state.projects.find(function (p) { return p.id === m[1]; }); }
   function closeMenu() { if (state.menu) { state.menu.remove(); state.menu = null; } }
@@ -196,11 +223,14 @@
     var results = await Promise.all(affected.map(function (c) { return patchConversation(c, { wp_project_id: null }); }));
     if (results.some(function (ok) { return !ok; })) return;
     try {
-      await saveProjects(state.projects.filter(function (p) { return p.id !== project.id; }));
+      await saveProjects(function (projects) { return projects.filter(function (p) { return p.id !== project.id; }); });
       if (location.hash === '#/wp-project/' + project.id) location.hash = '#/guid';
       state.expanded.delete(project.id);
       toast(t('deleted'), async function () {
-        try { await saveProjects(state.projects.concat(project)); await Promise.all(affected.map(function (c) { return patchConversation(c, { wp_project_id: project.id }); })); }
+        try {
+          await saveProjects(function (projects) { return projects.some(function (p) { return p.id === project.id; }) ? projects : projects.concat(project); });
+          await Promise.all(affected.map(function (c) { return patchConversation(c, { wp_project_id: project.id }); }));
+        }
         catch (e) { toast(t('saveFailed')); }
       });
     } catch (e) { toast(t('saveFailed')); }
@@ -254,15 +284,38 @@
   }
   async function persistProject(project) {
     await ensureDirectory(project);
-    await fileWrite(projectPath(project) + '/CLAUDE.md', project.description);
-    await fileWrite(projectPath(project) + '/AGENTS.md', project.description);
+    var claudePath = projectPath(project) + '/CLAUDE.md', agentsPath = projectPath(project) + '/AGENTS.md';
+    var oldClaude = await fileRead(claudePath), oldAgents = await fileRead(agentsPath);
     var exists = state.projects.some(function (p) { return p.id === project.id; });
-    await saveProjects(exists ? state.projects.map(function (p) { return p.id === project.id ? project : p; }) : state.projects.concat(project));
+    // CLAUDE.md is the canonical displayed description. A name/icon/order edit
+    // therefore leaves user supplied instruction files untouched.
+    var oldDescription = typeof oldClaude === 'string' ? oldClaude : (exists ? (state.descriptions[project.id] || state.projects.find(function (p) { return p.id === project.id; }).description || '') : '');
+    var descriptionChanged = !exists || project.description !== oldDescription;
+    var written = [];
+    async function rollback() {
+      var inconsistent = false;
+      for (var i = written.length - 1; i >= 0; i--) {
+        try { await fileWrite(written[i].path, written[i].old == null ? '' : written[i].old); } catch (e) { inconsistent = true; }
+      }
+      return inconsistent;
+    }
+    try {
+      if (descriptionChanged) {
+        written.push({ path: claudePath, old: oldClaude }); await fileWrite(claudePath, project.description);
+        written.push({ path: agentsPath, old: oldAgents }); await fileWrite(agentsPath, project.description);
+      }
+      await saveProjects(function (projects) { return projects.some(function (p) { return p.id === project.id; }) ? projects.map(function (p) { return p.id === project.id ? project : p; }) : projects.concat(project); });
+      state.descriptions[project.id] = project.description;
+    } catch (error) {
+      var inconsistent = await rollback();
+      if (inconsistent) { error.instructionsInconsistent = true; }
+      throw error;
+    }
   }
   function openProjectModal(project, moveConversationAfter) {
     closeMenu(); if (state.modal) state.modal.remove(); var backdrop = state.modal = make('div', 'wp-project-backdrop'); var dialog = make('form', 'wp-project-dialog'); dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.innerHTML = '<h2>' + esc(project ? t('settings') : t('newProject')) + '</h2><label>' + esc(t('name')) + '<input name="name" maxlength="120" required></label><label>' + esc(t('icon')) + '<span class="wp-project-options wp-project-icons"></span></label><label>' + esc(t('color')) + '<span class="wp-project-options wp-project-colors"></span></label><label>' + esc(t('description')) + '<textarea name="description" maxlength="4000" rows="4"></textarea></label><div class="wp-project-dialog-actions"><button type="button" data-cancel>' + esc(t('cancel')) + '</button><button type="submit">' + esc(t('save')) + '</button></div>';
     var draftId = project ? project.id : id();
-    var name = dialog.elements.name, desc = dialog.elements.description, selectedIcon = project ? project.icon : 'folder', selectedColor = project ? project.color : COLORS[0]; name.value = project ? project.name : ''; desc.value = project ? project.description || '' : '';
+    var name = dialog.elements.name, desc = dialog.elements.description, selectedIcon = project ? project.icon : 'folder', selectedColor = project ? project.color : COLORS[0]; name.value = project ? project.name : ''; desc.value = project ? descriptionFor(project) : '';
     Object.keys(ICONS).forEach(function (key) { var b = make('button', 'wp-project-option'); b.innerHTML = icon(key); b.setAttribute('aria-label', key); b.type = 'button'; b.dataset.value = key; b.classList.toggle('selected', key === selectedIcon); b.addEventListener('click', function () { selectedIcon = key; dialog.querySelectorAll('.wp-project-icons .wp-project-option').forEach(function (x) { x.classList.toggle('selected', x === b); }); }); dialog.querySelector('.wp-project-icons').appendChild(b); });
     COLORS.forEach(function (color) { var b = make('button', 'wp-project-option wp-color-option', ''); b.type = 'button'; b.dataset.value = color; b.style.background = color; b.classList.toggle('selected', color === selectedColor); b.addEventListener('click', function () { selectedColor = color; dialog.querySelectorAll('.wp-project-colors .wp-project-option').forEach(function (x) { x.classList.toggle('selected', x === b); }); }); dialog.querySelector('.wp-project-colors').appendChild(b); });
     dialog.querySelector('[data-cancel]').addEventListener('click', closeModal);
@@ -276,13 +329,19 @@
         await persistProject(p);
         delete state.files[p.id]; closeModal(); renderSoon();
         if (moveConversationAfter) await moveConversation(moveConversationAfter, p);
-      } catch (error) { toast(t('saveFailed')); }
+      } catch (error) { toast(t('saveFailed') + (error.instructionsInconsistent ? '；说明文件可能不一致，请重试保存' : '')); }
       finally { save.disabled = false; }
     }); backdrop.appendChild(dialog); document.body.appendChild(backdrop); name.focus();
+    if (project) {
+      loadDescription(project, true).then(function (value) {
+        if (state.modal === backdrop && !desc.dataset.wpTouched) desc.value = value;
+      });
+      desc.addEventListener('input', function () { desc.dataset.wpTouched = '1'; });
+    }
   }
   function closeModal() { if (state.modal) { state.modal.remove(); state.modal = null; } }
   function closeDrawer() { if (window.wpCloseDrawer) window.wpCloseDrawer(); }
-  function openHome(project) { closeDrawer(); state.home = project; location.hash = '#/wp-project/' + project.id; renderHome(); }
+  function openHome(project) { delete state.descriptions[project.id]; closeDrawer(); state.home = project; location.hash = '#/wp-project/' + project.id; renderHome(); }
   function startProjectChat(project) { state.homeSubmission = null; closeDrawer(); state.pendingProject = project; location.hash = '#/guid'; var timer = setInterval(function () { var input = document.querySelector('[data-testid="guid-input"]'), button = document.querySelector('[data-testid="guid-send-btn"]'); if (!input || !button) return; clearInterval(timer); input.focus(); }, 50); setTimeout(function () { clearInterval(timer); }, 10000); }
   async function submitProjectChat(project, input) {
     state.pendingProject = project; state.homeSubmission = project.id; state.drafts[project.id] = input; closeDrawer();
@@ -302,11 +361,11 @@
     var project = currentProject(), main = document.querySelector('main.layout-content') || document.querySelector('.layout-content'); if (!main) return;
     var old = main.querySelector('.wp-project-home'); if (!project) { if (old) old.remove(); return; } if (!old) { old = make('div', 'wp-project-home'); main.appendChild(old); }
     var chats = state.conversations.filter(function (c) { return c.extra && !c.extra.wp_archived && c.extra.wp_project_id === project.id; });
-    var signature = JSON.stringify([project, chats, state.files[project.id], state.drafts[project.id], lang(), Math.floor(Date.now() / 60000)]);
+    var signature = JSON.stringify([project, descriptionFor(project), chats, state.files[project.id], state.drafts[project.id], lang(), Math.floor(Date.now() / 60000)]);
     if (old.wpSignature === signature || old.dataset.project === project.id && old.contains(document.activeElement)) return;
     old.dataset.project = project.id; old.wpSignature = signature; old.replaceChildren(); var header = make('header', 'wp-project-home-header'); header.innerHTML = '<span class="wp-project-home-icon" style="--project-color:' + esc(project.color) + '">' + icon(project.icon) + '</span><h1></h1>'; header.querySelector('h1').textContent = project.name; var more = make('button', 'wp-project-more', '…'); more.addEventListener('click', function () { openProjectMenu(more, project); }); header.append(more); old.appendChild(header);
     var form = make('form', 'wp-project-home-input'); var input = make('input'); input.value = state.drafts[project.id] || ''; input.addEventListener('input', function () { state.drafts[project.id] = input.value; }); input.addEventListener('blur', renderSoon); input.placeholder = t('message').replace('{name}', project.name); var send = make('button', '', '↑'); send.type = 'submit'; form.append(input, send); form.addEventListener('submit', function (e) { e.preventDefault(); if (input.value.trim()) submitProjectChat(project, input.value.trim()); }); old.appendChild(form);
-    var card = make('section', 'wp-project-card'); card.innerHTML = '<div class="wp-project-card-heading"><h2>' + esc(t('description')) + '</h2></div><p></p>'; card.querySelector('p').textContent = project.description || t('noDescription'); var edit = make('button', 'wp-project-edit', lang() === 'zh-CN' ? '编辑' : 'Edit'); edit.addEventListener('click', function () { openProjectModal(project); }); card.querySelector('.wp-project-card-heading').appendChild(edit); old.appendChild(card);
+    var card = make('section', 'wp-project-card'); card.innerHTML = '<div class="wp-project-card-heading"><h2>' + esc(t('description')) + '</h2></div><p></p>'; card.querySelector('p').textContent = descriptionFor(project) || t('noDescription'); var edit = make('button', 'wp-project-edit', lang() === 'zh-CN' ? '编辑' : 'Edit'); edit.addEventListener('click', function () { openProjectModal(project); }); card.querySelector('.wp-project-card-heading').appendChild(edit); old.appendChild(card); loadDescription(project);
     var listedFiles = state.files[project.id] || [], files = make('section', 'wp-project-card'); files.innerHTML = '<h2>' + esc(t('files')) + '</h2><p class="wp-project-file-list">' + esc(listedFiles.length ? listedFiles.join('、') : t('noFiles')) + '</p>'; var upload = make('input'); upload.type = 'file'; upload.multiple = true; upload.className = 'wp-project-upload'; upload.addEventListener('blur', renderSoon); upload.addEventListener('change', async function () { upload.disabled = true; try { for (var file of Array.from(upload.files || [])) await uploadFile(project, file); } catch (e) { toast(t('fileFailed')); } finally { upload.disabled = false; } }); files.append(upload); old.appendChild(files);
     var list = make('section', 'wp-project-card'); list.innerHTML = '<h2>' + esc(t('conversations')) + '</h2>'; if (!chats.length) list.appendChild(make('p', 'wp-project-empty', t('noChats'))); chats.forEach(function (c) { var row = conversationRow(c, false); var summary = make('span', 'wp-project-summary', String(c.preview_text || c.summary || '').replace(/\s+/g, ' ').slice(0, 120)); row.insertBefore(summary, row.querySelector('.wp-project-time')); list.appendChild(row); }); old.appendChild(list); loadFiles(project);
   }
@@ -327,10 +386,12 @@
     var project = extra ? state.projects.find(function (p) { return p.id === extra.wp_project_id; }) : state.pendingProject; if (!project) return;
     if (ok) { state.homeSubmission = null; delete state.drafts[project.id]; state.pendingProject = null; closeDrawer(); loadConversations(); }
     else { state.pendingProject = project; state.drafts[project.id] = state.drafts[project.id] || draft; draft = state.drafts[project.id]; if (state.homeSubmission === project.id) { location.hash = '#/wp-project/' + project.id; renderSoon(); } toast(t('createFailed')); var input = document.querySelector('[data-testid="guid-input"]'); if (input && draft) { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, draft); input.dispatchEvent(new Event('input', { bubbles: true })); } }
-  }, refresh: function () { loadConversations(); }, logic: L };
+  }, refresh: function () { loadProjects(); loadConversations(); }, logic: L };
   document.addEventListener('input', function (e) { if (state.pendingProject && e.target.matches('[data-testid="guid-input"]')) state.drafts[state.pendingProject.id] = e.target.value; }, true);
   document.addEventListener('click', function (e) { if (state.menu && !state.menu.contains(e.target)) closeMenu(); });
   window.addEventListener('hashchange', function () { if (location.hash !== '#/guid' && !currentProject()) state.pendingProject = null; renderHome(); renderSoon(); });
+  window.addEventListener('focus', function () { loadProjects(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) loadProjects(); });
   function start() {
     domObserver = new MutationObserver(function (records) { if (!rendering && records.some(function (r) { return !r.target.closest?.('.wp-projects-root,.wp-project-home,.wp-project-backdrop,.wp-project-menu,.wp-project-toast') && Array.from(r.addedNodes).concat(Array.from(r.removedNodes)).some(function (n) { return n.nodeType !== 1 || !n.matches('.wp-archive-entry,.wp-project-toast'); }); })) renderSoon(); });
     domObserver.observe(document.body, { childList: true, subtree: true });

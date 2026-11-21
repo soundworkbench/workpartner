@@ -6,8 +6,8 @@ import vm from 'node:vm';
 const logic = fs.readFileSync(new URL('../image/rebrand/overlay/wp-projects-logic.js', import.meta.url), 'utf8');
 const script = fs.readFileSync(new URL('../image/rebrand/overlay/wp-projects.js', import.meta.url), 'utf8').replaceAll('__WP_WORKDIR__', '/data/work');
 const FILE = '/data/work/.workpartner-projects.json';
-function setup({ expose = true } = {}) {
-  const listeners = {}, notices = [], requests = [], files = new Map(), dirs = new Set(['/data/work']);
+function setup({ expose = true, files: sharedFiles } = {}) {
+  const listeners = {}, notices = [], requests = [], files = sharedFiles || new Map(), dirs = new Set(['/data/work']);
   const c = { id: 'chat', project_id: 'native-root', updated_at: 1000, extra: { workspace: '/data/work', backend: 'codex' } };
   const db = { c, files, dirs, requests, empty: false, temporaryDeleted: false, failMkdir: false, failWrite: '', messageAt: 500, notices };
   const context = {
@@ -121,4 +121,37 @@ test('mkdir rejection leaves the manifest and sidebar untouched', async () => {
   const { api, db } = setup(); db.failMkdir = true;
   await assert.rejects(api.persistProject({ id: 'denied', name: '项目', directory: 'project-denied', description: '' }));
   assert.equal(api.state.projects.length, 0); assert.equal(db.files.size, 0);
+});
+
+test('separate pages merge project mutations against the latest manifest', async () => {
+  const files = new Map(), first = setup({ files }), second = setup({ files });
+  await first.api.persistProject({ id: 'p1', name: '甲', directory: 'project-p1', description: '甲说明' });
+  await second.api.persistProject({ id: 'p2', name: '乙', directory: 'project-p2', description: '乙说明' });
+  assert.deepEqual(JSON.parse(files.get(FILE)).projects.map(p => p.id).sort(), ['p1', 'p2']);
+  assert.equal(JSON.parse(files.get(FILE)).rev, 2);
+});
+
+test('renaming after a CLAUDE.md upload preserves the uploaded instructions', async () => {
+  const { api, files, requests } = setup();
+  const original = { id: 'p1', name: '项目', directory: 'project-p1', description: '清单旧说明' };
+  await api.persistProject(original);
+  files.set('/data/work/project-p1/CLAUDE.md', '用户上传的说明');
+  files.set('/data/work/project-p1/AGENTS.md', '用户上传的说明');
+  api.state.descriptions.p1 = '用户上传的说明';
+  const writesBefore = requests.filter(r => r.url === '/api/fs/write').length;
+  await api.persistProject({ ...original, name: '改名', description: '用户上传的说明' });
+  assert.equal(files.get('/data/work/project-p1/CLAUDE.md'), '用户上传的说明');
+  assert.equal(requests.filter(r => r.url === '/api/fs/write').length, writesBefore + 1);
+  assert.equal(JSON.parse(files.get(FILE)).projects[0].name, '改名');
+});
+
+test('a failed second instruction write rolls CLAUDE.md back to its old content', async () => {
+  const { api, db, files } = setup();
+  const original = { id: 'p1', name: '项目', directory: 'project-p1', description: '旧说明' };
+  await api.persistProject(original);
+  db.failWrite = 'AGENTS.md';
+  await assert.rejects(api.persistProject({ ...original, description: '新说明' }));
+  assert.equal(files.get('/data/work/project-p1/CLAUDE.md'), '旧说明');
+  assert.equal(files.get('/data/work/project-p1/AGENTS.md'), '旧说明');
+  assert.equal(JSON.parse(files.get(FILE)).projects[0].description, '旧说明');
 });
