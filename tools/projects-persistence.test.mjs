@@ -103,6 +103,41 @@ test('project persistence creates directory first; either instruction or manifes
   await api.moveConversation(db.c, p); assert.equal(db.c.extra.wp_project_id, 'p1'); assert.equal(db.c.extra.backend, 'codex');
 });
 
+for (const description of ['', '项目说明']) for (const options of [undefined, { descriptionEdited: false, loadedDescription: '' }]) {
+  test(`new project writes both instructions: ${description ? 'nonempty' : 'empty'}, ${options ? 'modal options' : 'no options'}`, async () => {
+    for (const existingDirectory of [false, true]) {
+      const { api, dirs, files, requests } = setup();
+      const p = { id: 'p1', directory: 'project-p1', name: '项目', description };
+      if (existingDirectory) {
+        dirs.add('/data/work/project-p1');
+        files.set('/data/work/project-p1/CLAUDE.md', description);
+      }
+      await api.persistProject(p, options);
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) assert.equal(files.get('/data/work/project-p1/' + name), description);
+      const manifestWrite = requests.findIndex(r => r.url === '/api/fs/write' && r.body.path === FILE);
+      const instructionWrites = requests.flatMap((r, i) => r.url === '/api/fs/write' && /\/(CLAUDE|AGENTS)\.md$/.test(r.body.path) ? [i] : []);
+      assert.equal(instructionWrites.length, existingDirectory ? 1 : 2);
+      assert.ok(instructionWrites.every(i => i < manifestWrite));
+      assert.equal(api.state.projects.length, 1);
+    }
+  });
+
+  test(`new project failures roll back without publishing: ${description ? 'nonempty' : 'empty'}, ${options ? 'modal options' : 'no options'}`, async () => {
+    for (const fail of ['CLAUDE.md', 'AGENTS.md', '.workpartner-projects.json']) {
+      const { api, db, files, requests } = setup();
+      db.failWrite = fail;
+      await assert.rejects(api.persistProject({ id: 'p1', directory: 'project-p1', name: '项目', description }, options));
+      assert.equal(api.state.projects.length, 0);
+      assert.equal(files.has(FILE), false);
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+        const path = '/data/work/project-p1/' + name;
+        if (files.has(path)) assert.equal(files.get(path), '');
+      }
+      if (fail !== '.workpartner-projects.json') assert.ok(!requests.some(r => r.url === '/api/fs/write' && r.body.path === FILE));
+    }
+  });
+}
+
 test('deletion clears ownership even when the manifest write fails; successful deletion restores on undo', async () => {
   const { api, db, files, notices } = setup();
   const p = { id: 'p1', directory: 'project-p1', name: '项目', description: '' }; await api.persistProject(p);
@@ -169,14 +204,16 @@ test('renaming after a CLAUDE.md upload preserves the uploaded instructions', as
 });
 
 test('a slow CLAUDE.md read cannot make a quick rename overwrite instructions', async () => {
-  const { api, files } = setup({ readDelay: 25 });
+  const { api, files, requests } = setup({ readDelay: 25 });
   const original = { id: 'p1', name: '项目', directory: 'project-p1', description: '旧说明' };
   await api.persistProject(original);
   files.set('/data/work/project-p1/CLAUDE.md', '用户保留的说明');
-  files.set('/data/work/project-p1/AGENTS.md', '用户保留的说明');
+  files.set('/data/work/project-p1/AGENTS.md', '单独维护的代理说明');
+  const writesBefore = requests.filter(r => r.url === '/api/fs/write').length;
   await api.persistProject({ ...original, name: '快速改名', description: '旧清单说明' }, { descriptionEdited: false });
   assert.equal(files.get('/data/work/project-p1/CLAUDE.md'), '用户保留的说明');
-  assert.equal(files.get('/data/work/project-p1/AGENTS.md'), '用户保留的说明');
+  assert.equal(files.get('/data/work/project-p1/AGENTS.md'), '单独维护的代理说明');
+  assert.deepEqual(requests.filter(r => r.url === '/api/fs/write').slice(writesBefore).map(r => r.body.path), [FILE]);
   assert.equal(JSON.parse(files.get(FILE)).projects[0].name, '快速改名');
 });
 

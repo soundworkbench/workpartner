@@ -343,10 +343,10 @@
       return inconsistent;
     }
     try {
-      if (descriptionChanged) {
-        if (oldClaude !== project.description) { written.push({ path: claudePath, old: oldClaude }); await fileWrite(claudePath, project.description); }
-        if (oldAgents !== project.description) { written.push({ path: agentsPath, old: oldAgents }); await fileWrite(agentsPath, project.description); }
-      }
+      // New projects and missing files need instructions even without an edit.
+      // Existing files on a rename still require an actual description change.
+      if (oldClaude == null || ((!exists || descriptionChanged) && oldClaude !== project.description)) { written.push({ path: claudePath, old: oldClaude }); await fileWrite(claudePath, project.description); }
+      if (oldAgents == null || ((!exists || descriptionChanged) && oldAgents !== project.description)) { written.push({ path: agentsPath, old: oldAgents }); await fileWrite(agentsPath, project.description); }
       await saveProjects(function (projects) { return projects.some(function (p) { return p.id === project.id; }) ? projects.map(function (p) { return p.id === project.id ? project : p; }) : projects.concat(project); });
       if (descriptionEdited) state.descriptions[project.id] = project.description;
     } catch (error) {
