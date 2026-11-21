@@ -110,8 +110,13 @@ async function fixture(page, db) {
   });
   await page.goto(ORIGIN + '/#/guid');
   await page.waitForSelector('.wp-projects-root');
+  await assertUniqueConversationIds(page, 'fixture bootstrap');
 }
 const menu = page => page.locator('.wp-project-menu');
+async function assertUniqueConversationIds(page, label) {
+  const ids = await page.locator('.wp-projects-root [data-conversation]').evaluateAll(rows => rows.map(row => row.dataset.conversation));
+  assert.equal(ids.length, new Set(ids).size, `${label}: duplicate conversation id in projects sidebar`);
+}
 async function chatMenu(page, id) {
   const row = page.locator(`.wp-projects-root [data-conversation="${id}"]`); await row.hover(); await row.locator('.wp-project-more').click();
 }
@@ -121,6 +126,27 @@ async function projectMenu(page, id = project.id) {
 }
 async function home(page) { await projectMenu(page); await menu(page).getByText('打开项目主页', { exact: true }).click(); await page.waitForSelector('.wp-project-home'); }
 async function create(page, name) { await page.locator('.wp-project-dialog input[name=name]').fill(name); await page.locator('.wp-project-dialog textarea').fill('遵守项目说明'); await page.locator('.wp-project-dialog button[type=submit]').click(); }
+
+test('repeated focus and visibility refreshes keep one sidebar row per conversation', LONG, async () => {
+  const db = backend();
+  await suite.session('refresh-race', { route: null }, async ({ page, log }) => {
+    await fixture(page, db);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+      for (let i = 0; i < 6; i++) {
+        window.dispatchEvent(new Event('focus'));
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    await until(() => db.requests.filter(request => request.path === '/api/fs/read').length >= 13, 'twelve project refresh requests');
+    await page.waitForFunction(() => {
+      const rows = [...document.querySelectorAll('.wp-projects-root [data-conversation]')];
+      return rows.length > 0 && rows.length === new Set(rows.map(row => row.dataset.conversation)).size;
+    });
+    await assertUniqueConversationIds(page, 'repeated focus/visibilitychange');
+    assert.deepEqual(log.pageErrors, []);
+  });
+});
 
 test('head bootstrap, native pin fields, real manifest and fresh browser', LONG, async () => {
   const db = backend();
@@ -198,6 +224,7 @@ test('home titles, files, native archive and scheduled task actions, draft on fa
     assert.equal(db.files.get('/data/work/project-p_alpha/客户说明.txt'), '中文内容');
     await page.locator('.wp-project-upload').setInputFiles({ name: '图片.png', mimeType: 'image/png', buffer: Buffer.from([137, 80, 78, 71]) });
     await until(() => db.files.has('/data/work/project-p_alpha/图片.png'), 'binary file copied');
+    await assertUniqueConversationIds(page, 'after repeated uploads');
     await page.locator('.wp-project-home-input input').fill('保留这段输入'); db.failCreate = true;
     await page.locator('.wp-project-home-input button').click();
     await page.waitForFunction(() => document.querySelector('.wp-project-toast')?.textContent.includes('新建对话失败'));

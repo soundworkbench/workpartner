@@ -5,6 +5,7 @@
   var FILE = '__WP_WORKDIR__/.workpartner-projects.json';
   var state = { projects: [], conversations: [], files: {}, descriptions: {}, expanded: new Set(), collapsed: false, loaded: false,
     manifestRev: 0, manifestUpdatedAt: null, drafts: {}, homeSubmission: null, pendingProject: null, modal: null, menu: null, home: null };
+  var projectLoadSerial = 0, conversationLoadSerial = 0;
   var ICONS = {
     folder: '<path d="M3 6h6l2 2h10v12H3z"/>',
     star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/>',
@@ -53,10 +54,12 @@
     return projects;
   }
   async function loadProjects() {
+    var serial = ++projectLoadSerial;
     try {
       var value = await readManifest();
+      if (serial !== projectLoadSerial) return;
       state.projects = value.projects; state.manifestRev = value.rev; state.manifestUpdatedAt = value.updatedAt; state.descriptions = {}; state.loaded = true; renderSoon();
-    } catch (e) { toast(t('loadFailed')); }
+    } catch (e) { if (serial === projectLoadSerial) toast(t('loadFailed')); }
   }
   // /fs/write validates an existing parent and does not mkdir. The native
   // explorer's fs/mkdir RPC is the directory operation in 2.1.47.
@@ -115,17 +118,24 @@
   }
   var messageTimes = new Map();
   async function loadConversations() {
+    var serial = ++conversationLoadSerial;
     try {
       var value = await json('/api/conversations?limit=10000'), items = value && (value.items || value.data && value.data.items);
       if (!Array.isArray(items)) items = Array.isArray(value) ? value : [];
-      state.conversations = items.filter(function (c) { return c && c.id && !(c.extra && (c.extra.team_id || c.extra.teamId || c.extra.is_health_check)); });
-      await Promise.all(state.conversations.filter(function (c) { return c.extra && c.extra.wp_activity_at; }).map(async function (c) {
+      var seen = new Set();
+      var conversations = items.filter(function (c) {
+        if (!c || !c.id || seen.has(c.id) || c.extra && (c.extra.team_id || c.extra.teamId || c.extra.is_health_check)) return false;
+        seen.add(c.id); return true;
+      });
+      await Promise.all(conversations.filter(function (c) { return c.extra && c.extra.wp_activity_at; }).map(async function (c) {
         var revision = c.modified_at || c.updated_at, cached = messageTimes.get(c.id);
         if (!cached || cached.revision !== revision) {
           try { cached = { revision: revision, time: await conversationActivity(c) }; messageTimes.set(c.id, cached); } catch (e) { return; }
         }
         c.wp_last_message_at = cached.time;
       }));
+      if (serial !== conversationLoadSerial) return;
+      state.conversations = conversations;
       renderSoon();
     } catch (e) { /* Native history remains usable if this optional projection is unavailable. */ }
   }
@@ -269,18 +279,23 @@
   function renderSidebar() {
     if (!state.loaded) return;
     var aside = document.querySelector('aside.layout-sider'), scroll = aside && aside.querySelector('[class*="_scrollArea"]'); if (!scroll) return;
-    var root = scroll.querySelector('.wp-projects-root'); if (!root) { root = make('div', 'wp-projects-root'); scroll.appendChild(root); }
+    var root = scroll.querySelector('.wp-projects-root');
+    if (!root) { root = document.querySelector('.wp-projects-root') || make('div', 'wp-projects-root'); scroll.appendChild(root); }
+    document.querySelectorAll('.wp-projects-root').forEach(function (duplicate) { if (duplicate !== root) duplicate.remove(); });
     scroll.querySelectorAll('.workspace-collapse,.sider-section-label,.chat-history__item').forEach(function (el) { if (!el.closest('.wp-nav') && !el.closest('.wp-projects-root')) el.classList.add('wp-project-native-hidden'); });
-    var visible = state.conversations.filter(function (c) { return !window.wpArchive || !window.wpArchive.archived(c); });
+    var seen = new Set(), visible = state.conversations.filter(function (c) { return (!window.wpArchive || !window.wpArchive.archived(c)) && !seen.has(c.id) && seen.add(c.id); });
     var signature = JSON.stringify([state.projects, visible, Array.from(state.expanded), state.collapsed, lang(), location.hash, Math.floor(Date.now() / 60000)]);
-    if (root.wpSignature === signature) return; root.wpSignature = signature;
-    var grouped = L.groupConversations(visible, state.projects, new Date()); root.replaceChildren();
-    if (grouped.pinned.length) { root.appendChild(make('div', 'wp-project-time-title', t('pinned'))); var pinned = make('div', 'wp-project-recent-list'); grouped.pinned.forEach(function (c) { pinned.appendChild(conversationRow(c, false)); }); root.appendChild(pinned); }
-    var head = make('div', 'wp-project-section-head'), sectionTitle = make('button', 'wp-project-section-title', t('project')); sectionTitle.addEventListener('click', function () { state.collapsed = !state.collapsed; renderSoon(); }); head.append(sectionTitle); var add = make('button', 'wp-project-add', '+'); add.title = t('newProject'); add.addEventListener('click', function () { openProjectModal(); }); var collapse = make('button', 'wp-project-collapse', state.collapsed ? '›' : '⌄'); collapse.addEventListener('click', function () { state.collapsed = !state.collapsed; renderSoon(); }); head.append(add, collapse); root.appendChild(head);
-    if (!state.collapsed) { var create = make('button', 'wp-project-create'); create.innerHTML = icon('folder') + '<span>' + esc(t('newProject')) + '</span>'; create.addEventListener('click', function () { openProjectModal(); }); root.appendChild(create); if (!state.projects.length) root.appendChild(make('p', 'wp-project-empty', t('noProjects'))); state.projects.forEach(function (p) { root.appendChild(projectRow(p, grouped.projects.get(p.id) || [])); }); }
-    var recentHead = make('div', 'wp-project-section-head wp-recent-head'); recentHead.appendChild(make('span', 'wp-project-section-title', t('recent'))); root.appendChild(recentHead);
-    section('today', grouped.recent.today, 'today', root); section('yesterday', grouped.recent.yesterday, 'yesterday', root); section('week', grouped.recent.week, 'week', root); section('earlier', grouped.recent.earlier, 'earlier', root);
-    if (!state.conversations.length) root.appendChild(make('p', 'wp-project-empty', t('noChats')));
+    var ids = Array.from(root.querySelectorAll('[data-conversation]')).map(function (el) { return el.dataset.conversation; });
+    if (root.wpSignature === signature && ids.length === new Set(ids).size) return;
+    var grouped = L.groupConversations(visible, state.projects, new Date());
+    var fragment = document.createDocumentFragment();
+    if (grouped.pinned.length) { fragment.appendChild(make('div', 'wp-project-time-title', t('pinned'))); var pinned = make('div', 'wp-project-recent-list'); grouped.pinned.forEach(function (c) { pinned.appendChild(conversationRow(c, false)); }); fragment.appendChild(pinned); }
+    var head = make('div', 'wp-project-section-head'), sectionTitle = make('button', 'wp-project-section-title', t('project')); sectionTitle.addEventListener('click', function () { state.collapsed = !state.collapsed; renderSoon(); }); head.append(sectionTitle); var add = make('button', 'wp-project-add', '+'); add.title = t('newProject'); add.addEventListener('click', function () { openProjectModal(); }); var collapse = make('button', 'wp-project-collapse', state.collapsed ? '›' : '⌄'); collapse.addEventListener('click', function () { state.collapsed = !state.collapsed; renderSoon(); }); head.append(add, collapse); fragment.appendChild(head);
+    if (!state.collapsed) { var create = make('button', 'wp-project-create'); create.innerHTML = icon('folder') + '<span>' + esc(t('newProject')) + '</span>'; create.addEventListener('click', function () { openProjectModal(); }); fragment.appendChild(create); if (!state.projects.length) fragment.appendChild(make('p', 'wp-project-empty', t('noProjects'))); state.projects.forEach(function (p) { fragment.appendChild(projectRow(p, grouped.projects.get(p.id) || [])); }); }
+    var recentHead = make('div', 'wp-project-section-head wp-recent-head'); recentHead.appendChild(make('span', 'wp-project-section-title', t('recent'))); fragment.appendChild(recentHead);
+    section('today', grouped.recent.today, 'today', fragment); section('yesterday', grouped.recent.yesterday, 'yesterday', fragment); section('week', grouped.recent.week, 'week', fragment); section('earlier', grouped.recent.earlier, 'earlier', fragment);
+    if (!state.conversations.length) fragment.appendChild(make('p', 'wp-project-empty', t('noChats')));
+    root.replaceChildren(fragment); root.wpSignature = signature;
   }
   async function persistProject(project) {
     await ensureDirectory(project);
