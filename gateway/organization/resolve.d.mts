@@ -4,6 +4,8 @@ export interface Organization {
   revision: string;
   organizationId: string;
   directory: string;
+  /** Mounted organization.json path used for Kubernetes tier hot reload when configured. */
+  organizationFile?: string;
   productName: { zh: string; en: string };
   displayName: string;
   server: { publicHost: string; publicOrigin: string; legacyHosts: string[]; previewHost: string; projectHost: string };
@@ -84,7 +86,7 @@ export function resolveOrganization(environment?: NodeJS.ProcessEnv): Organizati
 /** Return only the pre-existing public desktop fields. */
 export function desktopPublicConfig(environment: NodeJS.ProcessEnv, packaged?: { PUBLIC_HOST?: unknown; MEEGLE_HOST?: unknown }): { PUBLIC_HOST: string; MEEGLE_HOST: string };
 /** Non-secret release data before deployment overrides. */
-export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publicHost?: string; previewHost?: string; legacyHosts?: string[]; projectHost?: string; runtime: Omit<Organization["runtime"], "hostData" | "hostSecure" | "hostConfig" | "modelContainer"> & { modelContainer: string | null } };
+export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publicHost?: string; previewHost?: string; legacyHosts?: string[]; projectHost?: string; organizationFile?: string; runtime: Omit<Organization["runtime"], "hostData" | "hostSecure" | "hostConfig" | "modelContainer"> & { modelContainer: string | null } };
 /** Read organization data without requiring deployment endpoints. */
 export function organizationData(environment?: NodeJS.ProcessEnv): OrganizationData;
 export function taskTier(resources?: { tier?: unknown; tasks?: unknown; taskMemoryMiB?: unknown }, warn?: (message: string) => void): {

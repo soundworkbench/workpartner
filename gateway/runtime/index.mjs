@@ -29,6 +29,7 @@ export function createRuntime(organization, overrides = {}) {
     ...r.k8s, sharedSkills, image: r.nextImage, containerPrefix: r.nextContainerPrefix, userLabel: r.nextUserLabel,
     modelKeyFile: r.nextModelKeyFile, port: r.nextPort, uid: r.uid,
     secureDir: r.secureDirectory, keyPrefix: model.keyPrefix,
+    organizationFile: organization.organizationFile,
     modelBaseUrl: model.baseUrl ? new URL(model.baseUrl).href : undefined, modelBaseEnvironment: model.baseEnvironment,
     memory: r.nextMemory, nanoCpus: r.nanoCpus, ...overrides,
   });
