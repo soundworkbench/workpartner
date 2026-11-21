@@ -187,7 +187,7 @@ class BridgeDefaultsTest(unittest.TestCase):
         self.assertIn('同一轮里等它们全部完成', web)
         self.assertIn(end_turn, prompt)
         self.assertIn('完成时会唤醒你', prompt)
-        for limit in ('4096 MiB', '512 MiB', '同时最多运行 2 个'):
+        for limit in ('4096 MiB', '512 MiB', '同时最多运行 3 个'):
             self.assertIn(limit, web)
 
     def test_missing_keys_multiple_projects_and_string_lookalikes(self):

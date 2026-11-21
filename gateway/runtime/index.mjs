@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 /** Select the configured runtime at startup; omitted kind preserves Docker deployments.
  * Runtime methods are asynchronous; inspect returns normalized state and address returns {host, port} or null.
  * Kubernetes inspect also includes StatefulSet replicas (null when absent) and annotations ({} when absent).
+ * Kubernetes ensureTier(slug) reconciles only the personal tier ConfigMap, preserving the running Pod and template.
  * create(user, {modelConfig}) uses the configured image and limits; exec/execNamed return {exitCode, stdout, stderr, logs}.
  * logs preserves stdout/stderr frame order; createTimeout and timeout control exec creation and start separately.
  * Incomplete output frames are ignored unless strictOutput is true or maxOutputBytes is supplied.

@@ -5,6 +5,19 @@ import { readFileSync } from 'node:fs';
 import { hubConfig } from './mcp-hub.mjs';
 import defaults from './default.json' with { type: 'json' };
 
+export function taskTier(resources = {}, warn = console.warn) {
+  const { tier = 'standard', tasks, taskMemoryMiB } = resources ?? {};
+  const positive = value => Number.isSafeInteger(value) && value > 0;
+  if (!['standard', 'open', 'unlimited'].includes(tier)
+    || (tasks !== undefined && tasks !== null && !positive(tasks))
+    || (taskMemoryMiB !== undefined && !positive(taskMemoryMiB))) {
+    warn('Invalid runtime.k8s.userResources task tier; using standard (3 tasks, 512 MiB)');
+    return { tier: 'standard', tasks: 3, taskMemoryMiB: 512 };
+  }
+  return { tier, tasks: tasks === undefined ? { standard: 3, open: 5, unlimited: null }[tier] : tasks,
+    taskMemoryMiB: taskMemoryMiB ?? (tier === 'standard' ? 512 : 1024) };
+}
+
 /** Fill omitted organization fields from the neutral configuration. */
 function merge(base, selected) {
   const out = { ...base };
@@ -48,6 +61,11 @@ export function organizationData(environment = process.env) {
   const directory = environment.WORKPARTNER_ORG_DIR ? resolve(environment.WORKPARTNER_ORG_DIR) : fileURLToPath(new URL('../../org/default/', import.meta.url));
   const selected = environment.WORKPARTNER_ORG_DIR ? JSON.parse(readFileSync(resolve(directory, 'organization.json'), 'utf8')) : {};
   const data = merge(defaults, selected);
+  for (const resources of Object.values(data.runtime.k8s?.userResources ?? {})) {
+    if (resources && ['tier', 'tasks', 'taskMemoryMiB'].some(key => Object.hasOwn(resources, key))) {
+      Object.assign(resources, taskTier(resources));
+    }
+  }
   if (data.schemaVersion !== 1 || typeof data.organizationId !== 'string') throw new Error('Unsupported organization configuration');
   if (!/^\/_[a-z0-9]+\/callback$/.test(data.identity.callbackPath)) throw new Error('Invalid identity.callbackPath');
   if (!/^[A-Z_][A-Z0-9_]*$/.test(data.model.keyEnvironment) || !/^[A-Z_][A-Z0-9_]*$/.test(data.model.baseEnvironment)) throw new Error('Invalid model environment variable');

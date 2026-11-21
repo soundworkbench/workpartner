@@ -86,6 +86,8 @@ mark configured
 /opt/aionui/aionui-web start --static-dir /opt/aionui/static-wp --remote --port "$AIONUI_PORT" --no-open --data-dir /data/aionui-data &
 service_pids=("$!")
 python3 -I /opt/workpartner/bin/wp-agent sync || echo "警告：未同步助手说明，继续启动" >&2
+python3 -I /opt/workpartner/bin/wp-sync-instructions.py \
+  /opt/workpartner/home/CLAUDE.md /data/work "${PARTNER_USER_NAME:-同事}" --watch &
 # 守护进程等待扫码配置落盘；消息桥退出只触发局部重启。
 # 守护进程自己退出时按 5 秒起、最长 60 秒退避重新拉起；连续运行满 5 分钟后退避复位。
 supervise_bridge() {

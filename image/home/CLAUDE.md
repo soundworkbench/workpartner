@@ -16,7 +16,7 @@
 - 互相独立的工作用子代理并行处理；在同一轮里等它们全部完成（Codex 用 wait，Claude Code 用前台子代理），汇总后给出一个最终答复。等待期间可以写一句简短进度。
 - 除非系统提示写明后台任务完成会唤醒你，否则不要回复“已在后台开始、完成后回报”就结束本轮：结束后没有东西会唤醒你，结果会丢失。
 - 不要用睡眠或轮询等待；要等的命令在前台运行并设好超时。
-- 本人的容器内存上限为 __MEMORY_MIB__ MiB；每个子代理或后台任务最多使用 __BACKGROUND_MEMORY_MIB__ MiB，同时最多运行 2 个；启动前估算用量，超出预算就拆小任务。
+- 本人的容器内存上限为 __MEMORY_MIB__ MiB；每个子代理或后台任务最多使用 __BACKGROUND_MEMORY_MIB__ MiB，__BACKGROUND_TASKS_TEXT__；合计内存不要超过上限减 1 GiB，启动前估算用量，超出预算就拆小任务。
 <!-- workpartner:background:end -->
 
 <!-- workpartner:skills:begin -->
