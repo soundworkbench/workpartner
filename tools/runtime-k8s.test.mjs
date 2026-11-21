@@ -8,6 +8,7 @@ import { setImmediate } from 'node:timers/promises';
 import test from 'node:test';
 import { createK8sRuntime } from '../gateway/runtime/k8s.mjs';
 import { createRuntime, createLegacyRuntime } from '../gateway/runtime/index.mjs';
+import { createAionui } from '../gateway/aionui.mjs';
 
 const core = '/api/v1/namespaces/users';
 const apps = '/apis/apps/v1/namespaces/users/statefulsets';
@@ -103,6 +104,109 @@ function fixture(t, options = {}) {
   return { runtime, client, secureDir };
 }
 const writes = c => c.calls.filter(([method]) => ['create', 'patch', 'remove'].includes(method));
+
+test('userResources supplies the tier ConfigMap and optional directory mount, with idempotent changes', async t => {
+  const { client, secureDir } = fixture(t);
+  const userResources = {};
+  const runtime = createRuntime({ runtime: { kind: 'k8s', nextContainerPrefix: 'fixture-', nextImage: 'workspace:test',
+    secureDirectory: secureDir, k8s: { namespace: 'users', storageClass: 'local-data', userResources } } }, { client });
+  const route = `${core}/configmaps/fixture-person-tier`;
+  for (const [config, expected] of [
+    [{ memory: '8Gi' }, { tier: 'standard', tasks: 3, taskMemoryMiB: 512 }],
+    [{ tier: 'open' }, { tier: 'open', tasks: 5, taskMemoryMiB: 1024 }],
+    [{ tier: 'unlimited' }, { tier: 'unlimited', tasks: null, taskMemoryMiB: 1024 }],
+    [{ tier: 'open', tasks: 7, taskMemoryMiB: 1536 }, { tier: 'open', tasks: 7, taskMemoryMiB: 1536 }],
+  ]) {
+    userResources.person = config;
+    client.calls.length = 0;
+    await runtime.create({ slug: 'person' });
+    const map = client.objects.get(route), sts = client.objects.get(stsPath);
+    assert.equal(map.kind, 'ConfigMap');
+    assert.equal(map.metadata.name, 'fixture-person-tier');
+    assert.deepEqual(map.metadata.labels, sts.metadata.labels);
+    assert.deepEqual(map.data, { 'tier.json': JSON.stringify(expected) });
+    assert.equal(writes(client).filter(([, path]) => path.startsWith(`${core}/configmaps`)).length, 1);
+    const pod = sts.spec.template.spec;
+    assert.deepEqual(pod.volumes.find(v => v.name === 'tier'), { name: 'tier', configMap: { name: 'fixture-person-tier', optional: true } });
+    assert.deepEqual(pod.containers[0].volumeMounts.find(v => v.name === 'tier'),
+      { name: 'tier', mountPath: '/run/workpartner/tier', readOnly: true });
+    client.calls.length = 0;
+    await runtime.ensureTier('person');
+    assert.deepEqual(writes(client), []);
+    await runtime.create({ slug: 'person' });
+    assert.deepEqual(writes(client).filter(([, path]) => path.startsWith(`${core}/configmaps`)), []);
+  }
+});
+
+test('tier sync repairs missing or incorrect labels even when data matches', async t => {
+  const { runtime, client } = fixture(t);
+  await runtime.create({ slug: 'person' });
+  await runtime.start('person');
+  const route = `${core}/configmaps/fixture-person-tier`;
+  const map = client.objects.get(route), data = clone(map.data), expectedLabels = clone(map.metadata.labels);
+  const sts = clone(client.objects.get(stsPath)), pod = clone(client.objects.get(podPath));
+  for (const labels of [undefined, {}, ...Object.keys(expectedLabels).map(key => ({ ...expectedLabels, [key]: 'wrong' }))]) {
+    map.metadata.labels = labels;
+    client.calls.length = 0;
+    await runtime.ensureTier('person');
+    assert.deepEqual(writes(client), [['patch', route, { data, metadata: { labels: expectedLabels } }, 'merge']]);
+    assert.deepEqual(map.metadata.labels, expectedLabels);
+    assert.deepEqual(map.data, data);
+    assert.deepEqual(client.objects.get(stsPath), sts);
+    assert.deepEqual(client.objects.get(podPath), pod);
+    client.calls.length = 0;
+    await runtime.ensureTier('person');
+    assert.deepEqual(writes(client), []);
+  }
+  map.metadata.labels['example.com/extra'] = 'keep';
+  client.calls.length = 0;
+  await runtime.ensureTier('person');
+  assert.deepEqual(writes(client), []);
+});
+
+test('ensuring a running legacy workspace updates only its tier, without stale replacement or adding a volume', async t => {
+  const userResources = { person: { tier: 'open' } };
+  const { runtime, client, secureDir } = fixture(t, { userResources });
+  await runtime.create({ slug: 'person' });
+  const pod = client.objects.get(stsPath).spec.template.spec;
+  pod.volumes = pod.volumes.filter(v => v.name !== 'tier');
+  pod.containers[0].volumeMounts = pod.containers[0].volumeMounts.filter(v => v.name !== 'tier');
+  await runtime.create({ slug: 'person' });
+  assert.equal(client.objects.get(stsPath).spec.template.spec.volumes.some(v => v.name === 'tier'), false);
+  await runtime.start('person');
+  const before = clone(client.objects.get(stsPath));
+  fs.writeFileSync(path.join(secureDir, 'aionui-person.pass'), 'fixture');
+  const aionui = createAionui({ runtime, kind: 'k8s', image: 'workspace:test', secretDir: secureDir });
+  for (const [tier, expected] of [['unlimited', { tier: 'unlimited', tasks: null, taskMemoryMiB: 1024 }],
+    ['standard', { tier: 'standard', tasks: 3, taskMemoryMiB: 512 }]]) {
+    userResources.person = { tier };
+    client.calls.length = 0;
+    const upstream = await aionui.upstream({ slug: 'person' });
+    assert.equal(upstream.name, 'fixture-person');
+    assert.equal(aionui.updating('person'), false);
+    assert.deepEqual(client.objects.get(stsPath), before);
+    assert.deepEqual(writes(client), [['patch', `${core}/configmaps/fixture-person-tier`,
+      { data: { 'tier.json': JSON.stringify(expected) }, metadata: { labels: before.metadata.labels } }, 'merge']]);
+    client.calls.length = 0;
+    await aionui.upstream({ slug: 'person' });
+    assert.deepEqual(writes(client), []);
+  }
+});
+
+test('starting a stopped workspace recreates a missing tier ConfigMap without changing its template', async t => {
+  const userResources = { person: { tier: 'open' } };
+  const { runtime, client } = fixture(t, { userResources });
+  await runtime.create({ slug: 'person' });
+  const template = clone(client.objects.get(stsPath).spec.template);
+  const route = `${core}/configmaps/fixture-person-tier`;
+  client.objects.delete(route);
+  userResources.person = { tier: 'unlimited' };
+  await runtime.start('person');
+  assert.deepEqual(client.objects.get(route).data,
+    { 'tier.json': '{"tier":"unlimited","tasks":null,"taskMemoryMiB":1024}' });
+  assert.deepEqual(client.objects.get(stsPath).spec.template, template);
+  assert.equal(client.objects.get(stsPath).spec.replicas, 1);
+});
 
 test('organization userImages selects registered images per user without changing other workspace settings', async t => {
   const { client, secureDir } = fixture(t);
@@ -225,10 +329,13 @@ test('create builds the complete StatefulSet, PVC and Secret contract', async t 
     { name: 'WORKPARTNER_MODEL_CONFIG', value: '{"defaults":{}}' }, { name: 'WORKPARTNER_PUBLISHED_DIR', value: '/run/published' }]);
   assert.deepEqual(container.volumeMounts, [{ name: 'data', mountPath: '/data' },
     { name: 'model-key', mountPath: '/etc/workspace/key', subPath: 'model.key', readOnly: true },
-    { name: 'published', mountPath: '/run/published', readOnly: true }, { name: 'oldwork', mountPath: '/data/old-work', readOnly: true }]);
+    { name: 'published', mountPath: '/run/published', readOnly: true },
+    { name: 'tier', mountPath: '/run/workpartner/tier', readOnly: true },
+    { name: 'oldwork', mountPath: '/data/old-work', readOnly: true }]);
   assert.deepEqual(pod.volumes, [{ name: 'data', persistentVolumeClaim: { claimName: 'fixture-person-data' } },
     { name: 'model-key', secret: { secretName: 'fixture-person-model-key', defaultMode: 0o444 } },
     { name: 'published', secret: { secretName: 'fixture-person-published', defaultMode: 0o444 } },
+    { name: 'tier', configMap: { name: 'fixture-person-tier', optional: true } },
     { name: 'oldwork', persistentVolumeClaim: { claimName: 'fixture-person-oldwork', readOnly: true } }]);
   assert.deepEqual(pod.initContainers, [{ name: 'fix-owner', image: 'workspace:test', imagePullPolicy: 'Never', command: ['chown', '1002:1002', '/data'],
     securityContext: { runAsUser: 0, runAsGroup: 0, runAsNonRoot: false, allowPrivilegeEscalation: false,
@@ -238,7 +345,7 @@ test('create builds the complete StatefulSet, PVC and Secret contract', async t 
   assert.ok(Buffer.from(client.objects.get(`${core}/secrets/fixture-person-model-key`).data['model.key'], 'base64').toString() === 'fixture-key\n');
   assert.deepEqual(client.objects.get(`${core}/secrets/fixture-person-published`).data, {});
   assert.deepEqual(writes(client).map(([method, route]) => [method, route]), [
-    ['create', `${core}/secrets`], ['create', `${core}/secrets`], ['create', `${core}/persistentvolumeclaims`], ['create', apps],
+    ['create', `${core}/configmaps`], ['create', `${core}/secrets`], ['create', `${core}/secrets`], ['create', `${core}/persistentvolumeclaims`], ['create', apps],
   ]);
 });
 
@@ -249,7 +356,7 @@ test('create defaults, repeated updates and bound PVCs preserve existing data an
   assert.deepEqual(pod.containers[0].resources, { requests: { memory: '512Mi', cpu: '100m' }, limits: { memory: '3221225472', cpu: '2' } });
   assert.deepEqual(pod.dnsConfig.searches, ['system.svc.cluster.local']);
   assert.equal(pod.terminationGracePeriodSeconds, 10);
-  assert.equal(pod.volumes.length, 3);
+  assert.equal(pod.volumes.length, 4);
   assert.deepEqual(pod.containers[0].env.map(e => e.name), ['MODEL_BASE_URL', 'PARTNER_USER_NAME', 'WORKPARTNER_PUBLISHED_DIR']);
   const pvc = client.objects.get(`${core}/persistentvolumeclaims/fixture-person-data`);
   pvc.status = { phase: 'Bound' }; pvc.spec.volumeName = 'retained-volume';

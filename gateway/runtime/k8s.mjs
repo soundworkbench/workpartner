@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaultPublishedFiles } from './published-files.mjs';
+import { taskTier } from '../organization/resolve.mjs';
 
 const partOf = { 'app.kubernetes.io/part-of': 'workpartner' };
 const dnsLabel = value => typeof value === 'string' && value.length <= 63 && /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/.test(value);
@@ -48,7 +49,7 @@ export function createK8sRuntime(o = {}) {
     // Reserve 11 characters for the controller-revision-hash label suffix (and Secret/PVC suffixes).
     if (!dnsLabel(container) || container.length > 52) throw new Error('Invalid runtime container name');
     return { container, pod: `${container}-0`, data: `${container}-data`, oldwork: `${container}-oldwork`,
-      modelKey: `${container}-model-key`, published: `${container}-published` };
+      modelKey: `${container}-model-key`, published: `${container}-published`, tier: `${container}-tier` };
   };
   const labels = (slug, role = 'user') => ({ ...partOf, 'workpartner/role': role, [userLabel]: slug });
   let clientPromise;
@@ -68,12 +69,12 @@ export function createK8sRuntime(o = {}) {
     images = undefined;
     imageGeneration++;
   }
-  function exclusive(slug, operation) {
+  function exclusive(slug, operation, refresh = true) {
     names(slug);
     const previous = locks.get(slug) ?? Promise.resolve();
     const result = previous.catch(() => {}).then(async () => {
-      invalidate(slug);
-      try { return await operation(await client()); } finally { invalidate(slug); }
+      if (refresh) invalidate(slug);
+      try { return await operation(await client()); } finally { if (refresh) invalidate(slug); }
     });
     locks.set(slug, result);
     const release = () => { if (locks.get(slug) === result) locks.delete(slug); };
@@ -139,8 +140,19 @@ export function createK8sRuntime(o = {}) {
       existing = await c.get(route);
       if (!existing) throw new Error('Runtime object disappeared during creation');
     }
-    return update ? c.patch(route, update(existing), 'merge') : existing;
+    const patch = update?.(existing);
+    return patch ? c.patch(route, patch, 'merge') : existing;
   }
+  async function syncTier(c, slug) {
+    const data = { 'tier.json': JSON.stringify(taskTier(o.userResources?.[slug])) };
+    const expectedLabels = labels(slug);
+    return ensure(c, `${core}/configmaps`, { apiVersion: 'v1', kind: 'ConfigMap',
+      metadata: { name: names(slug).tier, labels: expectedLabels }, data },
+    existing => existing.data?.['tier.json'] === data['tier.json']
+      && Object.entries(expectedLabels).every(([key, value]) => existing.metadata?.labels?.[key] === value)
+      ? null : { data, metadata: { labels: expectedLabels } });
+  }
+  const ensureTier = slug => exclusive(slug, c => syncTier(c, slug), false);
   const securityContext = { runAsUser: uid, runAsGroup: uid, runAsNonRoot: true,
     allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, seccompProfile: { type: 'RuntimeDefault' } };
   function podSpec(image, n, pvc, system, oldwork, job = false) {
@@ -148,9 +160,11 @@ export function createK8sRuntime(o = {}) {
     const volumes = [{ name: 'data', persistentVolumeClaim: { claimName: n.data } }];
     if (!job) {
       mounts.push({ name: 'model-key', mountPath: o.modelKeyFile ?? '/etc/partner/model.key', subPath: 'model.key', readOnly: true },
-        { name: 'published', mountPath: publishedDirectory, readOnly: true });
+        { name: 'published', mountPath: publishedDirectory, readOnly: true },
+        { name: 'tier', mountPath: '/run/workpartner/tier', readOnly: true });
       volumes.push({ name: 'model-key', secret: { secretName: n.modelKey, defaultMode: 0o444 } },
-        { name: 'published', secret: { secretName: n.published, defaultMode: 0o444 } });
+        { name: 'published', secret: { secretName: n.published, defaultMode: 0o444 } },
+        { name: 'tier', configMap: { name: n.tier, optional: true } });
       if (o.sharedSkills) {
         mounts.push({ name: 'shared-skills', mountPath: o.sharedSkills.container, readOnly: true });
         volumes.push({ name: 'shared-skills', persistentVolumeClaim: { claimName: o.sharedSkills.claim, readOnly: true } });
@@ -187,6 +201,7 @@ export function createK8sRuntime(o = {}) {
       const image = o.userImages?.[slug] ?? o.image;
       const id = await registered(image);
       await ensureIsolation(slug);
+      await syncTier(c, slug);
       const secret = { apiVersion: 'v1', kind: 'Secret', metadata: { name: n.modelKey, labels: labels(slug) }, type: 'Opaque',
         data: { 'model.key': key.toString('base64') } };
       await ensure(c, `${core}/secrets`, secret, () => ({ metadata: { labels: labels(slug) }, data: secret.data }));
@@ -219,6 +234,10 @@ export function createK8sRuntime(o = {}) {
         updateStrategy: { type: 'OnDelete' }, selector: { matchLabels: labels(slug) },
         template: { metadata: { labels: labels(slug) }, spec } } };
       await ensure(c, apps, object, existing => {
+        if (!existing.spec.template.spec.volumes?.some(volume => volume.name === 'tier')) {
+          spec.volumes = spec.volumes.filter(volume => volume.name !== 'tier');
+          spec.containers[0].volumeMounts = spec.containers[0].volumeMounts.filter(mount => mount.name !== 'tier');
+        }
         const selector = existing.spec.selector?.matchLabels ?? {}, expected = labels(slug);
         if (![0, 1].includes(existing.spec.replicas) || Object.keys(selector).length !== Object.keys(expected).length
           || Object.entries(expected).some(([key, value]) => selector[key] !== value)
@@ -281,6 +300,7 @@ export function createK8sRuntime(o = {}) {
     const sts = await c.get(`${apps}/${n.container}`);
     if (!sts || sts.metadata.deletionTimestamp) throw new Error('Runtime StatefulSet is unavailable');
     if ((await userPods(c, slug)).some(p => p.metadata.name !== n.pod)) throw new Error('User already has another Pod');
+    await syncTier(c, slug);
     await c.patch(`${apps}/${n.container}`, { spec: { replicas: 1 } }, 'merge');
     await waitRunning(c, slug);
   });
@@ -360,7 +380,7 @@ export function createK8sRuntime(o = {}) {
     const factory = o.createK8sFiles ?? (await import('./k8s-files.mjs')).createK8sFiles;
     return factory({ ...await context(), exec });
   })();
-  return { inspect, ensureIsolation, create, start, stop, restart, rekey, remove, runOnce, imageId, exec,
+  return { inspect, ensureIsolation, ensureTier, create, start, stop, restart, rekey, remove, runOnce, imageId, exec,
     execNamed: async (name, ...args) => {
       if (!dnsLabel(name)) throw new Error('Invalid runtime Pod name');
       return (await execMethods(o.systemContainer ?? name)).execNamed(name, ...args);

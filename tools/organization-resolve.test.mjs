@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolveOrganization, nextEnvironment, nextModelConfig } from '../gateway/organization/resolve.mjs';
+import { resolveOrganization, nextEnvironment, nextModelConfig, taskTier } from '../gateway/organization/resolve.mjs';
 
 function fixture(t, fields = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workpartner-organization-'));
@@ -20,6 +20,39 @@ const hosts = {
   previewHost: 'preview.example.com', legacyHosts: ['old.example.com', 'legacy.example.com:8443'],
   projectHost: 'project.example.com',
 };
+
+test('task tiers resolve defaults and independent positive overrides without inferring from memory', t => {
+  for (const [input, expected] of [
+    [{ memory: '8Gi' }, { tier: 'standard', tasks: 3, taskMemoryMiB: 512 }],
+    [{ tier: 'standard' }, { tier: 'standard', tasks: 3, taskMemoryMiB: 512 }],
+    [{ tier: 'open' }, { tier: 'open', tasks: 5, taskMemoryMiB: 1024 }],
+    [{ tier: 'unlimited' }, { tier: 'unlimited', tasks: null, taskMemoryMiB: 1024 }],
+    [{ tasks: null }, { tier: 'standard', tasks: null, taskMemoryMiB: 512 }],
+    [{ tier: 'open', taskMemoryMiB: 1536 }, { tier: 'open', tasks: 5, taskMemoryMiB: 1536 }],
+    [{ tier: 'unlimited', tasks: 7 }, { tier: 'unlimited', tasks: 7, taskMemoryMiB: 1024 }],
+  ]) {
+    assert.deepEqual(taskTier(input, () => assert.fail('valid tier must not warn')), expected);
+    const org = resolveOrganization(fixture(t, { runtime: { k8s: { userResources: { person: input } } } }));
+    assert.deepEqual(taskTier(org.runtime.k8s.userResources.person), expected);
+  }
+});
+
+test('invalid task tier fields warn once and fall back to the entire standard tier', t => {
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const invalid = [
+    ...['unknown', null, 1, {}, [], true].map(tier => ({ tier, tasks: 9 })),
+    ...[0, -1, 1.5, '5', true, {}, [], Number.MAX_SAFE_INTEGER + 1].map(tasks => ({ tier: 'open', tasks })),
+    ...[null, 0, -1, 1.5, '1024', false, {}, []].map(taskMemoryMiB => ({ tier: 'unlimited', taskMemoryMiB })),
+  ];
+  for (const fields of invalid) {
+    warnings.length = 0;
+    const org = resolveOrganization(fixture(t, { runtime: { k8s: { userResources: { person: { memory: '8Gi', ...fields } } } } }));
+    assert.deepEqual(org.runtime.k8s.userResources.person, { memory: '8Gi', tier: 'standard', tasks: 3, taskMemoryMiB: 512 });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /Invalid runtime\.k8s\.userResources.*standard/);
+  }
+});
 
 test('organization validates optional per-user Kubernetes image references', t => {
   for (const userImages of [undefined, {}, { person: 'workspace:pilot', other: 'registry.example.com/workspace@sha256:abc' }]) {

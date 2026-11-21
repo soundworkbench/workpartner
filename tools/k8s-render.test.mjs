@@ -75,13 +75,13 @@ function documents(text) {
   return text.trim().split(/^---\s*$/m).map(document => JSON.parse(document));
 }
 
-test('disabled ASR preserves pre-ASR CLI output byte for byte in all deployment modes', t => {
-  // Captured from the unmodified renderer before adding ASR support.
+test('disabled ASR preserves CLI output byte for byte in all deployment modes', t => {
+  // Baseline includes the user task-tier ConfigMap RBAC rule.
   const hashes = {
-    'hostPort-selector': '80ccfdaa7a4f99d12db6812864cc33e94a3ba3c8a5400772e35654761657e2b6',
-    'hostPort-endpoint': '160615aa58cbe9c1e2625538aa7e0c3beed9341a3fc8fd9095d81e859ed0c9ad',
-    'clusterIP-selector': '31fc1981ed41b6ac5c06d87d18b63fba82ce79a5ecf61c0705d4804e0c09f7cc',
-    'clusterIP-endpoint': '0e944e7b49c2d8a8a11097532a5907e2debdbc4b5e9baab97e719b095ddd6c35',
+    'hostPort-selector': 'd49f3cbefda72e575eba4859e5882767d008b30b0a4676ee50dadf1b3478b2ac',
+    'hostPort-endpoint': 'f79a4614ae618bc44ca0883a15fae463408112ae496313d6058fcbcb9a1efa35',
+    'clusterIP-selector': 'f64f70762245fbe76c9409105965dcdafad55b8f18917ab1c5ad3e42c5905288',
+    'clusterIP-endpoint': '48752c838381ead41fec044492c0ed86773d1a1225c04f01e45d8130f9af99fd',
   };
   const directory = temporary(t);
   for (const [mode, hash] of Object.entries(hashes)) {
@@ -205,6 +205,7 @@ test('RBAC grants only the runtime operations, with no cluster permissions or im
     { apiGroups: [''], resources: ['pods/exec'], verbs: ['get', 'create'] },
     { apiGroups: [''], resources: ['pods/log'], verbs: ['get'] },
     { apiGroups: [''], resources: ['secrets'], verbs: ['get', 'create', 'update', 'patch'] },
+    { apiGroups: [''], resources: ['configmaps'], verbs: ['get', 'create', 'patch'] },
     { apiGroups: [''], resources: ['persistentvolumeclaims'], verbs: ['get', 'create'] },
     { apiGroups: ['networking.k8s.io'], resources: ['networkpolicies'], verbs: ['get', 'list'] },
   ]);

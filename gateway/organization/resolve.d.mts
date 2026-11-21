@@ -24,7 +24,8 @@ export interface Organization {
       /** Main container only: memory/cpu override limits; memoryRequest/cpuRequest override requests.
        * Nonempty strings or finite numbers are stringified; invalid or omitted keys use global values on the next create. */
       userResources?: Record<string, { memory?: string | number; cpu?: string | number;
-        memoryRequest?: string | number; cpuRequest?: string | number }>;
+        memoryRequest?: string | number; cpuRequest?: string | number;
+        tier?: 'standard' | 'open' | 'unlimited'; tasks?: number | null; taskMemoryMiB?: number }>;
       userImages?: Record<string, string>;
       gatewayResources?: { cpu?: string; memory?: string };
       imageConfigMap?: string; governingService?: string; requiredPolicies?: string[];
@@ -86,6 +87,9 @@ export function desktopPublicConfig(environment: NodeJS.ProcessEnv, packaged?: {
 export type OrganizationData = Omit<Organization, "server" | "runtime"> & { publicHost?: string; previewHost?: string; legacyHosts?: string[]; projectHost?: string; runtime: Omit<Organization["runtime"], "hostData" | "hostSecure" | "hostConfig" | "modelContainer"> & { modelContainer: string | null } };
 /** Read organization data without requiring deployment endpoints. */
 export function organizationData(environment?: NodeJS.ProcessEnv): OrganizationData;
+export function taskTier(resources?: { tier?: unknown; tasks?: unknown; taskMemoryMiB?: unknown }, warn?: (message: string) => void): {
+  tier: 'standard' | 'open' | 'unlimited'; tasks: number | null; taskMemoryMiB: number;
+};
 /** Resolve next image startup variables without reading a credential. */
 export function nextEnvironment(organization: OrganizationData, environment?: NodeJS.ProcessEnv): Record<string, string>;
 /** Resolve and validate model defaults and the runtime browser catalog; slug appends that user's model.userCatalog entries. */
