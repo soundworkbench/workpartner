@@ -81,6 +81,8 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
+# Near the memory limit, end the largest agent tool command instead of losing the whole container.
+python3 -I /opt/workpartner/bin/wp-memory-watchdog.py &
 AIONUI_PORT=${AIONUI_PORT:-25808}
 mark configured
 /opt/aionui/aionui-web start --static-dir /opt/aionui/static-wp --remote --port "$AIONUI_PORT" --no-open --data-dir /data/aionui-data &
