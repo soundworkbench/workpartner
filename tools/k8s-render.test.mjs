@@ -301,9 +301,19 @@ test('shared claim is configurable and absent when the skill market is disabled'
   let pod = find(renderManifests(org).objects, 'Deployment').spec.template.spec;
   assert.deepEqual(pod.volumes.at(-1), { name: 'shared-skills', persistentVolumeClaim: { claimName: 'reviewed-library' } });
   assert.equal(pod.containers[0].volumeMounts.at(-1).mountPath, '/reviewed');
+  org.runtime.k8s.deploy.hostPaths.sharedSkills = '/srv/workpartner-shared-skills';
+  pod = find(renderManifests(org).objects, 'Deployment').spec.template.spec;
+  assert.deepEqual(pod.volumes.at(-1), {
+    name: 'shared-skills', hostPath: { path: '/srv/workpartner-shared-skills', type: 'Directory' },
+  });
+  assert.equal(pod.containers[0].volumeMounts.at(-1).mountPath, '/reviewed');
+  org.runtime.k8s.deploy.hostPaths.sharedSkills = 'relative';
+  assert.throws(() => renderManifests(org), /runtime\.k8s\.deploy\.hostPaths\.sharedSkills/);
+  delete org.runtime.k8s.deploy.hostPaths.sharedSkills;
   org.runtime.k8s.sharedSkillsClaim = '../invalid';
   assert.throws(() => renderManifests(org), /sharedSkillsClaim/);
   org.features.marketSkills = false;
+  org.runtime.k8s.deploy.hostPaths.sharedSkills = '/srv/workpartner-shared-skills';
   pod = find(renderManifests(org).objects, 'Deployment').spec.template.spec;
   assert.equal(pod.volumes.some(volume => volume.name === 'shared-skills'), false);
 });
