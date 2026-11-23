@@ -113,6 +113,7 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 | `hostPaths.secure` | 无，必填 | 节点凭据目录 → runtime.secureDirectory。 |
 | `hostPaths.state` | 无，必填 | 节点状态目录 → runtime.stateDirectory。 |
 | `hostPaths.usersFile` | 无，必填 | 节点已有用户文件 → runtime.usersFile。 |
+| `hostPaths.sharedSkills` | 未设置 | `features.marketSkills` 启用且设置时，将网关的共享目录直接挂载为 `hostPath`（`type: Directory`）；未设置时使用 `runtime.k8s.sharedSkillsClaim` PVC。仅当网关与共享目录的 NFS 服务端在同一节点时使用；用户 Pod 仍使用 PVC。 |
 | `egressExceptCidrs` | 无，必须显式提供，可为 `[]` | 补充禁止用户访问的 IPv4 CIDR，必须包括全部节点公网地址 `/32`；例如 `192.0.2.10/32`。自动合并链路本地、RFC1918、共享地址及回环网段，详见模板。 |
 | `modelEgressSelector` | 与 endpoint 必须二选一 | 非空标签映射，必须含 `workpartner/role: model-egress`，不能选中网关 Pod；模型出口工作负载由部署方提供。 |
 | `modelEgressEndpoint` | 与 selector 必须二选一 | `{ "address": "192.0.2.10", "port": 4100 }`，仅用于所有节点均可经路由到达、且不是任何节点本机地址的外部端点；Docker 网桥服务用中继 Pod + selector，见[模型出口与 Docker 中继](#model-egress-routing)。固定出口 IPv4 字面量和整数 TCP 端口（1–65535）；禁止未指定地址、回环及链路本地地址（包括元数据地址），不能填域名、CIDR 或含端口的 address。 |
@@ -123,6 +124,19 @@ ServiceAccount 默认目录为 `/var/run/secrets/kubernetes.io/serviceaccount`�
 启用 `dataTools` 时，网关只从环境变量读取 `dataTools.provider` 中各 `*Environment` 字段命名的变量：`enabledEnvironment` 和 `verifiedEnvironment` 都为 `1` 才会计费调用，`orgIdEnvironment` 为正整数，`orgSlugEnvironment` 为小写字母、数字和连字符，`limitEnvironment.daily`、`.monthly`、`.call` 可选（美元，缺省 1/5/1）。缺少前四项时 `/_wp/data/*` 返回 503，`wp-data` 和工具页的数据卡片都无法使用。Docker 部署在 compose 文件里设置这些变量；Kubernetes 部署把它们写进一个 Secret，并在 `gatewayEnvFrom` 中列出。令牌仍放在 `dataTools.provider.tokenFile` 指向的凭据目录文件里，不放进 Secret 环境变量。
 
 所有 hostPaths 必须是非根绝对路径且事先存在。sessionKeyFile、cookieFile、identity.appSecretFile，以及配置 migration 时的 ownersFile，必须在网关 secureDirectory 或 stateDirectory 内。渲染器要求网关与模型 URL 使用短 Service 名，不能用节点 IP、外部域名或完整集群域名替代。生成的 StorageClass 固定为 `Retain`、`WaitForFirstConsumer`。当前网络清单的公网放行/排除使用 IPv4；node-guard 支持 IPv4/IPv6 地址（如 `2001:db8::10`），不能据此宣称整个方案已完成双栈验收。
+
+### 核对线上与仓库是否一致
+
+可以用离线工具把线上 Deployment JSON 与组织配置渲染结果逐项比较。工具不连接集群，也不读取 Secret 值；如需把 `envFrom` 展开成键名环境变量，先只生成 Secret 的键名：
+
+```sh
+kubectl get secret <名> -n <系统命名空间> -o json \
+  | jq -c '{"<名>": (.data | keys)}' > /tmp/secret-keys.json
+kubectl get deploy <网关名> -n <系统命名空间> -o json \
+  | node tools/k8s/live-diff.mjs --org <组织目录> --live - --secret-keys /tmp/secret-keys.json
+```
+
+无差异时退出码为 0；有差异时为 1。需要比较镜像标签时加 `--compare-image`，需要机器可读输出时加 `--json`。
 
 ### 集群内语音识别（可选）
 

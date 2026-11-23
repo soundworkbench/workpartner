@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "organizationId": "example",
+  "runtime": {
+    "kind": "k8s",
+    "gatewayOrigin": "http://example-partner-gateway:3090",
+    "internalOrigin": "http://example-partner-gateway:3091",
+    "gatewayPort": 3090,
+    "internalPort": 3091,
+    "nextPort": 25808,
+    "secureDirectory": "/secure",
+    "stateDirectory": "/state",
+    "usersFile": "/etc/partner/users.json",
+    "localAddress": "127.0.0.1:3092",
+    "sessionKeyFile": "/secure/gateway-session.key",
+    "cookieFile": "/state/cookies.json",
+    "migration": {
+      "ownersFile": "/state/runtime-owners.json",
+      "peerOrigin": "http://192.0.2.1:3090"
+    },
+    "k8s": {
+      "namespace": "example-partner-users",
+      "systemNamespace": "example-partner-system",
+      "storageClass": "example-partner-local",
+      "deploy": {
+        "gatewayImage": "example-gateway:test",
+        "gatewayNodeSelector": {
+          "node-role.kubernetes.io/control-plane": "true"
+        },
+        "entry": {
+          "mode": "hostPort",
+          "hostIP": "127.0.0.1",
+          "hostPort": 3092
+        },
+        "hostPaths": {
+          "organization": "/srv/example/example-partner/organization-k8s",
+          "secure": "/srv/example/secure/example-partner",
+          "state": "/srv/example/example-partner/gateway/state",
+          "usersFile": "/srv/example/example-partner/users.json",
+          "sharedSkills": "/srv/workpartner-shared-skills"
+        },
+        "egressExceptCidrs": [
+          "203.0.113.10/32",
+          "203.0.113.11/32",
+          "203.0.113.12/32",
+          "203.0.113.13/32",
+          "203.0.113.14/32",
+          "203.0.113.15/32",
+          "203.0.113.16/32"
+        ],
+        "newUserStorage": {
+          "provisioner": "rancher.io/local-path"
+        },
+        "modelEgressSelector": {
+          "workpartner/role": "model-egress",
+          "app.kubernetes.io/name": "model-relay"
+        },
+        "gatewayEnvFrom": [
+          "workpartner-treg"
+        ],
+        "asr": {
+          "enabled": true,
+          "image": "example-asr:test",
+          "nodeName": "node-b",
+          "threads": 2
+        }
+      },
+      "gatewayResources": {
+        "cpu": "500m",
+        "memory": "1Gi"
+      }
+    }
+  },
+  "model": {
+    "baseUrl": "http://magpie-co:3425/v1",
+    "nextBaseUrl": "http://magpie-co:3425/v1"
+  },
+  "identity": {
+    "appSecretFile": "/secure/feishu-app.secret"
+  },
+  "features": {
+    "marketSkills": true
+  }
+}

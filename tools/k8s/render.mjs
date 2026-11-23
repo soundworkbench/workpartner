@@ -93,6 +93,7 @@ function context(organization) {
     check('runtime.k8s.deploy.asr.threads', Number.isInteger(asr.threads ?? 2) && (asr.threads ?? 2) > 0);
   }
   const absolutePath = value => typeof value === 'string' && isAbsolute(value) && value !== '/' && !/[\0\r\n]/.test(value);
+  if (paths.sharedSkills !== undefined) check('runtime.k8s.deploy.hostPaths.sharedSkills', absolutePath(paths.sharedSkills));
   if (organization.features?.marketSkills) {
     check('market.sharedDirectory', absolutePath(organization.market?.sharedDirectory));
     check('runtime.k8s.sharedSkillsClaim', dnsLabel(k8s.sharedSkillsClaim ?? 'workpartner-shared-skills'));
@@ -261,7 +262,10 @@ function context(organization) {
     entryMode: entry.mode, entryClusterIP: entry.clusterIP,
     organizationHostPath: paths.organization, secureHostPath: paths.secure,
     sharedSkills: organization.features?.marketSkills ? {
-      claim: k8s.sharedSkillsClaim ?? 'workpartner-shared-skills', directory: organization.market.sharedDirectory,
+      ...(paths.sharedSkills === undefined
+        ? { claim: k8s.sharedSkillsClaim ?? 'workpartner-shared-skills' }
+        : { hostPath: paths.sharedSkills }),
+      directory: organization.market.sharedDirectory,
     } : undefined,
     stateHostPath: paths.state, usersHostPath: paths.usersFile,
     secureDirectory: runtime.secureDirectory, stateDirectory: runtime.stateDirectory, usersFile: runtime.usersFile,
@@ -311,7 +315,9 @@ export function renderManifests(organization, { only } = {}) {
     gatewayPod.containers[0].envFrom = values.gatewayEnvFrom.map(name => ({ secretRef: { name } }));
   }
   if (gatewayPod && values.sharedSkills) {
-    gatewayPod.volumes.push({ name: 'shared-skills', persistentVolumeClaim: { claimName: values.sharedSkills.claim } });
+    gatewayPod.volumes.push({ name: 'shared-skills', ...(values.sharedSkills.hostPath
+      ? { hostPath: { path: values.sharedSkills.hostPath, type: 'Directory' } }
+      : { persistentVolumeClaim: { claimName: values.sharedSkills.claim } }) });
     gatewayPod.containers[0].volumeMounts.push({ name: 'shared-skills', mountPath: values.sharedSkills.directory });
   }
   return { objects, warnings: values.warnings };
@@ -349,6 +355,9 @@ hostPort entry mismatches warn on stderr: the tunnel targets runtime.localAddres
 runtime.k8s.gatewayResources optionally sets cpu/memory (default 500m/512Mi; requests = limits).
 runtime.k8s.deploy.gatewayEnvFrom optionally lists Secrets in systemNamespace whose keys become gateway
 environment variables (for example the dataTools.provider variables); create them before applying.
+runtime.k8s.deploy.hostPaths.sharedSkills optionally mounts a shared-skills host directory when
+features.marketSkills is enabled; otherwise the default sharedSkillsClaim PVC is used. This is useful
+when the gateway and the shared directory's NFS server run on the same node; user Pods still use their PVC.
 The gateway image must include K1/K2/K3 and be imported onto its selected node first.
 Only rendered objects are written; no credentials are read and no cluster is contacted.
 Apply the ConfigMap only for initial registration; later use --only to exclude ConfigMap
