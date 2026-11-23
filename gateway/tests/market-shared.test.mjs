@@ -154,7 +154,7 @@ test('an execute failure clears the user queue and uninstall keeps installed cou
 test('old review and author notification results cannot overwrite a newer notification batch', async t => {
   const reviewGates = [];
   const f = fixture(t, { notify: async payload => {
-    let resolve; const done = new Promise(r => { resolve = r; }); reviewGates.push({ payload, resolve }); await done;
+    let resolve, reject; const done = new Promise((r, j) => { resolve = r; reject = j; }); reviewGates.push({ payload, resolve, reject }); await done;
   } });
   const submitting = f.store.submit(alice, await f.local(), meta);
   await waitFor(() => reviewGates.length === 1);
@@ -169,27 +169,30 @@ test('old review and author notification results cannot overwrite a newer notifi
   await assert.rejects(f.store.withdraw(alice, 'meeting-notes'), /simulated save failure/);
   const resending = f.store.review(it, 'meeting-notes', version, 'resend');
   await waitFor(() => reviewGates.length === 2);
-  reviewGates[0].resolve();
-  const first = await submitting;
-  assert.equal(first.reviewNotice, undefined); assert.equal('reviewNoticeId' in first, false);
   reviewGates[1].resolve();
   const second = await resending;
   assert.equal(second.reviewNotice, 'sent'); assert.equal('reviewNoticeId' in second, false);
+  reviewGates[0].reject(new Error('old notification failed'));
+  const first = await submitting;
+  assert.equal(first.reviewNotice, 'sent'); assert.equal('reviewNoticeId' in first, false);
   assert.equal(state().skills['meeting-notes'].versions[version].reviewNotice, 'sent');
 
   const authorGates = [];
   const authored = fixture(t, { notifyAuthor: async payload => {
-    let resolve; const done = new Promise(r => { resolve = r; }); authorGates.push({ payload, resolve }); await done;
+    let resolve, reject; const done = new Promise((r, j) => { resolve = r; reject = j; }); authorGates.push({ payload, resolve, reject }); await done;
   } });
   const draft = await authored.store.submit(alice, await authored.local(), meta);
   const approving = authored.store.review(it, draft.name, draft.version, 'approve');
   await waitFor(() => authorGates.length === 1);
   const notifyingAgain = authored.store.review(it, draft.name, draft.version, 'notify-author');
   await waitFor(() => authorGates.length === 2);
-  authorGates[0].resolve(); await approving;
   authorGates[1].resolve();
   const authorResult = await notifyingAgain;
   assert.equal(authorResult.authorNotice, 'sent'); assert.equal('authorNoticeId' in authorResult, false);
+  authorGates[0].reject(new Error('old author notification failed'));
+  const approvalResult = await approving;
+  assert.equal(approvalResult.authorNotice, 'sent'); assert.equal('authorNoticeId' in approvalResult, false);
+  assert.equal(authored.store.list(alice).mine.find(row => row.version === draft.version).authorNotice, 'sent');
 });
 
 test('a personal same-name conflict returns 409 and logs only the user slug', async t => {

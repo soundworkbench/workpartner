@@ -25,6 +25,7 @@
     var copy = COPY[context.locale] || COPY['zh-CN'], controller = new AbortController(), disposed = false, busy = false, dialogs = [], sharingEnabled = false;
     function element(tag, className, text) { var node = document.createElement(tag); node.className = className; if (text !== undefined) node.textContent = text; return node; }
     var toolbar = element('div', 'wp-skills-toolbar'), add = element('button', 'wp-skills-add', copy.add);
+    var loadSequence = 0;
     add.type = 'button'; var input = element('input', 'wp-skills-input'); input.type = 'file'; input.accept = '.zip,.md'; input.hidden = true;
     var status = element('p', 'wp-skills-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     var retry = element('button', 'wp-skills-retry', copy.retry); retry.type = 'button'; retry.hidden = true;
@@ -151,7 +152,15 @@
         });
       }
     }
-    async function load(success, announce) { var results = await Promise.all([request('/_wp/market/skills'), request('/_wp/market/shared')]); if (!disposed) { render(results[0].skills, results[1]); if (announce !== false) message(success || ''); } }
+    async function load(success, announce) {
+      var sequence = ++loadSequence;
+      try {
+        var results = await Promise.all([request('/_wp/market/skills'), request('/_wp/market/shared')]);
+        if (!disposed && sequence === loadSequence) { render(results[0].skills, results[1]); if (announce !== false) message(success || ''); }
+      } catch (error) {
+        if (!disposed && sequence === loadSequence) throw error;
+      }
+    }
     function install(file, overwrite) { return request('/_wp/market/skills?filename=' + encodeURIComponent(file.name) + (overwrite ? '&overwrite=true' : ''), { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file }); }
     add.addEventListener('click', function () { if (!busy) input.click(); }); retry.addEventListener('click', function () { void action(function () {}, ''); });
     input.addEventListener('change', async function () {

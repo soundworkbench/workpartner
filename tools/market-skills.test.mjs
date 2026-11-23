@@ -84,6 +84,48 @@ async function companyView(locale, personal, company, postResult) {
   return { host, dispose, card: find(host, 'wp-skills-section')[1] && find(find(host, 'wp-skills-section')[1], 'wp-skill-card')[0], refreshes: () => refreshes };
 }
 
+async function concurrentCompanyView() {
+  let render;
+  const company = [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0 }];
+  const installed = [{ name: 'meeting-notes', id: 'meeting-notes', shared: true, preinstalled: false, description: 'Mine' }];
+  const batches = { old: [], latest: [] };
+  let reads = 0;
+  const response = (url, personal) => url === '/_wp/market/skills'
+    ? Response.json({ skills: personal })
+    : Response.json({ submissionsEnabled: false, company, mine: [], isApprover: false });
+  const context = {
+    window: { wpMarket: { register(name, callback) { assert.equal(name, 'skills'); render = callback; }, tryExample() {} }, confirm: () => true },
+    AbortController, document: { createElement: tag => new Element(tag) },
+    fetch: async (url, options) => {
+      if (!options?.method) {
+        reads++;
+        if (reads <= 2) return response(url, []);
+        const batch = reads <= 4 ? batches.old : batches.latest;
+        return new Promise((resolve, reject) => batch.push({ url, resolve, reject }));
+      }
+      if (options.method === 'POST') return Response.json({ name: company[0].name, installed: true, changed: true });
+      assert.fail(`Unexpected request: ${url}`);
+    },
+  };
+  runInNewContext(readFileSync(new URL('../image/rebrand/overlay/wp-skills.js', import.meta.url), 'utf8'), context);
+  const host = new Element('main'), dispose = render(host, { locale: 'zh-CN' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const card = find(host, 'wp-skills-section')[1] && find(find(host, 'wp-skills-section')[1], 'wp-skill-card')[0];
+  return { host, dispose, card, batches, installed, response };
+}
+
+async function waitForBatch(batch) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (batch.length === 2) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail('load batch was not started');
+}
+
+function settleBatch(batch, view, personal, error) {
+  batch.forEach(request => error ? request.reject(new Error('旧请求失败')) : request.resolve(view.response(request.url, personal)));
+}
+
 test('company install changes the card immediately and same-name personal skills suppress install', async () => {
   const company = [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0 }];
   const view = await companyView('zh-CN', [], company);
@@ -114,6 +156,41 @@ test('successful card actions refresh the whole market and uninstall removes the
     assert.equal(find(installed.host, 'wp-skills-section')[1] && find(find(installed.host, 'wp-skills-section')[1], 'wp-skill-badge')[0].textContent, '公司技能');
     assert.ok(installed.refreshes() >= 4, `expected initial and post-action table loads, got ${installed.refreshes()}`);
   } finally { installed.dispose(); }
+});
+
+test('a late older load cannot replace the newer market result', async () => {
+  const view = await concurrentCompanyView();
+  try {
+    find(view.card, 'wp-skill-action')[0].click();
+    await waitForBatch(view.batches.old);
+    find(view.host, 'wp-skills-retry')[0].click();
+    await waitForBatch(view.batches.latest);
+    settleBatch(view.batches.latest, view, view.installed);
+    await new Promise(resolve => setImmediate(resolve));
+    const current = () => find(find(view.host, 'wp-skills-section')[1], 'wp-skill-card')[0];
+    assert.equal(find(current(), 'wp-skill-badge')[0].textContent, '已安装');
+    settleBatch(view.batches.old, view, []);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(find(current(), 'wp-skill-badge')[0].textContent, '已安装');
+    assert.equal(find(current(), 'wp-skill-action').length, 0);
+  } finally { view.dispose(); }
+});
+
+test('a late older load failure does not show an error or replace the newer result', async () => {
+  const view = await concurrentCompanyView();
+  try {
+    find(view.card, 'wp-skill-action')[0].click();
+    await waitForBatch(view.batches.old);
+    find(view.host, 'wp-skills-retry')[0].click();
+    await waitForBatch(view.batches.latest);
+    settleBatch(view.batches.latest, view, view.installed);
+    await new Promise(resolve => setImmediate(resolve));
+    settleBatch(view.batches.old, view, [], true);
+    await new Promise(resolve => setImmediate(resolve));
+    const current = () => find(find(view.host, 'wp-skills-section')[1], 'wp-skill-card')[0];
+    assert.equal(find(current(), 'wp-skill-badge')[0].textContent, '已安装');
+    assert.equal(find(view.host, 'wp-skills-status')[0].textContent, '');
+  } finally { view.dispose(); }
 });
 
 test('deleting a same-name personal skill removes the company conflict after refresh', async () => {
