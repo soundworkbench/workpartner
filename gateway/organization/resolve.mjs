@@ -111,6 +111,7 @@ export function organizationData(environment = process.env) {
   for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {
     if (!Array.isArray(market[key]) || market[key].some(value => typeof value !== 'string' || !value)) throw new Error(`Invalid market.${key}`);
   }
+  if (!Array.isArray(market.trustedDomains) || market.trustedDomains.some(value => typeof value !== 'string' || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(value))) throw new Error('Invalid market.trustedDomains');
   for (const key of ['sharedDirectory', 'containerDirectory']) {
     if (typeof market[key] !== 'string' || !/^\/[a-zA-Z0-9_/-]+$/.test(market[key]) || market[key].split('/').includes('..') || market[key] === '/') throw new Error(`Invalid market.${key}`);
   }

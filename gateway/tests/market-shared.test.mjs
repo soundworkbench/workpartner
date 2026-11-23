@@ -327,7 +327,7 @@ test('bot cards address configured reviewers and result notices address only the
   await notifier.notify({ ...notice, approvers: [it.unionId] });
   const card = JSON.parse(sent[0].content);
   assert.equal(sent[0].receive_id, it.unionId);
-  assert.deepEqual(card.elements.at(-1).actions.map(action => action.text.content), ['批准', '拒绝']);
+  assert.deepEqual(card.elements.at(-1).actions.map(action => action.text.content), ['批准并发布', '拒绝']);
   assert.ok(card.elements.at(-1).actions.every(action => action.url.startsWith('https://partner.example/')));
   await notifier.notifyAuthor({ ...notice, unionId: alice.unionId, status: 'rejected', reason: '需要更清楚的说明' });
   assert.equal(sent[1].receive_id, alice.unionId); assert.match(JSON.parse(sent[1].content).text, /需要更清楚的说明/);

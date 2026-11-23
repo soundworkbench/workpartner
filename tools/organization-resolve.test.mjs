@@ -69,6 +69,13 @@ test('organization validates optional per-user Kubernetes image references', t =
   }
 });
 
+test('organization validates lowercase market trusted domains', t => {
+  assert.deepEqual(resolveOrganization(fixture(t, { market: { trustedDomains: ['example.org'] } })).market.trustedDomains, ['example.org']);
+  for (const value of [null, {}, ['Example.org'], ['https://example.org'], ['example.org:443'], ['example.org/path']]) {
+    assert.throws(() => resolveOrganization(fixture(t, { market: { trustedDomains: value } })), /market\.trustedDomains/);
+  }
+});
+
 test('organization validates optional runtime.k8s.dnsNdots as an integer from 1 to 15', t => {
   for (const dnsNdots of [undefined, 1, 4, 15]) {
     const org = resolveOrganization(fixture(t, { runtime: { k8s: { dnsNdots } } }));

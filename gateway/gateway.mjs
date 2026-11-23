@@ -66,6 +66,24 @@ const SESSION_KEY = (() => {
 })();
 const SESSION_DAYS = 30;
 const sign = (data) => crypto.createHmac("sha256", SESSION_KEY).update(data).digest("base64url");
+const MARKET_REVIEW_KEY = crypto.createHmac('sha256', SESSION_KEY).update('market-review-link.v1').digest();
+const marketReviewSignature = values => crypto.createHmac('sha256', MARKET_REVIEW_KEY).update(values.join('\n')).digest('base64url');
+const createReviewToken = (name, id, action, reviewNoticeId) => {
+  const exp = Math.floor(Date.now() / 1000) + 7 * 86400;
+  const encoded = Buffer.from(String(exp)).toString('base64url');
+  return `${encoded}.${marketReviewSignature(['market-review.v1', name, id, action, reviewNoticeId, String(exp)])}`;
+};
+const verifyReviewToken = (token, name, id, action, reviewNoticeId) => {
+  if (typeof token !== 'string') return null;
+  const [encoded, signature] = token.split('.');
+  if (!encoded || !signature) return null;
+  let exp; try { exp = Number(Buffer.from(encoded, 'base64url').toString('utf8')); } catch { return null; }
+  if (!Number.isSafeInteger(exp) || exp < Math.floor(Date.now() / 1000)) return null;
+  const expected = marketReviewSignature(['market-review.v1', name, id, action, reviewNoticeId, String(exp)]);
+  const left = Buffer.from(signature), right = Buffer.from(expected);
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
+  return { name, id, action, noticeId: reviewNoticeId, exp };
+};
 
 function issueSession(who) {
   const data = Buffer.from(JSON.stringify({ u: who.unionId, n: who.name, a: who.avatar || "", e: Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400 })).toString("base64url");
@@ -79,7 +97,7 @@ const legacy = loadExtension ? await gatewayExtension(organization, {
 }) : null;
 const sharedStore = organization.features.marketSkills ? createSharedSkillStore({
   stateDir: `${organization.runtime.stateDirectory}/skill-market`, sharedDir: organization.market.sharedDirectory,
-  ...organization.market, ...marketNotifications(organization),
+  ...organization.market, ...marketNotifications(organization), createReviewToken, verifyReviewToken,
 }) : null;
 const sharedSkills = sharedStore && createSharedSkillsHandler({
   store: sharedStore, authenticate: req => userFor(req).user || (sharedStore.admin(userFor(req).who) ? userFor(req).who : null),

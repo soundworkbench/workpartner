@@ -195,6 +195,7 @@
   },
   "market": {
     "approvers": [],
+    "trustedDomains": [],
     "reservedPrefixes": [],
     "protectedNames": [
       "officecli",
