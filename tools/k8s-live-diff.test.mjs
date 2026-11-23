@@ -79,6 +79,35 @@ test('adding the readiness probe makes the sanitized live snapshot equal', t => 
   assert.equal(result.stdout, '');
 });
 
+test('non-default server fields are reported while default values remain ignored', t => {
+  const fixture = setup(t);
+  const deployment = read(fixture.deployment);
+  addReadiness(deployment);
+  deployment.spec.progressDeadlineSeconds = 42;
+  deployment.spec.template.spec.containers[0].terminationMessagePolicy = 'FallbackToLogsOnError';
+  write(fixture.deployment, deployment);
+
+  let result = run(baseArgs(fixture, '--secret-keys', fixture.secrets, '--json'));
+  assert.equal(result.status, 1);
+  let differences = JSON.parse(result.stdout);
+  assert.deepEqual(differences.map(difference => difference.path).sort(), [
+    'spec.progressDeadlineSeconds',
+    'spec.template.spec.containers[0].terminationMessagePolicy',
+  ]);
+  assert.equal(differences.find(difference => difference.path === 'spec.progressDeadlineSeconds').live, 42);
+  assert.equal(
+    differences.find(difference => difference.path === 'spec.template.spec.containers[0].terminationMessagePolicy').live,
+    'FallbackToLogsOnError',
+  );
+
+  deployment.spec.progressDeadlineSeconds = 600;
+  deployment.spec.template.spec.containers[0].terminationMessagePolicy = 'File';
+  write(fixture.deployment, deployment);
+  result = run(baseArgs(fixture, '--secret-keys', fixture.secrets));
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, '');
+});
+
 test('hostPath, resource and Secret expansion drift is reported', t => {
   const fixture = setup(t);
   const organization = read(fixture.organization);

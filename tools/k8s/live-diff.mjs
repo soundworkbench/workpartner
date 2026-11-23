@@ -7,10 +7,24 @@ import { organizationData } from '../../gateway/organization/resolve.mjs';
 import { renderManifests } from './render.mjs';
 
 const ABSENT = Symbol('absent');
-const serverDefaults = new Set([
-  'progressDeadlineSeconds', 'revisionHistoryLimit', 'dnsPolicy', 'restartPolicy', 'schedulerName',
-  'serviceAccount', 'terminationGracePeriodSeconds', 'terminationMessagePath', 'terminationMessagePolicy',
-]);
+const serverDefaults = Object.freeze({
+  deployment: new Map([
+    ['progressDeadlineSeconds', 600],
+    ['revisionHistoryLimit', 10],
+  ]),
+  pod: new Map([
+    ['dnsPolicy', 'ClusterFirst'],
+    ['restartPolicy', 'Always'],
+    ['schedulerName', 'default-scheduler'],
+    ['serviceAccount', (value, pod) => value === pod.serviceAccountName
+      || (value === 'default' && pod.serviceAccountName === 'default')],
+    ['terminationGracePeriodSeconds', 30],
+  ]),
+  container: new Map([
+    ['terminationMessagePath', '/dev/termination-log'],
+    ['terminationMessagePolicy', 'File'],
+  ]),
+});
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -28,6 +42,15 @@ function normalizeProbe(probe) {
     if (out[key] === value) delete out[key];
   }
   return out;
+}
+
+function removeServerDefaults(target, defaults) {
+  for (const [key, defaultValue] of defaults) {
+    const isDefault = typeof defaultValue === 'function'
+      ? defaultValue(target[key], target)
+      : target[key] === defaultValue;
+    if (isDefault) delete target[key];
+  }
 }
 
 function expandEnvironment(container, secretKeys) {
@@ -62,17 +85,17 @@ export function normalizeDeployment(deployment, { compareImage = false, secretKe
       .filter(key => out.metadata[key] !== undefined).map(key => [key, clone(out.metadata[key])]));
   }
   if (out.spec && typeof out.spec === 'object') {
-    for (const key of ['progressDeadlineSeconds', 'revisionHistoryLimit']) delete out.spec[key];
+    removeServerDefaults(out.spec, serverDefaults.deployment);
   }
   const pod = out.spec?.template?.spec;
   if (pod && typeof pod === 'object') {
-    for (const key of serverDefaults) delete pod[key];
+    removeServerDefaults(pod, serverDefaults.pod);
     if (pod.securityContext && Object.keys(pod.securityContext).length === 0) delete pod.securityContext;
     pod.containers = sortNamed(pod.containers);
     pod.initContainers = sortNamed(pod.initContainers);
     pod.volumes = sortNamed(pod.volumes);
     for (const container of pod.containers || []) {
-      for (const key of ['terminationMessagePath', 'terminationMessagePolicy']) delete container[key];
+      removeServerDefaults(container, serverDefaults.container);
       if (!compareImage) delete container.image;
       container.env = sortNamed(container.env);
       container.envFrom = sortNamed(container.envFrom);
