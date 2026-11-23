@@ -194,6 +194,7 @@
     "maxImagesPerItem": 6
   },
   "market": {
+    "autoPublish": true,
     "approvers": [],
     "trustedDomains": [],
     "reservedPrefixes": [],

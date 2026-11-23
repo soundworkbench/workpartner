@@ -108,6 +108,7 @@ export function organizationData(environment = process.env) {
     throw new Error('Invalid bridge.upgradeKeys');
   }
   const market = data.market;
+  if (typeof market.autoPublish !== 'boolean') throw new Error('Invalid market.autoPublish');
   for (const key of ['approvers', 'reservedPrefixes', 'protectedNames', 'preinstalled']) {
     if (!Array.isArray(market[key]) || market[key].some(value => typeof value !== 'string' || !value)) throw new Error(`Invalid market.${key}`);
   }

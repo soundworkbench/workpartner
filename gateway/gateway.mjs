@@ -19,6 +19,7 @@ import { isNavigation, notReady, updatingText } from "./starting.mjs";
 import { guidHideGuardClient } from './guid-hide-guard-client.mjs';
 
 import { createSharedSkillStore, createSharedSkillsHandler } from './market-shared.mjs';
+import { createMarketModelReview } from './market-model-review.mjs';
 import { marketNotifications } from './market-notifications.mjs';
 import { createMarketSkills, skillExecutor } from "./market-skills.mjs";
 
@@ -105,9 +106,12 @@ const docker = migration.kind === 'k8s' ? undefined : (await import('./runtime/d
 const legacy = loadExtension ? await gatewayExtension(organization, {
   routePrefix: "/_wp", organization, docker, runtime: legacyRuntime, personalRuntime: runtime, SESSION_KEY, users, userFor, cookieOf, page, redirect: (...args) => redirect(...args), MODEL, MODEL_KEY_PREFIX, PUBLIC_HOST,
 }) : null;
+const modelKeyFile = user => `${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`;
+const modelKeyFor = user => fs.readFileSync(modelKeyFile(user), 'utf8').trim();
 const sharedStore = organization.features.marketSkills ? createSharedSkillStore({
   stateDir: `${organization.runtime.stateDirectory}/skill-market`, sharedDir: organization.market.sharedDirectory,
   ...organization.market, ...marketNotifications(organization), createReviewToken, verifyReviewToken,
+  modelReview: createMarketModelReview({ baseUrl: MODEL.href, keyFor: modelKeyFor }),
 }) : null;
 const sharedSkills = sharedStore && createSharedSkillsHandler({
   store: sharedStore, authenticate: req => userFor(req).user || (sharedStore.admin(userFor(req).who) ? userFor(req).who : null),
@@ -123,8 +127,6 @@ const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
 aionui.startReconcileImages(users, organization.runtime.k8s?.reconcileImagesIntervalMs);
-const modelKeyFile = user => `${organization.runtime.secureDirectory}/${MODEL_KEY_PREFIX}${user.slug}.key`;
-const modelKeyFor = user => fs.readFileSync(modelKeyFile(user), 'utf8').trim();
 const marketTools = createMarketTools({ organization, authenticate: req => userFor(req).user, keyFor: modelKeyFor });
 const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, baseUrl: MODEL.href, keyFor: modelKeyFor,
   timeoutMs: process.env.WP_TITLE_TIMEOUT_MS, models: process.env.WP_TITLE_MODELS });

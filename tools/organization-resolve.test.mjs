@@ -76,6 +76,13 @@ test('organization validates lowercase market trusted domains', t => {
   }
 });
 
+test('organization accepts market.autoPublish as a boolean', t => {
+  assert.equal(resolveOrganization(fixture(t, { market: { autoPublish: false } })).market.autoPublish, false);
+  for (const value of [null, 0, 1, 'true', [], {}]) {
+    assert.throws(() => resolveOrganization(fixture(t, { market: { autoPublish: value } })), /market\.autoPublish/);
+  }
+});
+
 test('organization validates optional runtime.k8s.dnsNdots as an integer from 1 to 15', t => {
   for (const dnsNdots of [undefined, 1, 4, 15]) {
     const org = resolveOrganization(fixture(t, { runtime: { k8s: { dnsNdots } } }));

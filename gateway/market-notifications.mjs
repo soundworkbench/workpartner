@@ -70,7 +70,7 @@ export function marketNotifications(organization, fetcher = fetch) {
             content: `<font color="red">${warning}</font>`,
           })),
           ...(row.manualReasons || []).map(reason => ({
-            tag: 'markdown',
+            tag: 'plain_text',
             content: reasonText(reason),
           })),
           {

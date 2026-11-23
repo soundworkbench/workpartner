@@ -99,12 +99,12 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
       }
       hosts.push(host);
       if (!host || !isTrusted(host, domainList)) {
-        const label = host || candidate.slice(0, 120);
+        const label = host || '链接无法解析';
         results.push(finding(file, line, `external-link:${label}`, `外部链接 ${label}`, 'manual'));
       }
     }
     const egress = /(?:\bcurl\b[^\n]{0,4000}(?:\s(?:-d|-T|-F)(?=\s|=|@)|\s--data(?:-[A-Za-z0-9-]+)?(?=\s|=|@)|\s(?:--upload-file|--form)(?=\s|=|@)|\s-X\s*(?:POST|PUT)\b)|\bwget\b[^\n]{0,4000}(?:--post-data|--post-file|--body-)|\b(?:nc|ncat)\b|\b(?:scp|rsync)\b[^\n]{0,4000}\s[^\s:]+:[^\s]+)/i.test(lineText);
-    if (egress && (!hosts.length || hosts.some(host => !isTrusted(host, domainList)))) {
+    if (egress) {
       results.push(finding(file, line, 'external-egress', '向外部发送数据', 'manual'));
     }
     const remote = lineText.match(/\b(?:nc|ncat)\s+(?:[^\s]+\s+)?([A-Za-z0-9.-]+)(?::\d+)?\b/i)?.[1]
@@ -116,11 +116,7 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
     const internal = /(?:localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)/i.test(lineText)
       || /https?:\/\/[^\s/]+\.(?:internal|local|corp)(?:[./:\s]|$)/i.test(lineText)
       || /(?:\/Users\/|\/home\/|\/data\/|\/srv\/|[A-Za-z]:\\)/.test(lineText);
-    if (internal) {
-      if (!hosts.length || hosts.some(host => !host || !isTrusted(host, domainList))) {
-        results.push(finding(file, line, 'internal-path', '内部地址或本机路径', 'manual'));
-      }
-    }
+    if (internal) results.push(finding(file, line, 'internal-path', '内部地址或本机路径', 'manual'));
   }
   return results;
 }
@@ -132,7 +128,7 @@ function findingMessage(findings) {
 
 function scriptFile(file) {
   const source = file.content.toString('utf8');
-  return Boolean(file.executable) || /\.(?:py|sh|bash|js|mjs|cjs|ts|ps1|bat|cmd|rb|pl)$/i.test(file.path)
+  return Boolean(file.executable) || /\.(?:py|sh|bash|zsh|fish|js|mjs|cjs|ts|ps1|bat|cmd|rb|pl|lua|php)$/i.test(file.path)
     || source.startsWith('#!') || file.path.startsWith('scripts/');
 }
 
@@ -252,6 +248,8 @@ export function createSharedSkillStore({
   notifyAuthor = async () => {},
   createReviewToken,
   verifyReviewToken,
+  modelReview,
+  autoPublish = true,
 }) {
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   for (const directory of [sharedDir, path.join(sharedDir, 'live'), path.join(sharedDir, 'releases')]) {
@@ -407,7 +405,7 @@ export function createSharedSkillStore({
       delete version.reviewNotice;
       save();
       const reasons = version.manualReasons || [];
-      const tokenAllowed = reasons.length > 0
+      const tokenAllowed = version.scripts === 0 && reasons.length > 0
         && reasons.every(reason => ['first-submission', 'no-semver'].includes(reason.rule));
       const reviewToken = tokenAllowed ? createReviewToken?.(name, id, 'approve', noticeId) : undefined;
       return { noticeId, payload: { ...summary(name, row, version), approvers, reviewToken } };
@@ -612,6 +610,9 @@ export function createSharedSkillStore({
           example: meta.example,
           warnings: checked.warnings,
           findings: checked.findings,
+          modelFiles: checked.files
+            .filter(file => changed.includes(file.path) && /\.md$/i.test(file.path))
+            .map(file => ({ path: file.path, content: file.content.toString('utf8') })),
           manualReasons,
           scripts: checked.scripts,
           scriptFiles: checked.scriptFiles,
@@ -623,10 +624,81 @@ export function createSharedSkillStore({
         row.versions[id] = version;
         state.skills[name] = row;
         save();
-        const auto = manualReasons.length === 0;
-        if (auto) publish(name, id, 'auto');
-        return { row, version, notify: true, auto };
+        if (!autoPublish && !manualReasons.some(reason => reason.rule === 'auto-publish-off')) {
+          manualReasons.push({ rule: 'auto-publish-off', label: '自动发布已关闭，需要人工审批' });
+        }
+        const needsModel = manualReasons.length === 0 && autoPublish;
+        if (needsModel) {
+          version.modelReview = 'running';
+          save();
+        } else {
+          delete version.modelFiles;
+          save();
+        }
+        return {
+          row, version, notify: true, auto: false, needsModel,
+          liveId: currentLive?.id || null, liveDigest: currentLive?.digest || null,
+        };
       });
+      if (outcome.needsModel) {
+        let verdict;
+        try {
+          const review = typeof modelReview === 'function' ? modelReview : modelReview.review;
+          verdict = await review(user, {
+            name,
+            displayName: outcome.version.displayName,
+            description: outcome.version.description,
+            example: outcome.version.example,
+            files: outcome.version.modelFiles,
+            versionId: outcome.version.id,
+            liveId: outcome.liveId,
+            liveDigest: outcome.liveDigest,
+            digest: outcome.version.digest,
+          });
+        } catch {
+          verdict = { verdict: 'error', reasons: [] };
+        }
+        const finalized = await serial(() => {
+          const row = state.skills[name];
+          if (!row) return { auto: false, stale: true };
+          const version = versionOf(row, outcome.version.id);
+          const live = row.live && Object.hasOwn(row.versions, row.live) ? row.versions[row.live] : null;
+          if (version.status !== 'pending' || version.modelReview !== 'running'
+            || version.digest !== outcome.version.digest || (live?.id || null) !== outcome.liveId
+            || (live?.digest || null) !== outcome.liveDigest) {
+            if (version.status === 'pending' && version.modelReview === 'running') {
+              delete version.modelReview;
+              version.manualReasons = [...(version.manualReasons || []), {
+                rule: 'model-review', label: '模型审核没有结论，需要人工审核',
+              }];
+              save();
+            }
+            return { auto: false, stale: true, version };
+          }
+          delete version.modelReview;
+          const validVerdict = verdict && Object.getPrototypeOf(verdict) === Object.prototype
+            && Object.keys(verdict).length === 2 && ['pass', 'manual'].includes(verdict.verdict)
+            && Array.isArray(verdict.reasons) && verdict.reasons.every(reason => typeof reason === 'string');
+          if (validVerdict && verdict.verdict === 'pass') {
+            delete version.modelFiles;
+            publish(name, version.id, 'auto');
+            return { auto: true, version, row };
+          }
+          const reasons = validVerdict && verdict.verdict === 'manual' ? verdict.reasons : [];
+          const clean = reasons.slice(0, 3).map(reason => String(reason)
+            .replace(/[\r\n\[\]()*_~`\\<>#!|{}]/g, '').trim().slice(0, 60)).filter(Boolean);
+          const label = validVerdict && verdict.verdict === 'manual'
+            ? `模型审核发现可疑内容：${clean.join('；')}`
+            : '模型审核没有结论，需要人工审核';
+          version.manualReasons = [...(version.manualReasons || []), { rule: 'model-review', label }];
+          delete version.modelFiles;
+          save();
+          return { auto: false, version, row };
+        });
+        outcome.auto = finalized.auto;
+        outcome.version = finalized.version || outcome.version;
+        outcome.row = finalized.row || outcome.row;
+      }
       if (outcome.notify) {
         if (outcome.auto) {
           await sendAuthor(name, outcome.version.id);
