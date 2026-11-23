@@ -62,30 +62,51 @@ function destinationHost(value) {
 
 function commandArguments(lineText) {
   const tokens = [];
-  for (let index = 0; index < lineText.length;) {
-    if (/\s/.test(lineText[index])) {
-      index++;
+  let token = '';
+  let quote = '';
+  const pushToken = () => {
+    if (token) tokens.push(token);
+    token = '';
+  };
+  for (let index = 0; index < lineText.length; index++) {
+    const character = lineText[index];
+    if (quote) {
+      if (quote === '"' && character === '\\' && index + 1 < lineText.length) {
+        token += character + lineText[++index];
+        continue;
+      }
+      if (character === quote) quote = '';
+      else token += character;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      pushToken();
       continue;
     }
     if (lineText.startsWith('&&', index) || lineText.startsWith('||', index)) {
+      pushToken();
       tokens.push(lineText.slice(index, index + 2));
-      index += 2;
+      index++;
       continue;
     }
     if (lineText.startsWith('$(', index)) {
+      pushToken();
       tokens.push('$(');
-      index += 2;
+      index++;
       continue;
     }
-    if ('|;&`'.includes(lineText[index])) {
-      tokens.push(lineText[index++]);
+    if ('|;&`'.includes(character)) {
+      pushToken();
+      tokens.push(character);
       continue;
     }
-    const start = index;
-    while (index < lineText.length && !/\s/.test(lineText[index])
-      && !'|;&`'.includes(lineText[index]) && !lineText.startsWith('$(', index)) index++;
-    tokens.push(lineText.slice(start, index));
+    token += character;
   }
+  pushToken();
   return tokens;
 }
 
@@ -282,14 +303,28 @@ function changedFiles(stateDir, name, live, files) {
     .map(file => file.path);
 }
 
-function documentationFile(file) {
-  return /\.md$/i.test(file)
-    || /\.(?:png|jpe?g|gif|webp)$/i.test(file);
+const bitmapExtensions = /\.(?:png|jpe?g|gif|webp)$/i;
+const binaryExtensions = /\.(?:bmp|ico|tiff?|avif|pdf|zip|gz|tar|7z|jar|exe|dll|so)$/i;
+
+function bitmapFile(file, content) {
+  if (!bitmapExtensions.test(file)) return { image: false, valid: false };
+  const starts = (bytes, offset = 0) => content.length >= offset + bytes.length
+    && content.subarray(offset, offset + bytes.length).equals(Buffer.from(bytes));
+  const valid = starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    || starts([0xff, 0xd8, 0xff])
+    || starts([0x47, 0x49, 0x46, 0x38, 0x37, 0x61])
+    || starts([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+    || starts([0x52, 0x49, 0x46, 0x46]) && starts([0x57, 0x45, 0x42, 0x50], 8);
+  return { image: true, valid };
 }
 
 function textFile(file, content) {
-  return !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?|avif|pdf|zip|gz|tar|7z|jar|exe|dll|so)$/i.test(file)
-    && !content.includes(0);
+  const bitmap = bitmapFile(file, content);
+  return !bitmap.valid && !binaryExtensions.test(file);
+}
+
+function documentationFile(file) {
+  return /\.md$/i.test(file.path) || bitmapFile(file.path, file.content).valid;
 }
 
 export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [], displayName = '', trustedDomains = []) {
@@ -323,15 +358,18 @@ export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [],
     size += content.length;
     if (size > 10 * 1024 * 1024) throw fail(413, '分享的技能总计不能超过 10 MB。');
     let rows = [];
+    const bitmap = bitmapFile(file.path, content);
+    if (bitmap.image && !bitmap.valid) rows.push(finding(file.path, 1, 'invalid-image', '图片文件内容不是图片，需要人工审核', 'manual'));
     const scannable = textFile(file.path, content);
     if (scannable) scanBytes += content.length;
+    if (scannable && content.includes(0)) rows.push(finding(file.path, 1, 'binary-bytes', '文件含二进制字节，需要人工审核', 'manual'));
     if (!scannable) {
-      rows = [];
+      // Valid bitmaps are intentionally opaque; invalid image files retain their finding above.
     } else if (scanBytes > MAX_SCAN_BYTES) {
       if (!scanBudgetExceeded) rows.push(finding(file.path, 1, 'scan-budget', '内容过多，需要人工审核', 'manual'));
       scanBudgetExceeded = true;
     } else {
-      rows = scanContent(content.toString('utf8'), file.path, trustedDomains);
+      rows.push(...scanContent(content.toString('utf8').replaceAll('\0', ''), file.path, trustedDomains));
     }
     findings.push(...rows);
     if (rows.some(item => item.rule === 'internal-path')) warnings.add('含内部地址或本机路径，请核对是否已换成占位说明。');
@@ -723,8 +761,10 @@ export function createSharedSkillStore({
         if (changedScripts) {
           manualReasons.push({ rule: 'scripts-changed', label: '脚本有改动，需要人工审核' });
         }
-        if (currentLive && changed.some(file => !documentationFile(file)
-          && !scriptFile(checked.files.find(item => item.path === file)))) {
+        if (currentLive && changed.some(file => {
+          const current = checked.files.find(item => item.path === file);
+          return current && !documentationFile(current) && !scriptFile(current);
+        })) {
           manualReasons.push({ rule: 'files-changed', label: '有非文档文件改动，需要人工审核' });
         }
         manualReasons.push(...checked.findings.filter(item => item.level === 'manual'));

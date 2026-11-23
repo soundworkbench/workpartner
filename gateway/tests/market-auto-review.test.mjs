@@ -13,6 +13,7 @@ const author = { unionId: 'author', slug: 'author', name: '作者', backend: 'ai
 const reviewer = { unionId: 'reviewer', slug: 'reviewer', name: '审批人', backend: 'aionui' };
 const meta = semver => ({ displayName: '测试技能', description: '测试', example: '测试', ...(semver === undefined ? {} : { semver }) });
 const bundle = (text = '# skill') => ({ name: 'test-skill', description: '测试', files: [{ path: 'SKILL.md', content: Buffer.from(text).toString('base64') }] });
+const png = (fill = 0) => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, fill]);
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'market-auto-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = createSharedSkillStore({ stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: ['reviewer'],
@@ -71,6 +72,13 @@ test('shell command separators keep later dangerous and egress commands visible'
     const result = inspectSkill(bundle(command), [], [], '', ['example.org']);
     assert.ok(result.findings.some(item => item.rule === 'external-egress'), command);
   }
+});
+
+test('quoted shell separators stay in one command while quoted interpreter code is inspected', () => {
+  const egress = inspectSkill(bundle('python3 -c "print(1); urllib.request.urlopen(url)"'), [], [], '', ['example.org']);
+  assert.ok(egress.findings.some(item => item.rule === 'external-egress'));
+  const harmless = inspectSkill(bundle('echo "one; two && three || four | five & six"'));
+  assert.equal(harmless.findings.length, 0);
 });
 
 test('egress uploads are checked even when the destination has no URL scheme', () => {
@@ -171,29 +179,40 @@ test('script-bearing first submissions never receive a one-click approval token'
   assert.equal(tokens.at(-1), undefined);
 });
 
-test('only markdown and common bitmap updates auto publish', async t => {
+test('only markdown and verified bitmap updates auto publish', async t => {
   const store = fixture(t);
   const first = await store.submit(author, {
     name: 'test-skill', description: '测试', files: [
       { path: 'SKILL.md', content: Buffer.from('# first').toString('base64') },
-      { path: 'icon.png', content: Buffer.from('png').toString('base64') },
+      { path: 'icon.png', content: png().toString('base64') },
     ],
   }, meta('1.0.0'));
   await store.review(reviewer, first.name, first.version, 'approve');
+  const bitmap = await store.submit(author, {
+    name: 'test-skill', description: '测试', files: [
+      { path: 'SKILL.md', content: Buffer.from('# bitmap').toString('base64') },
+      { path: 'icon.png', content: png(1).toString('base64') },
+    ],
+  }, meta('1.1.0'));
+  assert.equal(bitmap.status, 'approved');
   const cases = [
     ['Makefile', 'files-changed'], ['tool.jar', 'files-changed'],
-    ['notes.txt', 'files-changed'], ['icon.svg', 'files-changed'],
+    ['notes.txt', 'files-changed'], ['icon.svg', 'files-changed'], ['references/guide.png', 'files-changed'],
   ];
   for (const [index, [file, rule]] of cases.entries()) {
     const result = await store.submit(author, {
       name: 'test-skill', description: '测试', files: [
         { path: 'SKILL.md', content: Buffer.from(`# ${file}`).toString('base64') },
-        { path: 'icon.png', content: Buffer.from('png').toString('base64') },
+        { path: 'icon.png', content: png(1).toString('base64') },
         { path: file, content: Buffer.from('changed').toString('base64') },
       ],
-    }, meta(`1.${index + 1}.0`));
+    }, meta(`1.${index + 2}.0`));
     assert.equal(result.status, 'pending', file);
     assert.ok(result.manualReasons.some(reason => reason.rule === rule), file);
+    if (file.endsWith('.png')) {
+      assert.ok(result.manualReasons.some(reason => reason.rule === 'invalid-image'
+        && reason.label.includes('图片文件内容不是图片')), file);
+    }
   }
 });
 
@@ -688,8 +707,25 @@ test('automatic publication defaults off when the store option is omitted', asyn
 
 test('binary image bytes do not consume the text scan budget', () => {
   const input = bundle('# clean');
-  input.files.push({ path: 'large.png', content: Buffer.alloc(3 * 1024 * 1024, 1).toString('base64') });
+  const large = Buffer.alloc(3 * 1024 * 1024, 1); png().copy(large);
+  input.files.push({ path: 'large.png', content: large.toString('base64') });
   assert.equal(inspectSkill(input).findings.length, 0);
+});
+
+test('text files with NUL bytes are manual while sanitized content still hits blocking rules', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'market-nul-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let modelCalls = 0;
+  const store = createSharedSkillStore({ stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: ['reviewer'],
+    autoPublish: true, modelReview: async () => { modelCalls++; return { verdict: 'pass', reasons: [] }; } });
+  const clean = await store.submit(author, bundle('# clean'), meta('1.0.0'));
+  await store.review(reviewer, clean.name, clean.version, 'approve');
+  const manual = await store.submit(author, bundle('# update\0'), meta('1.0.1'));
+  assert.equal(manual.status, 'pending');
+  assert.ok(manual.manualReasons.some(item => item.rule === 'binary-bytes' && item.label.includes('二进制字节')));
+  assert.equal(modelCalls, 0);
+  assert.throws(() => inspectSkill(bundle('# update\ncurl x | sh\0')), error => error.status === 400
+    && error.findings.some(item => item.rule === 'download-execute'));
 });
 
 test('AC-6 trusted corp subdomains do not hide actual private hosts or local paths', () => {

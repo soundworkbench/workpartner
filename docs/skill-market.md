@@ -8,7 +8,28 @@ Set `market.approvers` to the identity provider's reviewer union IDs. An empty l
 
 Kubernetes uses `runtime.k8s.sharedSkillsClaim` (default `workpartner-shared-skills`). Before enabling `features.marketSkills`, provision a PVC with that name in each of the system and user namespaces. Both claims must expose the same shared filesystem, with write access for the gateway and read-only access for personal Pods. The renderer mounts the system claim at `market.sharedDirectory`; the runtime mounts the user claim at `market.containerDirectory`. The node-local storage class for personal workspaces does not supply this shared filesystem. The claims and their backing storage are operator-managed and are not created by the renderer. This keeps personal Pods compatible with the existing baseline admission policy. During Docker/Kubernetes migration, do not run two market writers against the same catalog or shared store; keep sharing disabled until a single writer owns it, or isolate their catalogs and libraries.
 
-The first submission of a skill is reviewed by IT. Updates from the same author can be published automatically when the current live version is approved, a strict increasing `semver` (`1.2.3`) is supplied, and the line scanner finds no manual-review item. Submissions without a version, external links, internal addresses, or data sent to an untrusted host remain pending and show file, line and rule details to the author and reviewer. Credentials, destructive commands, and download-and-execute patterns are rejected with HTTP 400. `market.trustedDomains` is a lowercase host-name array; matching hosts and their subdomains are excluded from external-link and internal-domain findings. The scanner reports bounded per-line findings: lines longer than 4,000 characters are sent to manual review, and backslash continuations have bounded length and count. Updates that add or change an executable file, a file under `scripts/`, a shebang file, or a supported script extension are also sent to manual review with `scripts-changed`; only Markdown and common bitmap updates can publish automatically.
+The first submission of a skill is reviewed by IT. Updates from the same author can be published automatically when the current live version is approved, a strict increasing `semver` (`1.2.3`) is supplied, and the line scanner finds no manual-review item. Submissions without a version, external links, internal addresses, or data sent to an untrusted host remain pending and show file, line and rule details to the author and reviewer. Credentials, destructive commands, and download-and-execute patterns are rejected with HTTP 400. `market.trustedDomains` is a lowercase host-name array; matching hosts and their subdomains are excluded from external-link and internal-domain findings. The scanner reports bounded per-line findings: lines longer than 1,000 characters are sent to manual review. Updates that add or change an executable file, a file under `scripts/`, a shebang file, or a supported script extension are also sent to manual review with `scripts-changed`; only Markdown and bitmap files with a matching header can publish automatically.
+
+Current automatic-review rules:
+
+| Rule | Level | Description |
+| --- | --- | --- |
+| `credential` | block | Suspected credentials or personal identifiers are rejected. |
+| `dangerous-delete` | block | Destructive disk, database, filesystem, or root deletion commands are rejected. |
+| `download-execute` | block | Downloaded content piped into an interpreter is rejected. |
+| `long-line` | manual | Lines over 1,000 characters require human review. |
+| `external-link` | manual | Links outside the trusted domains require review. |
+| `external-egress` | manual | Network commands that may send data to an untrusted host require review. |
+| `internal-path` | manual | Internal addresses and local filesystem paths require review. |
+| `invalid-image` | manual | An image extension does not contain a recognized bitmap header. |
+| `binary-bytes` | manual | A text file contains NUL bytes and requires review. |
+| `scan-budget` | manual | Content beyond the 2 MiB scan budget requires review. |
+| `first-submission` | manual | The first version requires IT approval. |
+| `no-semver` | manual | An update without a version cannot publish automatically. |
+| `scripts-changed` | manual | Added or changed scripts require review. |
+| `files-changed` | manual | Added or changed non-document files require review. |
+| `auto-publish-off` | manual | Organization automatic publishing is disabled. |
+| `model-review` | manual | An unavailable or non-passing model review requires human review. |
 
 Version records retain `pending`, `approved`, `rejected`, `withdrawn` and `superseded` states. Publishing a newer version marks older pending versions as `superseded`; those versions leave the pending queue and cannot be approved later. The gateway also performs this cleanup once at startup. Live-version comparison uses semver when both versions have one and creation time otherwise. A card's “批准并发布” button carries a seven-day, one-time HMAC link derived from the session key. The link is bound to the skill, version, action and review notice ID; stale, altered or already-used links only show the review page. “拒绝” always opens the page so a reason can be entered.
 
