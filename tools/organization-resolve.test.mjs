@@ -77,6 +77,7 @@ test('organization validates lowercase market trusted domains', t => {
 });
 
 test('organization accepts market.autoPublish as a boolean', t => {
+  assert.equal(resolveOrganization(fixture(t)).market.autoPublish, false);
   assert.equal(resolveOrganization(fixture(t, { market: { autoPublish: false } })).market.autoPublish, false);
   for (const value of [null, 0, 1, 'true', [], {}]) {
     assert.throws(() => resolveOrganization(fixture(t, { market: { autoPublish: value } })), /market\.autoPublish/);

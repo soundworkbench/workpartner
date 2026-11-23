@@ -23,7 +23,6 @@ const semver = {
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_LINE = 1000;
 const MAX_SCAN_BYTES = 2 * 1024 * 1024;
-const MAX_CONTINUATIONS = 32;
 
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
 const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({
@@ -45,11 +44,8 @@ function logicalLines(source) {
   for (let index = 0; index < physical.length; index++) {
     const firstLine = index + 1;
     let value = physical[index];
-    let continuations = 0;
-    while (value.length <= MAX_LINE && index + 1 < physical.length
-      && continuations < MAX_CONTINUATIONS && /\\\s*$/.test(value)) {
+    while (value.length <= MAX_LINE && index + 1 < physical.length && /\\\s*$/.test(value)) {
       value = value.replace(/\\\s*$/, '') + physical[++index];
-      continuations++;
     }
     result.push({ line: firstLine, text: value });
   }
@@ -64,6 +60,52 @@ function destinationHost(value) {
   }
 }
 
+function commandArguments(lineText) {
+  const tokens = [];
+  for (let index = 0; index < lineText.length;) {
+    if (/\s/.test(lineText[index])) {
+      index++;
+      continue;
+    }
+    if (lineText.startsWith('&&', index) || lineText.startsWith('||', index)) {
+      tokens.push(lineText.slice(index, index + 2));
+      index += 2;
+      continue;
+    }
+    if (lineText.startsWith('$(', index)) {
+      tokens.push('$(');
+      index += 2;
+      continue;
+    }
+    if ('|;&`'.includes(lineText[index])) {
+      tokens.push(lineText[index++]);
+      continue;
+    }
+    const start = index;
+    while (index < lineText.length && !/\s/.test(lineText[index])
+      && !'|;&`'.includes(lineText[index]) && !lineText.startsWith('$(', index)) index++;
+    tokens.push(lineText.slice(start, index));
+  }
+  return tokens;
+}
+
+const networkCommands = new Set(['curl', 'wget', 'scp', 'rsync', 'nc', 'ncat', 'netcat', 'ssh', 'sftp', 'dig', 'nslookup', 'telnet', 'ftp']);
+const interpreterCommands = new Set(['python', 'python3', 'node', 'perl', 'ruby']);
+
+function positionalArgs(args, options = []) {
+  const values = [];
+  const optionSet = new Set(options);
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (optionSet.has(arg)) {
+      index++;
+    } else if (!arg.startsWith('-')) {
+      values.push(arg);
+    }
+  }
+  return values;
+}
+
 function externalEgress({ name, args }, domains) {
   if (['scp', 'rsync'].includes(name)) {
     return args.some(arg => {
@@ -71,37 +113,31 @@ function externalEgress({ name, args }, domains) {
       return remote && !isTrusted(remote[1].toLowerCase().replace(/\.$/, ''), domains);
     });
   }
-  if (['nc', 'ncat'].includes(name)) {
-    const hosts = args.filter(arg => !arg.startsWith('-') && !/^\d+$/.test(arg));
+  if (['nc', 'ncat', 'netcat'].includes(name)) {
+    const hosts = positionalArgs(args, ['-p', '--source-port', '-s', '--source', '-w', '--wait', '-i', '--interval'])
+      .filter(arg => !/^\d+$/.test(arg));
     return !hosts.length || hosts.some(host => !isTrusted(destinationHost(host), domains));
   }
-  if (!['curl', 'wget'].includes(name)) return false;
-  let uploads = false;
-  const destinations = [];
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index];
-    const option = arg.split('=', 1)[0];
-    const dataOption = name === 'curl'
-      ? /^(?:-[dTF]|--data(?:-[A-Za-z0-9-]+)?|--upload-file|--form)$/.test(option)
-      : /^--(?:post-data|post-file|body-[A-Za-z0-9-]+)$/.test(option);
-    if (dataOption || (name === 'curl' && /^-[dTF].+/.test(arg))) {
-      uploads = true;
-      if (dataOption && !arg.includes('=')) index++;
-    } else if (name === 'curl' && (arg === '-X' || arg === '--request')) {
-      const method = args[++index] || '';
-      uploads ||= /^(?:POST|PUT)$/i.test(method);
-    } else if (name === 'curl' && /^-X(?:POST|PUT)$/i.test(arg)) {
-      uploads = true;
-    } else if (/^(?:-o|-O|-H|-u|-A|-e|--output|--header|--user|--user-agent|--referer)$/.test(option)) {
-      // curl -O takes no value; the other options carry local data, not destinations.
-      if (!(name === 'curl' && arg === '-O') && !arg.includes('=')) index++;
-    } else if (option === '--url') {
-      destinations.push(arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : args[++index] || '');
-    } else if (!arg.startsWith('-')) {
-      destinations.push(arg);
-    }
+  if (['ssh', 'sftp', 'telnet', 'ftp', 'dig', 'nslookup'].includes(name)) {
+    const hosts = positionalArgs(args, ['-p', '-P', '-i', '-o', '-b', '-c', '-f', '-t', '-x', '--port', '--server', '--source', '--class', '--type', '--query', '--file']);
+    return !hosts.length || hosts.some(host => !isTrusted(destinationHost(host), domains));
   }
-  return uploads && (!destinations.length || destinations.some(value => !isTrusted(destinationHost(value), domains)));
+  if (['curl', 'wget'].includes(name)) {
+    const destinations = [];
+    const valueOptions = name === 'curl'
+      ? ['-d', '--data', '--data-ascii', '--data-binary', '--data-raw', '--data-urlencode', '-F', '--form', '-T', '--upload-file', '-H', '--header', '-u', '--user', '-A', '--user-agent', '-e', '--referer', '-o', '--output', '-x', '--proxy', '-X', '--request']
+      : ['--post-data', '--post-file', '--body-data', '--body-file', '-O', '-o', '--output-document', '-e', '--execute'];
+    const optionSet = new Set(valueOptions);
+    for (let index = 0; index < args.length; index++) {
+      const arg = args[index];
+      const option = arg.split('=', 1)[0];
+      if (optionSet.has(option) && !arg.includes('=')) index++;
+      else if (option === '--url') destinations.push(arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : args[++index] || '');
+      else if (!arg.startsWith('-')) destinations.push(arg);
+    }
+    return !destinations.length || destinations.some(value => !isTrusted(destinationHost(value), domains));
+  }
+  return false;
 }
 
 function scanContent(source, file = 'SKILL.md', domains = []) {
@@ -120,10 +156,10 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
     // Tokenize once; each argument belongs to at most one command, even on repeated-command lines.
     const commands = [];
     let current;
-    for (const match of lineText.matchAll(/[^\s|;]+|[|;]/g)) {
-      const token = match[0].replace(/^["']|["']$/g, '');
-      const command = /(?:^|[/(])(curl|wget|dd|scp|rsync|rm|nc|ncat)$/i.exec(token);
-      if (/^[|;]$/.test(token)) current = undefined;
+    for (const rawToken of commandArguments(lineText)) {
+      const token = rawToken.replace(/^["']|["']$/g, '');
+      const command = /(?:^|[/(])(curl|wget|dd|scp|rsync|rm|nc|ncat|netcat|ssh|sftp|dig|nslookup|telnet|ftp|python|python3|node|perl|ruby)$/i.exec(token);
+      if (/^(?:&&|\|\||[|;&]|\$\(|`)$/.test(token)) current = undefined;
       else if (current) current.args.push(token);
       else if (command) {
         current = { name: command[1].toLowerCase(), args: [] };
@@ -165,7 +201,9 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
         results.push(finding(file, line, `external-link:${label}`, `外部链接 ${label}`, 'manual'));
       }
     }
-    if (commands.some(command => externalEgress(command, domainList))) {
+    if (commands.some(command => externalEgress(command, domainList)
+      || (interpreterCommands.has(command.name) && command.args.includes('-c')
+        && /(?:http|socket|urllib|requests|fetch)/i.test(command.args.join(' '))))) {
       results.push(finding(file, line, 'external-egress', '向外部发送数据', 'manual'));
     }
 
@@ -249,6 +287,11 @@ function documentationFile(file) {
     || /\.(?:png|jpe?g|gif|webp)$/i.test(file);
 }
 
+function textFile(file, content) {
+  return !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?|avif|pdf|zip|gz|tar|7z|jar|exe|dll|so)$/i.test(file)
+    && !content.includes(0);
+}
+
 export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [], displayName = '', trustedDomains = []) {
   if (!bundle || typeof bundle.name !== 'string' || !NAME.test(bundle.name) || protectedNames.includes(bundle.name)) {
     throw fail(400, '技能名称无效或与预装技能重名。');
@@ -279,9 +322,12 @@ export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [],
     const content = Buffer.from(file.content, 'base64');
     size += content.length;
     if (size > 10 * 1024 * 1024) throw fail(413, '分享的技能总计不能超过 10 MB。');
-    scanBytes += content.length;
     let rows = [];
-    if (scanBytes > MAX_SCAN_BYTES) {
+    const scannable = textFile(file.path, content);
+    if (scannable) scanBytes += content.length;
+    if (!scannable) {
+      rows = [];
+    } else if (scanBytes > MAX_SCAN_BYTES) {
       if (!scanBudgetExceeded) rows.push(finding(file.path, 1, 'scan-budget', '内容过多，需要人工审核', 'manual'));
       scanBudgetExceeded = true;
     } else {
@@ -313,7 +359,7 @@ export function createSharedSkillStore({
   createReviewToken,
   verifyReviewToken,
   modelReview,
-  autoPublish = true,
+  autoPublish = false,
 }) {
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   for (const directory of [sharedDir, path.join(sharedDir, 'live'), path.join(sharedDir, 'releases')]) {

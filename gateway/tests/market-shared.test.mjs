@@ -25,7 +25,7 @@ function fixture(t, extra = {}) {
   fs.mkdirSync(path.join(root, 'builtin')); fs.mkdirSync(path.join(root, 'uploads'));
   fs.writeFileSync(path.join(root, 'translations.json'), '{}');
   const options = { stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: [it.unionId], protectedNames: ['share-skill'],
-    modelReview: async () => ({ verdict: 'pass', reasons: [] }), ...extra };
+    autoPublish: true, modelReview: async () => ({ verdict: 'pass', reasons: [] }), ...extra };
   const store = createSharedSkillStore(options);
   const execute = async (user, action, data = {}) => {
     const result = spawnSync('python3', [new URL('./market-worker.py', import.meta.url).pathname, root, user.slug, action, JSON.stringify(data)], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
