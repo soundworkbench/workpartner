@@ -75,12 +75,22 @@ const createReviewToken = (name, id, action, reviewNoticeId) => {
 };
 const verifyReviewToken = (token, name, id, action, reviewNoticeId) => {
   if (typeof token !== 'string') return null;
-  const [encoded, signature] = token.split('.');
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, signature] = parts;
   if (!encoded || !signature) return null;
-  let exp; try { exp = Number(Buffer.from(encoded, 'base64url').toString('utf8')); } catch { return null; }
+  let exp;
+  try {
+    exp = Number(Buffer.from(encoded, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
   if (!Number.isSafeInteger(exp) || exp < Math.floor(Date.now() / 1000)) return null;
-  const expected = marketReviewSignature(['market-review.v1', name, id, action, reviewNoticeId, String(exp)]);
-  const left = Buffer.from(signature), right = Buffer.from(expected);
+  const expected = marketReviewSignature([
+    'market-review.v1', name, id, action, reviewNoticeId, String(exp),
+  ]);
+  const left = Buffer.from(signature);
+  const right = Buffer.from(expected);
   if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
   return { name, id, action, noticeId: reviewNoticeId, exp };
 };
