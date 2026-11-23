@@ -30,7 +30,9 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[character]));
 const text = (value, limit) => typeof value === 'string' && value.trim() && value.length <= limit;
-const trusted = domains => (Array.isArray(domains) ? domains : []).map(String).map(value => value.toLowerCase());
+const trusted = domains => (Array.isArray(domains) ? domains : [])
+  .map(String)
+  .map(value => value.toLowerCase().replace(/\.$/, ''));
 const isTrusted = (host, domains) => {
   const lower = String(host || '').toLowerCase();
   return domains.some(domain => lower === domain || lower.endsWith(`.${domain}`));
@@ -67,10 +69,14 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
       results.push(finding(file, line, 'credential', '疑似密钥、口令或个人证件信息', 'block'));
     }
 
-    const target = "(?:^|\\s)(?:/|/\\*|~/?(?:\\*|$)|\\$HOME|[\"']\\$HOME[\"']|\\$\\{HOME\\})(?:\\s|$)";
-    const recursive = /(?:-rf|-fr|-r\s+-f|-f\s+-r|--recursive[^\n]{0,4000}--force|--force[^\n]{0,4000}--recursive)/;
-    const dangerousDelete = new RegExp(`\\brm\\b[^\\n]{0,4000}(?:--no-preserve-root|${target})`, 'u').test(lineText)
-      && recursive.test(lineText);
+    const rmCommand = lineText.match(/\brm\b[^\n]{0,4000}/i)?.[0];
+    const recursive = rmCommand && (/(?:^|\s)-[A-Za-z0-9]{0,32}r[A-Za-z0-9]{0,32}(?=\s|$)/i.test(rmCommand)
+      || /(?:^|\s)--recursive(?=\s|$)/i.test(rmCommand));
+    const force = rmCommand && (/(?:^|\s)-[A-Za-z0-9]{0,32}f[A-Za-z0-9]{0,32}(?=\s|$)/i.test(rmCommand)
+      || /(?:^|\s)--force(?=\s|$)/i.test(rmCommand));
+    const target = /(?:^|\s)(?:\/(?:\*)?|~(?:\/(?:\*)?)?|\$HOME(?:\/(?:\*)?)?|\$\{HOME\}(?:\/(?:\*)?)?|["'](?:\/(?:\*)?|~(?:\/(?:\*)?)?|\$HOME(?:\/(?:\*)?)?|\$\{HOME\}(?:\/(?:\*)?)?)["'])(?=\s|$)/;
+    const dangerousDelete = Boolean(rmCommand && recursive && force
+      && (/(?:^|\s)--no-preserve-root(?=\s|$)/.test(rmCommand) || target.test(rmCommand)));
     const dangerous = dangerousDelete
       || /\bmkfs(?:\.[A-Za-z0-9_-]+)?\b/i.test(lineText)
       || /\bdd\b[^\n]{0,4000}\bof\s*=\s*\/dev\//i.test(lineText)
@@ -82,16 +88,24 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
       || /(?:bash|sh)\s+-c\s+["']?\$\(\s*(?:curl|wget)\b/i.test(lineText);
     if (downloadExecute) results.push(finding(file, line, 'download-execute', '下载后直接执行', 'block'));
 
-    const urls = [...lineText.matchAll(/https?:\/\/([^\s/\])'">]+)/gi)];
-    for (const match of urls) {
-      const host = match[1].toLowerCase().replace(/:\d+$/, '');
-      if (!isTrusted(host, domainList)) {
-        results.push(finding(file, line, `external-link:${host}`, `外部链接 ${host}`, 'manual'));
+    const urls = [...lineText.matchAll(/https?:\/\/[^\s<>"']+/gi)].map(match => match[0]);
+    const hosts = [];
+    for (const candidate of urls) {
+      let host = '';
+      try {
+        host = new URL(candidate).hostname.toLowerCase().replace(/\.$/, '');
+      } catch {
+        host = '';
       }
-      const egress = /(?:\bcurl\b[^\n]{0,4000}(?:\s(?:-d|--data(?:-[^\s]+)?|-T|--upload-file|-F|--form)(?:\s|=)|\s-X\s*(?:POST|PUT)\b)|\bwget\b[^\n]{0,4000}(?:--post-data|--post-file|--body-)|\b(?:nc|ncat)\b|\b(?:scp|rsync)\b[^\n]{0,4000}\s[^\s:]+:[^\s]+)/i.test(lineText);
-      if (egress && !isTrusted(host, domainList)) {
-        results.push(finding(file, line, 'external-egress', '向外部发送数据', 'manual'));
+      hosts.push(host);
+      if (!host || !isTrusted(host, domainList)) {
+        const label = host || candidate.slice(0, 120);
+        results.push(finding(file, line, `external-link:${label}`, `外部链接 ${label}`, 'manual'));
       }
+    }
+    const egress = /(?:\bcurl\b[^\n]{0,4000}(?:\s(?:-d|-T|-F)(?=\s|=|@)|\s--data(?:-[A-Za-z0-9-]+)?(?=\s|=|@)|\s(?:--upload-file|--form)(?=\s|=|@)|\s-X\s*(?:POST|PUT)\b)|\bwget\b[^\n]{0,4000}(?:--post-data|--post-file|--body-)|\b(?:nc|ncat)\b|\b(?:scp|rsync)\b[^\n]{0,4000}\s[^\s:]+:[^\s]+)/i.test(lineText);
+    if (egress && (!hosts.length || hosts.some(host => !isTrusted(host, domainList)))) {
+      results.push(finding(file, line, 'external-egress', '向外部发送数据', 'manual'));
     }
     const remote = lineText.match(/\b(?:nc|ncat)\s+(?:[^\s]+\s+)?([A-Za-z0-9.-]+)(?::\d+)?\b/i)?.[1]
       || lineText.match(/\b(?:scp|rsync)\b[^\n]{0,4000}\s([A-Za-z0-9.-]+):[^\s]+/i)?.[1];
@@ -103,9 +117,7 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
       || /https?:\/\/[^\s/]+\.(?:internal|local|corp)(?:[./:\s]|$)/i.test(lineText)
       || /(?:\/Users\/|\/home\/|\/data\/|\/srv\/|[A-Za-z]:\\)/.test(lineText);
     if (internal) {
-      const hosts = [...lineText.matchAll(/https?:\/\/([^\s/\])'">]+)/gi)]
-        .map(match => match[1].toLowerCase().replace(/:\d+$/, ''));
-      if (!hosts.length || hosts.some(host => !isTrusted(host, domainList))) {
+      if (!hosts.length || hosts.some(host => !host || !isTrusted(host, domainList))) {
         results.push(finding(file, line, 'internal-path', '内部地址或本机路径', 'manual'));
       }
     }
@@ -131,8 +143,7 @@ function scriptManifest(files) {
   }));
 }
 
-function storedScriptManifest(stateDir, name, version) {
-  if (Array.isArray(version.scriptFiles)) return version.scriptFiles;
+function storedFileManifest(stateDir, name, version) {
   const root = path.join(stateDir, 'submissions', name, version.id);
   if (!fs.existsSync(root)) return [];
   const files = [];
@@ -144,9 +155,12 @@ function storedScriptManifest(stateDir, name, version) {
         const relative = path.relative(root, filename);
         const content = fs.readFileSync(filename);
         const stat = fs.statSync(filename);
-        if (scriptFile({ path: relative, content, executable: Boolean(stat.mode & 0o111) })) {
-          files.push({ path: relative, digest: crypto.createHash('sha256').update(content).digest('hex') });
-        }
+        files.push({
+          path: relative,
+          digest: crypto.createHash('sha256').update(content).digest('hex'),
+          executable: Boolean(stat.mode & 0o111),
+          shebang: content.toString('utf8').startsWith('#!'),
+        });
       }
     }
   };
@@ -154,10 +168,33 @@ function storedScriptManifest(stateDir, name, version) {
   return files;
 }
 
+function storedScriptManifest(stateDir, name, version) {
+  if (Array.isArray(version.scriptFiles)) return version.scriptFiles;
+  return storedFileManifest(stateDir, name, version)
+    .filter(file => scriptFile({
+      path: file.path,
+      content: file.shebang ? Buffer.from('#!') : Buffer.alloc(0),
+      executable: file.executable,
+    }));
+}
+
 function scriptsChanged(stateDir, name, live, files) {
   if (!live) return false;
   const previous = new Map(storedScriptManifest(stateDir, name, live).map(item => [item.path, item.digest]));
   return scriptManifest(files).some(item => !previous.has(item.path) || previous.get(item.path) !== item.digest);
+}
+
+function changedFiles(stateDir, name, live, files) {
+  if (!live) return files.map(file => file.path);
+  const previous = new Map(storedFileManifest(stateDir, name, live).map(item => [item.path, item.digest]));
+  return files.filter(file => !previous.has(file.path)
+    || previous.get(file.path) !== crypto.createHash('sha256').update(file.content).digest('hex'))
+    .map(file => file.path);
+}
+
+function documentationFile(file) {
+  return /\.md$/i.test(file)
+    || /\.(?:png|jpe?g|gif|webp)$/i.test(file);
 }
 
 export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [], displayName = '', trustedDomains = []) {
@@ -211,6 +248,7 @@ export function createSharedSkillStore({
   protectedNames = [],
   trustedDomains = [],
   notify = async () => {},
+  notifyAuto = notify,
   notifyAuthor = async () => {},
   createReviewToken,
   verifyReviewToken,
@@ -353,6 +391,7 @@ export function createSharedSkillStore({
     currentSemver: row.live && Object.hasOwn(row.versions, row.live) ? row.versions[row.live]?.semver || '' : '',
     hasLive: Boolean(row.live),
     autoPublished: version.reviewer === 'auto',
+    changedFiles: version.changedFiles || [],
     manualReasons: version.manualReasons || [],
     findings: version.findings || [],
     supersededBy: version.supersededBy,
@@ -367,7 +406,10 @@ export function createSharedSkillStore({
       version.reviewNoticeId = noticeId;
       delete version.reviewNotice;
       save();
-      const reviewToken = createReviewToken?.(name, id, 'approve', noticeId);
+      const reasons = version.manualReasons || [];
+      const tokenAllowed = reasons.length > 0
+        && reasons.every(reason => ['first-submission', 'no-semver'].includes(reason.rule));
+      const reviewToken = tokenAllowed ? createReviewToken?.(name, id, 'approve', noticeId) : undefined;
       return { noticeId, payload: { ...summary(name, row, version), approvers, reviewToken } };
     });
     if (!request) return;
@@ -385,6 +427,21 @@ export function createSharedSkillStore({
       version.reviewNotice = notice;
       save();
     });
+  }
+
+  async function sendAuto(name, id) {
+    const request = await serial(() => {
+      const row = state.skills[name];
+      if (!row) return null;
+      const version = versionOf(row, id);
+      return { payload: { ...summary(name, row, version), approvers } };
+    });
+    if (!request || !notifyAuto) return;
+    try {
+      await notifyAuto(request.payload);
+    } catch {
+      // Publication remains committed even when a notification transport fails.
+    }
   }
 
   async function sendAuthor(name, id) {
@@ -534,11 +591,17 @@ export function createSharedSkillStore({
         }
         const row = old || { author: user.unionId, authorName: user.name || name, installs: 0, live: null, versions: {} };
         const currentLive = row.live && Object.hasOwn(row.versions, row.live) ? row.versions[row.live] : null;
+        const changed = changedFiles(stateDir, name, currentLive, checked.files);
         const manualReasons = [];
         if (!old || currentLive?.status !== 'approved') manualReasons.push({ rule: 'first-submission', label: '首次分享需人工审批' });
         if (!hasSemver) manualReasons.push({ rule: 'no-semver', label: '未填写版本号' });
-        if (currentLive && scriptsChanged(stateDir, name, currentLive, checked.files)) {
+        const changedScripts = currentLive && scriptsChanged(stateDir, name, currentLive, checked.files);
+        if (changedScripts) {
           manualReasons.push({ rule: 'scripts-changed', label: '脚本有改动，需要人工审核' });
+        }
+        if (currentLive && changed.some(file => !documentationFile(file)
+          && !scriptFile(checked.files.find(item => item.path === file)))) {
+          manualReasons.push({ rule: 'files-changed', label: '有非文档文件改动，需要人工审核' });
         }
         manualReasons.push(...checked.findings.filter(item => item.level === 'manual'));
         const version = {
@@ -552,6 +615,7 @@ export function createSharedSkillStore({
           manualReasons,
           scripts: checked.scripts,
           scriptFiles: checked.scriptFiles,
+          changedFiles: changed,
           status: 'pending',
           createdAt: new Date().toISOString(),
         };
@@ -564,7 +628,10 @@ export function createSharedSkillStore({
         return { row, version, notify: true, auto };
       });
       if (outcome.notify) {
-        if (outcome.auto) await sendAuthor(name, outcome.version.id);
+        if (outcome.auto) {
+          await sendAuthor(name, outcome.version.id);
+          await sendAuto(name, outcome.version.id);
+        }
         else {
           await sendReview(name, outcome.version.id);
           if (outcome.row.live) await sendAuthor(name, outcome.version.id);
@@ -766,7 +833,11 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
         const catalog = store.list(user);
         const info = [...catalog.pending, ...catalog.reviewed].find(item => item.name === name && item.version === id);
         const hint = requested === 'approve' ? '链接已失效或需要确认，请在下方操作' : '';
-        const reasons = [...(info?.manualReasons || []), ...(info?.findings || []).filter(item => item.level === 'manual')]
+        const reasonItems = [...(info?.manualReasons || []), ...(info?.findings || []).filter(item => item.level === 'manual')];
+        const reasons = [...new Map(reasonItems.map(item => [
+          `${item.rule || ''}:${item.file || ''}:${item.line || ''}:${item.label || ''}`,
+          item,
+        ])).values()]
           .map(item => `<li>${esc(item.file ? `${item.file} 第 ${item.line} 行：${item.label}` : `${item.rule}：${item.label}`)}</li>`)
           .join('');
         const live = catalog.company.find(item => item.name === name);
@@ -806,6 +877,7 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
           '<form><label for="reason">拒绝原因</label>',
           `<textarea id="reason" name="reason" maxlength="1000" ${requested === 'reject' ? 'autofocus' : ''}></textarea>`,
           '<button name="action" value="approve">批准</button> <button name="action" value="reject">拒绝</button>',
+          ...(live?.version === id ? [' <button name="action" value="withdraw">下架</button>'] : []),
           '<button name="action" value="resend">重发审批卡片</button></form><p role="status"></p>',
           `${reviewScript}</html>`,
         ].join('');

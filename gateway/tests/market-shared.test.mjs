@@ -333,6 +333,25 @@ test('bot cards address configured reviewers and result notices address only the
   assert.equal(sent[1].receive_id, alice.unionId); assert.match(JSON.parse(sent[1].content).text, /需要更清楚的说明/);
 });
 
+test('automatic publication cards notify reviewers with a bounded file list and withdrawal link', async t => {
+  const f = fixture(t), sent = [];
+  const secret = path.join(f.root, 'auto-app-secret'); fs.writeFileSync(secret, 'fixture-only');
+  const notifier = marketNotifications({ identity: { appId: 'fixture-app', appSecretFile: secret }, server: { publicOrigin: 'https://partner.example' } }, async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (url.includes('/auth/')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'fixture-token' }) };
+    sent.push(body); return { ok: true, json: async () => ({ code: 0 }) };
+  });
+  const changedFiles = Array.from({ length: 22 }, (_, index) => `file-${index}.md`);
+  await notifier.notifyAuto({ name: 'meeting-notes', version: 'version-1', displayName: '会议整理', semver: '1.0.1', author: '作者甲', approvers: [it.unionId], changedFiles });
+  const card = JSON.parse(sent[0].content);
+  assert.equal(card.header.title.content, '技能已自动发布');
+  assert.match(card.elements[0].text.content, /meeting-notes/);
+  assert.match(card.elements[0].text.content, /file-19\.md/);
+  assert.match(card.elements[0].text.content, /等 2 个/);
+  assert.equal(card.elements.at(-1).actions[0].text.content, '查看 / 下架');
+  assert.match(card.elements.at(-1).actions[0].url, /version=version-1/);
+});
+
 
 test('approved releases are readable by workspace users even under a restrictive gateway umask', async t => {
   const previous = process.umask(0o077);

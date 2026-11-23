@@ -35,11 +35,12 @@ export function marketNotifications(organization, fetcher = fetch) {
     ? `文件 ${reason.file} 第 ${reason.line} 行：${reason.label || reason.rule}`
     : reason.label || reason.rule;
   const reasons = row => (row.manualReasons || []).map(reasonText).join('；');
+  const reviewUrl = row => `${organization.server.publicOrigin}/_wp/market/shared/review`
+    + `?name=${encodeURIComponent(row.name)}&version=${encodeURIComponent(row.version)}`;
 
   return {
     async notify(row) {
-      const base = `${organization.server.publicOrigin}/_wp/market/shared/review`
-        + `?name=${encodeURIComponent(row.name)}&version=${encodeURIComponent(row.version)}`;
+      const base = reviewUrl(row);
       const approve = row.reviewToken
         ? `${base}&action=approve&t=${encodeURIComponent(row.reviewToken)}`
         : `${base}&action=approve`;
@@ -93,6 +94,33 @@ export function marketNotifications(organization, fetcher = fetch) {
       };
       const sent = await Promise.allSettled((row.approvers || []).map(id => send(id, 'interactive', card)));
       if (sent.some(result => result.status === 'rejected')) throw new Error('Some approval cards were not delivered');
+    },
+
+    async notifyAuto(row) {
+      const files = row.changedFiles || [];
+      const listed = files.slice(0, 20);
+      const fileText = listed.join('\n') + (files.length > listed.length ? `\n等 ${files.length - listed.length} 个` : '');
+      const version = versionText(row);
+      const content = [
+        `技能名：${row.name || row.displayName}`
+          + (row.name && row.displayName && row.name !== row.displayName ? `（${row.displayName}）` : ''),
+        `版本：${version}`,
+        `作者：${row.author}`,
+        '相对上一版改动的文件：',
+        fileText || '（无文件改动）',
+      ].join('\n');
+      const card = {
+        config: { wide_screen_mode: true },
+        header: { title: { tag: 'plain_text', content: '技能已自动发布' } },
+        elements: [
+          { tag: 'div', text: { tag: 'plain_text', content } },
+          { tag: 'action', actions: [{
+            tag: 'button', type: 'default', text: { tag: 'plain_text', content: '查看 / 下架' }, url: reviewUrl(row),
+          }] },
+        ],
+      };
+      const sent = await Promise.allSettled((row.approvers || []).map(id => send(id, 'interactive', card)));
+      if (sent.some(result => result.status === 'rejected')) throw new Error('Some automatic publication cards were not delivered');
     },
 
     notifyAuthor(row) {
