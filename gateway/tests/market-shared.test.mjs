@@ -24,7 +24,8 @@ function fixture(t, extra = {}) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'builtin')); fs.mkdirSync(path.join(root, 'uploads'));
   fs.writeFileSync(path.join(root, 'translations.json'), '{}');
-  const options = { stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: [it.unionId], protectedNames: ['share-skill'], ...extra };
+  const options = { stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: [it.unionId], protectedNames: ['share-skill'],
+    autoPublish: true, modelReview: async () => ({ verdict: 'pass', reasons: [] }), ...extra };
   const store = createSharedSkillStore(options);
   const execute = async (user, action, data = {}) => {
     const result = spawnSync('python3', [new URL('./market-worker.py', import.meta.url).pathname, root, user.slug, action, JSON.stringify(data)], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
@@ -330,10 +331,29 @@ test('bot cards address configured reviewers and result notices address only the
   await notifier.notify({ ...notice, approvers: [it.unionId] });
   const card = JSON.parse(sent[0].content);
   assert.equal(sent[0].receive_id, it.unionId);
-  assert.deepEqual(card.elements.at(-1).actions.map(action => action.text.content), ['批准', '拒绝']);
+  assert.deepEqual(card.elements.at(-1).actions.map(action => action.text.content), ['批准并发布', '拒绝']);
   assert.ok(card.elements.at(-1).actions.every(action => action.url.startsWith('https://partner.example/')));
   await notifier.notifyAuthor({ ...notice, unionId: alice.unionId, status: 'rejected', reason: '需要更清楚的说明' });
   assert.equal(sent[1].receive_id, alice.unionId); assert.match(JSON.parse(sent[1].content).text, /需要更清楚的说明/);
+});
+
+test('automatic publication cards notify reviewers with a bounded file list and withdrawal link', async t => {
+  const f = fixture(t), sent = [];
+  const secret = path.join(f.root, 'auto-app-secret'); fs.writeFileSync(secret, 'fixture-only');
+  const notifier = marketNotifications({ identity: { appId: 'fixture-app', appSecretFile: secret }, server: { publicOrigin: 'https://partner.example' } }, async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (url.includes('/auth/')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'fixture-token' }) };
+    sent.push(body); return { ok: true, json: async () => ({ code: 0 }) };
+  });
+  const changedFiles = Array.from({ length: 22 }, (_, index) => `file-${index}.md`);
+  await notifier.notifyAuto({ name: 'meeting-notes', version: 'version-1', displayName: '会议整理', semver: '1.0.1', author: '作者甲', approvers: [it.unionId], changedFiles });
+  const card = JSON.parse(sent[0].content);
+  assert.equal(card.header.title.content, '技能已自动发布');
+  assert.match(card.elements[0].text.content, /meeting-notes/);
+  assert.match(card.elements[0].text.content, /file-19\.md/);
+  assert.match(card.elements[0].text.content, /等 2 个/);
+  assert.equal(card.elements.at(-1).actions[0].text.content, '查看 / 下架');
+  assert.match(card.elements.at(-1).actions[0].url, /version=version-1/);
 });
 
 

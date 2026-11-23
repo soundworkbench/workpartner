@@ -169,6 +169,7 @@
     "preview": true
   },
   "market": {
+    "autoPublish": false,
     "approvers": [],
     "reservedPrefixes": [],
     "protectedNames": [
