@@ -24,6 +24,7 @@ class Element {
   close() { for (const callback of this.listeners.close || []) callback({}); }
 }
 const find = (node, className) => node.className === className ? [node] : node.children.flatMap(child => find(child, className));
+const findTag = (node, tagName) => node.tagName === tagName ? [node] : node.children.flatMap(child => findTag(child, tagName));
 
 async function officialCards(locale) {
   let render;
@@ -143,4 +144,94 @@ test('a failed card action shows its error and the next attempt clears it', asyn
     install = find(card, 'wp-skill-action')[0]; install.click();
     assert.equal(find(card, 'wp-skills-error').length, 0);
   } finally { view.dispose(); }
+});
+
+class FormDataMock {
+  constructor(form) {
+    this.values = {};
+    for (const field of findTag(form, 'input')) if (field.name) this.values[field.name] = field.value;
+  }
+  get(name) { return this.values[name]; }
+}
+
+async function submissionView({ locale = 'zh-CN', mine = [], postResult, postStatus = 200, company = [], pending = [], reviewed = [] }) {
+  let render, requestBody;
+  const personal = [{ name: 'meeting-notes', id: 'meeting-notes', shared: false, preinstalled: false, description: '整理会议' }];
+  const market = { submissionsEnabled: true, company, mine, pending, reviewed, isApprover: !!(pending.length || reviewed.length) };
+  const context = {
+    window: { wpMarket: { register(name, callback) { assert.equal(name, 'skills'); render = callback; }, tryExample() {} }, confirm: () => true },
+    AbortController, FormData: FormDataMock, document: { createElement: tag => new Element(tag) },
+    fetch: async (url, options) => {
+      if (url === '/_wp/market/skills' && !options?.method) return Response.json({ skills: personal });
+      if (url === '/_wp/market/shared' && !options?.method) return Response.json(market);
+      if (options?.method === 'POST') {
+        requestBody = JSON.parse(options.body);
+        return Response.json(postResult || { status: 'pending' }, { status: postStatus });
+      }
+      assert.fail(`Unexpected request: ${url}`);
+    },
+  };
+  runInNewContext(readFileSync(new URL('../image/rebrand/overlay/wp-skills.js', import.meta.url), 'utf8'), context);
+  const host = new Element('main'), dispose = render(host, { locale });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return { host, dispose, body: () => requestBody };
+}
+
+test('share dialog defaults semver and sends the entered value', async () => {
+  const first = await submissionView({ mine: [] });
+  try {
+    find(first.host, 'wp-skill-action').find(button => button.textContent === '分享给公司').click();
+    let dialog = find(first.host, 'wp-skill-dialog')[0], fields = findTag(dialog, 'input'), semver = fields.find(field => field.name === 'semver');
+    assert.equal(semver.value, '1.0.0'); assert.equal(semver.required, true); assert.equal(semver.pattern, '\\d+\\.\\d+\\.\\d+');
+    semver.value = '1.2.4'; findTag(dialog, 'form')[0].listeners.submit[0]({ preventDefault() {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(first.body().semver, '1.2.4');
+  } finally { first.dispose(); }
+
+  const update = await submissionView({ mine: [{ name: 'meeting-notes', status: 'approved', semver: '1.2.3', createdAt: '2026-01-01' }] });
+  try {
+    find(update.host, 'wp-skill-action').find(button => button.textContent === '分享给公司').click();
+    const semver = findTag(find(update.host, 'wp-skill-dialog')[0], 'input').find(field => field.name === 'semver');
+    assert.equal(semver.value, '1.2.4');
+  } finally { update.dispose(); }
+});
+
+test('share result explains auto publish, manual review reasons and findings', async () => {
+  const approved = await submissionView({ postResult: { status: 'approved', autoPublished: true, semver: '1.2.4' } });
+  try {
+    find(approved.host, 'wp-skill-action').find(button => button.textContent === '分享给公司').click();
+    const dialog = find(approved.host, 'wp-skill-dialog')[0]; findTag(dialog, 'form')[0].listeners.submit[0]({ preventDefault() {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.match(find(approved.host, 'wp-skills-status')[0].textContent, /已自动审核通过并发布 v1\.2\.4/);
+  } finally { approved.dispose(); }
+
+  const pending = await submissionView({ postResult: { status: 'pending', manualReasons: [{ file: 'SKILL.md', line: 3, label: '外部链接 example.com' }] } });
+  try {
+    find(pending.host, 'wp-skill-action').find(button => button.textContent === '分享给公司').click();
+    const dialog = find(pending.host, 'wp-skill-dialog')[0]; findTag(dialog, 'form')[0].listeners.submit[0]({ preventDefault() {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.match(find(pending.host, 'wp-skills-status')[0].textContent, /SKILL\.md 第 3 行/);
+  } finally { pending.dispose(); }
+
+  const blocked = await submissionView({ postStatus: 400, postResult: { message: '检测未通过', findings: [{ file: 'SKILL.md', line: 4, rule: 'external-link', label: '外部链接' }] } });
+  try {
+    find(blocked.host, 'wp-skill-action').find(button => button.textContent === '分享给公司').click();
+    const dialog = find(blocked.host, 'wp-skill-dialog')[0]; findTag(dialog, 'form')[0].listeners.submit[0]({ preventDefault() {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.match(find(blocked.host, 'wp-skills-status')[0].textContent, /SKILL\.md 第 4 行：外部链接/);
+  } finally { blocked.dispose(); }
+});
+
+test('cards show versions, unversioned and superseded labels, including approver data', async () => {
+  const view = await companyView('zh-CN', [], [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0, semver: '1.0.1', status: 'superseded' }]);
+  try { assert.match(find(view.card, 'wp-skill-meta')[0].textContent, /v1\.0\.1/); assert.equal(find(view.card, 'wp-skill-badge')[0].textContent, '已被新版替代'); } finally { view.dispose(); }
+  const old = await companyView('zh-CN', [], [{ name: 'meeting-notes', displayName: '会议整理', description: '整理会议', author: '作者', installs: 0, semver: '' }]);
+  try { assert.match(find(old.card, 'wp-skill-meta')[0].textContent, /未标注/); } finally { old.dispose(); }
+
+  const approver = await submissionView({ pending: [{ name: 'pending', displayName: '待审', description: 'd', semver: '2.0.0', version: '2.0.0', manualReasons: [{ file: 'SKILL.md', line: 8, label: '脚本变更' }] }], reviewed: [{ name: 'reviewed', displayName: '已审', description: 'd', semver: '1.0.0', status: 'approved', autoPublished: true }] });
+  try {
+    const sections = find(approver.host, 'wp-skills-section');
+    assert.match(find(sections[3], 'wp-skill-meta')[0].textContent, /v2\.0\.0/); assert.match(find(sections[3], 'wp-skill-reason')[0].textContent, /SKILL\.md 第 8 行/);
+    assert.match(find(sections[4], 'wp-skill-reason')[0].textContent, /自动发布/);
+  } finally { approver.dispose(); }
 });
