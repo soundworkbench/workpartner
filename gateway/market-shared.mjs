@@ -21,9 +21,9 @@ const semver = {
 };
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const MAX_LINE = 4000;
+const MAX_LINE = 1000;
+const MAX_SCAN_BYTES = 2 * 1024 * 1024;
 const MAX_CONTINUATIONS = 32;
-const MAX_LOGICAL_LINE = 16000;
 
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
 const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({
@@ -46,8 +46,8 @@ function logicalLines(source) {
     const firstLine = index + 1;
     let value = physical[index];
     let continuations = 0;
-    while (/\\\s*$/.test(value) && index + 1 < physical.length
-      && continuations < MAX_CONTINUATIONS && value.length < MAX_LOGICAL_LINE) {
+    while (value.length <= MAX_LINE && index + 1 < physical.length
+      && continuations < MAX_CONTINUATIONS && /\\\s*$/.test(value)) {
       value = value.replace(/\\\s*$/, '') + physical[++index];
       continuations++;
     }
@@ -56,12 +56,60 @@ function logicalLines(source) {
   return result;
 }
 
+function destinationHost(value) {
+  try {
+    return new URL(value.includes('://') ? value : `https://${value}`).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function externalEgress({ name, args }, domains) {
+  if (['scp', 'rsync'].includes(name)) {
+    return args.some(arg => {
+      const remote = /^(?:[^@:]+@)?([^:]+):/.exec(arg);
+      return remote && !isTrusted(remote[1].toLowerCase().replace(/\.$/, ''), domains);
+    });
+  }
+  if (['nc', 'ncat'].includes(name)) {
+    const hosts = args.filter(arg => !arg.startsWith('-') && !/^\d+$/.test(arg));
+    return !hosts.length || hosts.some(host => !isTrusted(destinationHost(host), domains));
+  }
+  if (!['curl', 'wget'].includes(name)) return false;
+  let uploads = false;
+  const destinations = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    const option = arg.split('=', 1)[0];
+    const dataOption = name === 'curl'
+      ? /^(?:-[dTF]|--data(?:-[A-Za-z0-9-]+)?|--upload-file|--form)$/.test(option)
+      : /^--(?:post-data|post-file|body-[A-Za-z0-9-]+)$/.test(option);
+    if (dataOption || (name === 'curl' && /^-[dTF].+/.test(arg))) {
+      uploads = true;
+      if (dataOption && !arg.includes('=')) index++;
+    } else if (name === 'curl' && (arg === '-X' || arg === '--request')) {
+      const method = args[++index] || '';
+      uploads ||= /^(?:POST|PUT)$/i.test(method);
+    } else if (name === 'curl' && /^-X(?:POST|PUT)$/i.test(arg)) {
+      uploads = true;
+    } else if (/^(?:-o|-O|-H|-u|-A|-e|--output|--header|--user|--user-agent|--referer)$/.test(option)) {
+      // curl -O takes no value; the other options carry local data, not destinations.
+      if (!(name === 'curl' && arg === '-O') && !arg.includes('=')) index++;
+    } else if (option === '--url') {
+      destinations.push(arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : args[++index] || '');
+    } else if (!arg.startsWith('-')) {
+      destinations.push(arg);
+    }
+  }
+  return uploads && (!destinations.length || destinations.some(value => !isTrusted(destinationHost(value), domains)));
+}
+
 function scanContent(source, file = 'SKILL.md', domains = []) {
   const results = [];
   const domainList = trusted(domains);
   for (const { line, text: lineText } of logicalLines(source)) {
     if (lineText.length > MAX_LINE) {
-      results.push(finding(file, line, 'long-line', '单行过长，需要人工审核', 'manual'));
+      results.push(finding(file, line, 'long-line', '有超长行，需要人工审核', 'manual'));
       continue;
     }
     const credential = /(?:sk-|ghp_)[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+\/-]{8,}|(?:口令|密码|password|secret)\s*[:=：]\s*["']?[A-Za-z0-9!@#$%^&*_-]{6,}|(?<![0-9A-Za-z])1[3-9]\d{9}(?![0-9A-Za-z])|(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])/u;
@@ -69,21 +117,35 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
       results.push(finding(file, line, 'credential', '疑似密钥、口令或个人证件信息', 'block'));
     }
 
-    const rmCommand = lineText.match(/\brm\b[^\n]{0,4000}/i)?.[0];
-    const recursive = rmCommand && (/(?:^|\s)-[A-Za-z0-9]{0,32}r[A-Za-z0-9]{0,32}(?=\s|$)/i.test(rmCommand)
-      || /(?:^|\s)--recursive(?=\s|$)/i.test(rmCommand));
-    const force = rmCommand && (/(?:^|\s)-[A-Za-z0-9]{0,32}f[A-Za-z0-9]{0,32}(?=\s|$)/i.test(rmCommand)
-      || /(?:^|\s)--force(?=\s|$)/i.test(rmCommand));
-    const target = /(?:^|\s)(?:\/(?:\*)?|~(?:\/(?:\*)?)?|\$HOME(?:\/(?:\*)?)?|\$\{HOME\}(?:\/(?:\*)?)?|["'](?:\/(?:\*)?|~(?:\/(?:\*)?)?|\$HOME(?:\/(?:\*)?)?|\$\{HOME\}(?:\/(?:\*)?)?)["'])(?=\s|$)/;
-    const dangerousDelete = Boolean(rmCommand && recursive && force
-      && (/(?:^|\s)--no-preserve-root(?=\s|$)/.test(rmCommand) || target.test(rmCommand)));
+    // Tokenize once; each argument belongs to at most one command, even on repeated-command lines.
+    const commands = [];
+    let current;
+    for (const match of lineText.matchAll(/[^\s|;]+|[|;]/g)) {
+      const token = match[0].replace(/^["']|["']$/g, '');
+      const command = /(?:^|[/(])(curl|wget|dd|scp|rsync|rm|nc|ncat)$/i.exec(token);
+      if (/^[|;]$/.test(token)) current = undefined;
+      else if (current) current.args.push(token);
+      else if (command) {
+        current = { name: command[1].toLowerCase(), args: [] };
+        commands.push(current);
+      }
+    }
+    const dangerousDelete = commands.some(({ name, args }) => {
+      if (name !== 'rm') return false;
+      const shortFlags = args.filter(arg => /^-[A-Za-z0-9]+$/.test(arg)).join('').toLowerCase();
+      const recursive = shortFlags.includes('r') || args.includes('--recursive');
+      const force = shortFlags.includes('f') || args.includes('--force');
+      const target = /^(?:\/(?:\*)?|~(?:\/(?:\*)?)?|\$HOME(?:\/(?:\*)?)?|\$\{HOME\}(?:\/(?:\*)?)?)$/;
+      return recursive && force && args.some(arg => arg === '--no-preserve-root' || target.test(arg));
+    });
     const dangerous = dangerousDelete
       || /\bmkfs(?:\.[A-Za-z0-9_-]+)?\b/i.test(lineText)
-      || /\bdd\b[^\n]{0,4000}\bof\s*=\s*\/dev\//i.test(lineText)
+      || commands.some(({ name, args }) => name === 'dd' && /\bof\s*=\s*\/dev\//i.test(args.join(' ')))
       || /\bDROP\s+DATABASE\b/i.test(lineText);
     if (dangerous) results.push(finding(file, line, 'dangerous-delete', '危险删除命令', 'block'));
 
-    const downloadExecute = /\b(?:curl|wget)\b[^\n]{0,4000}\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python3?|node|perl)\b/i.test(lineText)
+    const downloadExecute = (commands.some(command => ['curl', 'wget'].includes(command.name))
+      && /\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python3?|node|perl)\b/i.test(lineText))
       || /(?:bash|sh)\s+<\(\s*(?:curl|wget)\b/i.test(lineText)
       || /(?:bash|sh)\s+-c\s+["']?\$\(\s*(?:curl|wget)\b/i.test(lineText);
     if (downloadExecute) results.push(finding(file, line, 'download-execute', '下载后直接执行', 'block'));
@@ -103,19 +165,13 @@ function scanContent(source, file = 'SKILL.md', domains = []) {
         results.push(finding(file, line, `external-link:${label}`, `外部链接 ${label}`, 'manual'));
       }
     }
-    const egress = /(?:\bcurl\b[^\n]{0,4000}(?:\s(?:-d|-T|-F)(?=\s|=|@)|\s--data(?:-[A-Za-z0-9-]+)?(?=\s|=|@)|\s(?:--upload-file|--form)(?=\s|=|@)|\s-X\s*(?:POST|PUT)\b)|\bwget\b[^\n]{0,4000}(?:--post-data|--post-file|--body-)|\b(?:nc|ncat)\b|\b(?:scp|rsync)\b[^\n]{0,4000}\s[^\s:]+:[^\s]+)/i.test(lineText);
-    if (egress) {
-      results.push(finding(file, line, 'external-egress', '向外部发送数据', 'manual'));
-    }
-    const remote = lineText.match(/\b(?:nc|ncat)\s+(?:[^\s]+\s+)?([A-Za-z0-9.-]+)(?::\d+)?\b/i)?.[1]
-      || lineText.match(/\b(?:scp|rsync)\b[^\n]{0,4000}\s([A-Za-z0-9.-]+):[^\s]+/i)?.[1];
-    if (remote && !isTrusted(remote, domainList)) {
+    if (commands.some(command => externalEgress(command, domainList))) {
       results.push(finding(file, line, 'external-egress', '向外部发送数据', 'manual'));
     }
 
     const internal = /(?:localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)/i.test(lineText)
-      || /https?:\/\/[^\s/]+\.(?:internal|local|corp)(?:[./:\s]|$)/i.test(lineText)
-      || /(?:\/Users\/|\/home\/|\/data\/|\/srv\/|[A-Za-z]:\\)/.test(lineText);
+      || hosts.some(host => !isTrusted(host, domainList) && /\.(?:internal|local|corp)(?:\.|$)/i.test(host))
+      || /(?:\/Users\/|\/home\/|\/data\/|\/srv\/|~\/\.ssh\b|[A-Za-z]:\\)/.test(lineText);
     if (internal) results.push(finding(file, line, 'internal-path', '内部地址或本机路径', 'manual'));
   }
   return results;
@@ -209,6 +265,8 @@ export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [],
   const warnings = new Set();
   let size = 0;
   let scripts = 0;
+  let scanBytes = 0;
+  let scanBudgetExceeded = false;
   for (const file of bundle.files) {
     if (typeof file.path !== 'string' || !file.path || file.path.length > 512
       || file.path.split('/').some(part => !part || part === '.' || part === '..' || /[\\:\x00-\x1f]/.test(part))
@@ -221,8 +279,14 @@ export function inspectSkill(bundle, protectedNames = [], reservedPrefixes = [],
     const content = Buffer.from(file.content, 'base64');
     size += content.length;
     if (size > 10 * 1024 * 1024) throw fail(413, '分享的技能总计不能超过 10 MB。');
-    const source = content.toString('utf8');
-    const rows = scanContent(source, file.path, trustedDomains);
+    scanBytes += content.length;
+    let rows = [];
+    if (scanBytes > MAX_SCAN_BYTES) {
+      if (!scanBudgetExceeded) rows.push(finding(file.path, 1, 'scan-budget', '内容过多，需要人工审核', 'manual'));
+      scanBudgetExceeded = true;
+    } else {
+      rows = scanContent(content.toString('utf8'), file.path, trustedDomains);
+    }
     findings.push(...rows);
     if (rows.some(item => item.rule === 'internal-path')) warnings.add('含内部地址或本机路径，请核对是否已换成占位说明。');
     const normalized = { path: file.path, content, executable: Boolean(file.executable) };
@@ -346,6 +410,7 @@ export function createSharedSkillStore({
   }
 
   let stale = 0;
+  const interruptedReviews = [];
   for (const [name, row] of Object.entries(state.skills)) {
     const live = row.live && Object.hasOwn(row.versions, row.live) ? row.versions[row.live] : null;
     if (live?.status === 'approved') {
@@ -358,6 +423,15 @@ export function createSharedSkillStore({
         }
       }
     }
+    for (const version of Object.values(row.versions)) {
+      if (version.status !== 'pending' || version.modelReview !== 'running') continue;
+      delete version.modelReview;
+      delete version.modelFiles;
+      version.manualReasons = [...(version.manualReasons || []), {
+        rule: 'model-review', label: '模型审核没有结论，需要人工审核',
+      }];
+      interruptedReviews.push({ name, id: version.id });
+    }
     try {
       reconcile(name);
     } catch (error) {
@@ -365,8 +439,8 @@ export function createSharedSkillStore({
       console.warn(`[skill-market] ${name}: release unavailable (${error.code || error.message}); skipped, gateway startup continues`);
     }
   }
+  if (stale || interruptedReviews.length) save();
   if (stale) {
-    save();
     console.warn(`[skill-market] superseded ${stale} stale pending versions`);
   }
 
@@ -493,6 +567,12 @@ export function createSharedSkillStore({
     save();
     reconcile(name);
     return { row, version, notice: 'author' };
+  }
+
+  for (const { name, id } of interruptedReviews) {
+    void sendReview(name, id).catch(error => {
+      console.warn(`[skill-market] ${name}: recovered review notification failed (${error.code || 'save failed'})`);
+    });
   }
 
   return {
