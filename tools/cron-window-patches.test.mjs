@@ -200,6 +200,6 @@ test('automation modal inputs use a mobile 16px rule scoped to the modal', () =>
   const mobile = css.slice(css.lastIndexOf('@media (max-width: 767px)'));
   assert.match(mobile, /\.wp-cron-modal input/);
   assert.match(mobile, /\.wp-cron-modal textarea/);
-  assert.match(mobile, /font-size: 16px/);
+  assert.match(mobile, /\.wp-cron-modal \.arco-select-view-input\s*\{\s*font-size:\s*16px\s*!important\s*;\s*\}/);
   assert.match(patched, /wp-cron-modal w-\[min\(560px/);
 });

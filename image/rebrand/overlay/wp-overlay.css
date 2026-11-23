@@ -801,4 +801,6 @@ html body main.layout-content { position:relative; }
   .wp-cron-modal .arco-select-view-input,
   .wp-cron-window input,
   .wp-cron-window textarea { font-size: 16px; }
+  /* Arco's size/variant selector is more specific than the generic input rule. */
+  .wp-cron-modal .arco-select-view-input { font-size: 16px !important; }
 }
