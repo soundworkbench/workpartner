@@ -783,3 +783,15 @@ html body main.layout-content { position:relative; }
 .wp-project-card .wp-project-summary { flex:1 1 35%; max-width:35%; padding:0 8px; }
 .wp-project-upload { margin-top:10px; max-width:100%; color:var(--wp-ink-2); font-size:12px; }
 @media (max-width:767px) { .wp-projects-root { padding-left:9px; padding-right:9px; } .wp-projects-root .wp-project-count,.wp-projects-root .wp-project-time { display:none; } .wp-project-row:hover > .wp-project-new,.wp-project-row:hover > .wp-project-more,.wp-project-conversation:hover .wp-project-more { opacity:1; } .wp-project-more,.wp-project-new,.wp-project-conversation .wp-project-more { opacity:1; } .wp-project-archive { display:none; } .wp-project-card .wp-project-summary { display:none; } .wp-project-home { padding:22px 16px; } .wp-project-home-header h1 { font-size:21px; } .wp-project-dialog { padding:18px; } }
+
+.wp-cron-window { min-width: 0; overflow-wrap: anywhere; }
+.wp-cron-window-times { display: flex; flex-wrap: wrap; gap: 12px; }
+.wp-cron-window-times > .wp-cron-window-field { flex: 1 1 120px; min-width: 0; }
+.wp-cron-window .arco-select-view { white-space: normal; height: auto; min-height: 32px; }
+.wp-cron-window .arco-select-view-tag { max-width: 100%; }
+.wp-cron-window-preview { padding: 10px 12px; border-radius: 8px; background: var(--color-fill-1); line-height: 1.7; }
+.wp-cron-window-error { color: var(--color-danger-light-4, #c33); }
+@media (max-width: 767px) {
+  .wp-cron-window-times > .wp-cron-window-field { flex-basis: 100%; }
+  .wp-cron-window input { font-size: 16px; }
+}

@@ -194,7 +194,9 @@
     "maxImagesPerItem": 6
   },
   "market": {
+    "autoPublish": false,
     "approvers": [],
+    "trustedDomains": [],
     "reservedPrefixes": [],
     "protectedNames": [
       "officecli",

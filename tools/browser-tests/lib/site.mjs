@@ -89,6 +89,7 @@ export function buildSite(repo, out, { voice = false, feishuNav = false, project
     js = js.replace(modelPickerSignature, `${modelPickerSignature} if (document.querySelector("#voice-composer")) return;`);
   }
   js += '\n' + read(overlay, 'wp-projects-logic.js');
+  js += '\n' + read(overlay, 'wp-cron-window.js');
   js += '\n' + read(overlay, 'wp-projects.js').replaceAll('__WP_WORKDIR__', '/data/work');
   for (const file of ['wp-skills.js', 'wp-tools.js', 'wp-data-tools.js', 'wp-mcp-tools.js']) js += '\n' + read(overlay, file);
   js += '\n' + read(overlay, 'wp-slash-skills.js')

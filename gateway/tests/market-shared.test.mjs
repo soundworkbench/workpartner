@@ -24,7 +24,8 @@ function fixture(t, extra = {}) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'builtin')); fs.mkdirSync(path.join(root, 'uploads'));
   fs.writeFileSync(path.join(root, 'translations.json'), '{}');
-  const options = { stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: [it.unionId], protectedNames: ['share-skill'], ...extra };
+  const options = { stateDir: path.join(root, 'state'), sharedDir: path.join(root, 'shared'), approvers: [it.unionId], protectedNames: ['share-skill'],
+    autoPublish: true, modelReview: async () => ({ verdict: 'pass', reasons: [] }), ...extra };
   const store = createSharedSkillStore(options);
   const execute = async (user, action, data = {}) => {
     const result = spawnSync('python3', [new URL('./market-worker.py', import.meta.url).pathname, root, user.slug, action, JSON.stringify(data)], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
@@ -154,7 +155,7 @@ test('an execute failure clears the user queue and uninstall keeps installed cou
 test('old review and author notification results cannot overwrite a newer notification batch', async t => {
   const reviewGates = [];
   const f = fixture(t, { notify: async payload => {
-    let resolve; const done = new Promise(r => { resolve = r; }); reviewGates.push({ payload, resolve }); await done;
+    let resolve, reject; const done = new Promise((r, j) => { resolve = r; reject = j; }); reviewGates.push({ payload, resolve, reject }); await done;
   } });
   const submitting = f.store.submit(alice, await f.local(), meta);
   await waitFor(() => reviewGates.length === 1);
@@ -169,27 +170,30 @@ test('old review and author notification results cannot overwrite a newer notifi
   await assert.rejects(f.store.withdraw(alice, 'meeting-notes'), /simulated save failure/);
   const resending = f.store.review(it, 'meeting-notes', version, 'resend');
   await waitFor(() => reviewGates.length === 2);
-  reviewGates[0].resolve();
-  const first = await submitting;
-  assert.equal(first.reviewNotice, undefined); assert.equal('reviewNoticeId' in first, false);
   reviewGates[1].resolve();
   const second = await resending;
   assert.equal(second.reviewNotice, 'sent'); assert.equal('reviewNoticeId' in second, false);
+  reviewGates[0].reject(new Error('old notification failed'));
+  const first = await submitting;
+  assert.equal(first.reviewNotice, 'sent'); assert.equal('reviewNoticeId' in first, false);
   assert.equal(state().skills['meeting-notes'].versions[version].reviewNotice, 'sent');
 
   const authorGates = [];
   const authored = fixture(t, { notifyAuthor: async payload => {
-    let resolve; const done = new Promise(r => { resolve = r; }); authorGates.push({ payload, resolve }); await done;
+    let resolve, reject; const done = new Promise((r, j) => { resolve = r; reject = j; }); authorGates.push({ payload, resolve, reject }); await done;
   } });
   const draft = await authored.store.submit(alice, await authored.local(), meta);
   const approving = authored.store.review(it, draft.name, draft.version, 'approve');
   await waitFor(() => authorGates.length === 1);
   const notifyingAgain = authored.store.review(it, draft.name, draft.version, 'notify-author');
   await waitFor(() => authorGates.length === 2);
-  authorGates[0].resolve(); await approving;
   authorGates[1].resolve();
   const authorResult = await notifyingAgain;
   assert.equal(authorResult.authorNotice, 'sent'); assert.equal('authorNoticeId' in authorResult, false);
+  authorGates[0].reject(new Error('old author notification failed'));
+  const approvalResult = await approving;
+  assert.equal(approvalResult.authorNotice, 'sent'); assert.equal('authorNoticeId' in approvalResult, false);
+  assert.equal(authored.store.list(alice).mine.find(row => row.version === draft.version).authorNotice, 'sent');
 });
 
 test('a personal same-name conflict returns 409 and logs only the user slug', async t => {
@@ -327,10 +331,29 @@ test('bot cards address configured reviewers and result notices address only the
   await notifier.notify({ ...notice, approvers: [it.unionId] });
   const card = JSON.parse(sent[0].content);
   assert.equal(sent[0].receive_id, it.unionId);
-  assert.deepEqual(card.elements.at(-1).actions.map(action => action.text.content), ['批准', '拒绝']);
+  assert.deepEqual(card.elements.at(-1).actions.map(action => action.text.content), ['批准并发布', '拒绝']);
   assert.ok(card.elements.at(-1).actions.every(action => action.url.startsWith('https://partner.example/')));
   await notifier.notifyAuthor({ ...notice, unionId: alice.unionId, status: 'rejected', reason: '需要更清楚的说明' });
   assert.equal(sent[1].receive_id, alice.unionId); assert.match(JSON.parse(sent[1].content).text, /需要更清楚的说明/);
+});
+
+test('automatic publication cards notify reviewers with a bounded file list and withdrawal link', async t => {
+  const f = fixture(t), sent = [];
+  const secret = path.join(f.root, 'auto-app-secret'); fs.writeFileSync(secret, 'fixture-only');
+  const notifier = marketNotifications({ identity: { appId: 'fixture-app', appSecretFile: secret }, server: { publicOrigin: 'https://partner.example' } }, async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (url.includes('/auth/')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 'fixture-token' }) };
+    sent.push(body); return { ok: true, json: async () => ({ code: 0 }) };
+  });
+  const changedFiles = Array.from({ length: 22 }, (_, index) => `file-${index}.md`);
+  await notifier.notifyAuto({ name: 'meeting-notes', version: 'version-1', displayName: '会议整理', semver: '1.0.1', author: '作者甲', approvers: [it.unionId], changedFiles });
+  const card = JSON.parse(sent[0].content);
+  assert.equal(card.header.title.content, '技能已自动发布');
+  assert.match(card.elements[0].text.content, /meeting-notes/);
+  assert.match(card.elements[0].text.content, /file-19\.md/);
+  assert.match(card.elements[0].text.content, /等 2 个/);
+  assert.equal(card.elements.at(-1).actions[0].text.content, '查看 / 下架');
+  assert.match(card.elements.at(-1).actions[0].url, /version=version-1/);
 });
 
 
