@@ -306,6 +306,37 @@ UI_PATCHES = [
      'x.map((S,w)=>r.createElement(r.Fragment,{key:ke(S)||w},Z(w,S))),window.wpWaiting(r,ol,{conversationId:a?.conversation_id,messages:t,isProcessing:u,rowWidthClass:l}),r.createElement("div",{className:"h-20px"})'),
     ('`${l||t("conversation.thinking.label",{defaultValue:"Thinking..."})} · ${s(p)}`',
      'wpWaitingLabel?wpWaitingLabel(p):`${l||t("conversation.thinking.label",{defaultValue:"Thinking..."})}${p>0?" · "+s(p):""}`'),
+    # Time windows use the native form and scheduler.
+    ('function M(){return{mode:"interval",',
+     'function M(){return{...(window.wpCronWindow?{wpw:window.wpCronWindow.defaults()}:{}),mode:"interval",'),
+    ('return c}function xt(s)',
+     'if(window.wpCronWindow){const wpw=window.wpCronWindow.parse(s);if(wpw)return{...M(),mode:"window",wpw}}return c}function xt(s)'),
+    ('switch(s.mode){case"interval":',
+     'switch(s.mode){case"window":if(window.wpCronWindow)return window.wpCronWindow.build(s.wpw);case"interval":'),
+    ('function yt(s){if(!s)',
+     'function yt(s){if(window.wpCronWindow&&window.wpCronWindow.parse(s))return{frequency:"custom",time:"09:00",weekday:"MON"};if(!s)'),
+    ('if(c.length<5)return{frequency:"daily",time:"09:00",weekday:"MON"};const[n,m,d,a,i]=c;',
+     'if(window.wpCronWindow&&c.length!==5)return{frequency:"custom",time:"09:00",weekday:"MON"};if(c.length<5)return{frequency:"daily",time:"09:00",weekday:"MON"};const[n,m,d,a,i]=c;'),
+    ('if(i==="MON-FRI"&&d==="*"&&a==="*")',
+     'if(window.wpCronWindow&&(!/^\\d+$/.test(n)||!/^\\d+$/.test(m)||Number(n)>59||Number(m)>23))return{frequency:"custom",time:"09:00",weekday:"MON"};if(i==="MON-FRI"&&d==="*"&&a==="*")'),
+    ('weekday:p}}return{frequency:"daily",time:"09:00",weekday:"MON"}',
+     'weekday:p}}return{frequency:window.wpCronWindow?"custom":"daily",time:"09:00",weekday:"MON"}'),
+    ('case"custom":{const o=xt(g);return{expr:o,description:o}}',
+     'case"custom":{const o=xt(g);return{expr:o,description:g.mode==="window"&&window.wpCronWindow?window.wpCronWindow.describe(g.wpw):o}}'),
+    ('t.createElement(f,{value:"monthly"},a("cron.page.custom.monthly")),',
+     't.createElement(f,{value:"monthly"},a("cron.page.custom.monthly")),window.wpCronWindow&&t.createElement(f,{value:"window"},window.wpUI&&window.wpUI.isChinese&&window.wpUI.isChinese()?"按时间段":"Time window"),'),
+    ('g.mode==="advanced"&&t.createElement(E,',
+     'g.mode==="window"&&window.wpCronWindow&&window.wpCronWindow.render(t,{state:g.wpw,setState:e=>w(r=>({...r,wpw:e})),t:a,Select:S,Option:f,TimePicker:Z,dayjs:Q,FormItem:E,Switch:rt,weekdays:P}),g.mode==="advanced"&&t.createElement(E,'),
+    ('g.mode!=="advanced"&&t.createElement("div",',
+     'g.mode!=="advanced"&&!(g.mode==="window"&&window.wpCronWindow)&&t.createElement("div",'),
+    ('je=async()=>{try{const e=await u.validate();',
+     'je=async()=>{if(b==="custom"&&g.mode==="window"&&window.wpCronWindow){const wpError=window.wpCronWindow.validate(g.wpw);if(wpError){le.error(wpError);return}}try{const e=await u.validate();'),
+    ('x(!0);const r=re.expr,o=re.description,N=tt(r,o),',
+     'x(!0);let wpExpr=re.expr;if(window.wpCronWindow&&V&&n.schedule.kind==="cron"){const wpOld=n.schedule.expr,wpInitial=yt(wpOld);if(b===wpInitial.frequency&&(b==="custom"?JSON.stringify(g)===JSON.stringify(vt(wpOld)):b==="hourly"||b==="manual"||C===wpInitial.time&&(b!=="weekly"||R===wpInitial.weekday)))wpExpr=wpOld}const r=wpExpr,o=re.description,N=tt(r,o),'),
+    ('function Obo(e,t){if(!e)',
+     'function Obo(e,t){if(window.wpCronWindow){const wpLabel=window.wpCronWindow.label(e);if(wpLabel)return wpLabel}if(!e)'),
+    ('if(s==="*"&&i==="*"&&l==="*"&&a!=="*"&&o!=="*")',
+     'if(window.wpCronWindow&&(!/^\\d+$/.test(o)||!/^\\d+$/.test(a)||Number(o)>59||Number(a)>23))return null;if(s==="*"&&i==="*"&&l==="*"&&a!=="*"&&o!=="*")'),
 ]
 original_js = [open(os.path.join(r, f), encoding='utf8').read()
                for r, _, fs in os.walk(src) for f in fs if f.endswith('.js')]
@@ -460,6 +491,7 @@ s = s.replace('<meta name="theme-color" content="#4E5969" />', f'<meta name="the
 css = open(os.path.join(overlay, 'wp-overlay.css'), encoding='utf8').read().replace('__WP_APPEARANCE_NAME__', copy['appearanceName']).replace('__WP_AVATAR_COLOR__', skin['avatarColor']) + '\n' + pet_css
 js = open(os.path.join(overlay, 'wp-archive.js'), encoding='utf8').read() + '\n' + open(os.path.join(overlay, 'wp-overlay.js'), encoding='utf8').read().replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION).replace('  /* __WP_COPY__ */', Path(brand, 'copy.js').read_text().rstrip()).replace('__WP_WORKDIR__', WORKDIR).replace('__WP_PERMISSION__', PERMISSION)
 js += '\n' + Path(overlay, 'wp-projects-logic.js').read_text()
+js += '\n' + Path(overlay, 'wp-cron-window.js').read_text()
 js += '\n' + Path(overlay, 'wp-projects.js').read_text().replace('__WP_WORKDIR__', WORKDIR)
 js = js.replace('__WP_CHAT_MODULE__', chat_modules[0]).replace('__WP_CHAT_STYLES__', json.dumps(chat_styles))
 js += '\n' + Path(overlay, 'wp-skills.js').read_text()
