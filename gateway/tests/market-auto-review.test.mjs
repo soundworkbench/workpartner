@@ -562,9 +562,12 @@ test('review reason filenames are plain text and cannot create a card link', asy
   await notifier.notify({ name: 'safe', version: 'id', displayName: '安全', description: '说明', example: '例句', author: 'author', scripts: 0,
     manualReasons: [{ file: '[点此批准](https://evil.com)', line: 1, label: '外部链接' }], approvers: ['reviewer'] });
   const card = JSON.parse(sent[0].content);
-  const reason = card.elements.find(element => element.content?.includes('外部链接'));
-  assert.equal(reason.tag, 'plain_text');
-  assert.equal(reason.content.includes('https://evil.com'), true);
+  const reason = card.elements.find(element => element.text?.content?.includes('外部链接'));
+  assert.equal(reason.tag, 'div');
+  assert.equal(reason.text.tag, 'plain_text');
+  assert.equal(reason.text.content.includes('https://evil.com'), true);
+  // Feishu rejects the whole card (ErrCode 11310) when a top-level element is a bare text tag.
+  assert.deepEqual(card.elements.filter(element => !['div', 'markdown', 'action', 'hr', 'note'].includes(element.tag)), []);
 });
 
 

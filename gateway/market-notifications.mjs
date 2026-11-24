@@ -69,9 +69,10 @@ export function marketNotifications(organization, fetcher = fetch) {
             tag: 'markdown',
             content: `<font color="red">${warning}</font>`,
           })),
+          // Feishu cards reject a bare plain_text block; wrap it in div so reasons stay plain text.
           ...(row.manualReasons || []).map(reason => ({
-            tag: 'plain_text',
-            content: reasonText(reason),
+            tag: 'div',
+            text: { tag: 'plain_text', content: reasonText(reason) },
           })),
           {
             tag: 'action',
