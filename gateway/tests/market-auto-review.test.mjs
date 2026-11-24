@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Readable } from 'node:stream';
+import vm from 'node:vm';
 import { createSharedSkillStore, createSharedSkillsHandler, inspectSkill } from '../market-shared.mjs';
 import { marketNotifications } from '../market-notifications.mjs';
 import { createMarketModelReview, MARKET_REVIEW_SYSTEM } from '../market-model-review.mjs';
@@ -308,6 +309,16 @@ test('review page retains approve, reject and resend controls; body cap and cook
   assert.equal(foreign.status, 403);
   const oversized = await invoke(handler, 'POST', { cookie: 'author', origin: 'https://partner.example', 'content-type': 'application/json' }, 'x'.repeat(16385));
   assert.equal(oversized.status, 413);
+  const refererOnly = await invoke(handler, 'POST', {
+    cookie: 'reviewer', referer: 'https://partner.example/_wp/market/shared/review', 'content-type': 'application/json',
+  }, JSON.stringify({ action: 'approve', name: draft.name, version: draft.version }));
+  assert.equal(refererOnly.status, 403);
+  assert.equal(store.list(reviewer).pending.length, 1);
+  const sessionApproval = await invoke(handler, 'POST', {
+    cookie: 'reviewer', origin: 'https://partner.example', 'content-type': 'application/json',
+  }, JSON.stringify({ action: 'approve', name: draft.name, version: draft.version }));
+  assert.equal(sessionApproval.status, 200);
+  assert.equal(JSON.parse(sessionApproval.body).status, 'approved');
   assert.equal(notices.length, 1);
 });
 
@@ -341,7 +352,35 @@ test('automatic publication notifies reviewers with changed files and live revie
   assert.equal(store.list(author).company.length, 0);
 });
 
-test('signed review links approve once and invalid extra segments fall back to manual page', async t => {
+test('review page escapes form attributes and keeps request values out of its script', async () => {
+  // Exercise the renderer independently of the store's name/version validation.
+  const handler = createSharedSkillsHandler({
+    store: {
+      admin: () => true,
+      source: () => '# skill',
+      list: () => ({ pending: [], reviewed: [], company: [] }),
+      reviewToken: () => ({ claims: {} }),
+    },
+    origin: 'https://partner.example',
+    authenticate: () => reviewer,
+    tokenAuthenticate: () => null,
+  });
+  const payload = '</script><script>alert(1)</script>"\'&';
+  const page = await invoke(handler, 'GET', {}, '', `/_wp/market/shared/review?${new URLSearchParams({
+    name: payload, version: payload, action: 'approve', t: payload,
+  })}`);
+  assert.equal(page.status, 200);
+  assert.equal(page.body.includes(payload), false);
+  assert.equal(page.body.includes('</script><script>'), false);
+  for (const key of ['name', 'version', 'token']) {
+    assert.ok(page.body.includes(`data-${key}="&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;&amp;"`));
+  }
+  const scripts = [...page.body.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.equal(scripts.length, 1);
+  assert.equal(scripts[0][1].includes('alert(1)'), false);
+});
+
+test('signed review links open the page and approve once through same-origin POST', async t => {
   let issued;
   const store = fixture(t, {
     notify: async payload => { issued = payload.reviewToken; },
@@ -360,12 +399,62 @@ test('signed review links approve once and invalid extra segments fall back to m
   const invalid = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${issued}.xxx`);
   assert.equal(invalid.status, 200);
   assert.match(invalid.body, /链接已失效/);
+  assert.equal(invalid.body.includes(`${issued}.xxx`), false);
+  assert.match(invalid.body, /data-token=""/);
+  for (const token of ['</script><script>alert(1)</script>', '\"><img src=x onerror=alert(1)>', 'invalid&token\'']) {
+    const malicious = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?${new URLSearchParams({
+      name: draft.name, version: draft.version, action: 'approve', t: token,
+    })}`);
+    assert.equal(malicious.status, 200);
+    assert.equal(malicious.body.includes('</script><script>'), false);
+    assert.equal(malicious.body.includes(token), false);
+    assert.match(malicious.body, /data-token=""/);
+  }
   assert.equal(store.list(reviewer).pending.length, 1);
   const approved = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${issued}`);
   assert.equal(approved.status, 200);
-  assert.match(approved.body, /已批准并发布/);
+  assert.match(approved.body, /请查看附带文件/);
+  assert.match(approved.body, /autofocus/);
+  const form = {
+    dataset: Object.fromEntries([...approved.body.matchAll(/data-(prefix|name|version|token)="([^"]*)"/g)].map(([, key, value]) => [key, value])),
+    reason: { value: '' },
+  };
+  assert.equal(form.dataset.token, issued);
+  assert.equal(store.list(reviewer).pending.length, 1);
+  const missingOrigin = await invoke(handler, 'POST', { cookie: 'reviewer', 'content-type': 'application/json' }, JSON.stringify({
+    action: 'approve', name: draft.name, version: draft.version, token: issued,
+  }));
+  assert.equal(missingOrigin.status, 403);
+  const wrongOrigin = await invoke(handler, 'POST', {
+    cookie: 'reviewer', origin: 'https://evil.example', 'content-type': 'application/json',
+  }, JSON.stringify({ action: 'approve', name: draft.name, version: draft.version, token: issued }));
+  assert.equal(wrongOrigin.status, 403);
+  const refererOnly = await invoke(handler, 'POST', {
+    cookie: 'reviewer', referer: 'https://partner.example/_wp/market/shared/review', 'content-type': 'application/json',
+  }, JSON.stringify({ action: 'approve', name: draft.name, version: draft.version, token: issued }));
+  assert.equal(refererOnly.status, 403);
+  let approvedPost;
+  const status = {};
+  vm.runInNewContext(approved.body.match(/<script>([\s\S]*?)<\/script>/)[1], {
+    document: { querySelector: selector => selector === 'form' ? form : status },
+    fetch: async (url, init) => {
+      assert.equal(url, '/_wp/market/shared');
+      approvedPost = await invoke(handler, init.method, {
+        cookie: 'reviewer', origin: 'https://partner.example', 'content-type': init.headers['Content-Type'],
+      }, init.body, url);
+      return { ok: approvedPost.status === 200, json: async () => JSON.parse(approvedPost.body) };
+    },
+  });
+  await form.onsubmit({ preventDefault() {}, target: form, submitter: { value: 'approve' } });
+  assert.equal(approvedPost.status, 200);
+  assert.equal(JSON.parse(approvedPost.body).status, 'approved');
+  assert.equal(status.textContent, '已保存，请返回市场查看结果。');
   const repeated = await invoke(handler, 'GET', { cookie: 'reviewer' }, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${issued}`);
-  assert.match(repeated.body, /已处理/);
+  assert.match(repeated.body, /链接已使用/);
+  const reused = await invoke(handler, 'POST', {
+    cookie: 'reviewer', origin: 'https://partner.example', 'content-type': 'application/json',
+  }, JSON.stringify({ action: 'approve', name: draft.name, version: draft.version, token: issued }));
+  assert.equal(reused.status, 409);
 });
 
 test('one-click approval tokens reject name, version and action tampering', async t => {
@@ -420,6 +509,10 @@ test('signed approval rejects expired, resent, non-approver and anonymous links'
   assert.equal(forbidden.status, 403);
   const anonymous = await invoke(handler, 'GET', {}, '', `/_wp/market/shared/review?name=${draft.name}&version=${draft.version}&action=approve&t=${resent}`);
   assert.equal(anonymous.status, 302);
+  const next = new URL(anonymous.headers.location, 'https://partner.example').searchParams.get('next');
+  assert.ok(next);
+  assert.doesNotMatch(next, /(?:^|[?&])t=/);
+  assert.match(next, /action=approve/);
   assert.equal(store.list(reviewer).pending.length, 1);
 });
 
