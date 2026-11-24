@@ -618,6 +618,10 @@ test('model pass publishes and notifies reviewers; request is delimited and syst
   const result = await store.submit(author, bundle('# changed'), meta('1.0.1'));
   assert.equal(result.status, 'approved');
   assert.equal(automatic.length, 1);
+  assert.match(MARKET_REVIEW_SYSTEM, /verdict/);
+  assert.match(MARKET_REVIEW_SYSTEM, /"pass"/);
+  assert.match(MARKET_REVIEW_SYSTEM, /"manual"/);
+  assert.match(MARKET_REVIEW_SYSTEM, /reasons/);
   const body = JSON.parse(requests[1].options.body);
   assert.equal(body.stream, false);
   assert.equal(body.messages[0].content, MARKET_REVIEW_SYSTEM);
@@ -626,6 +630,28 @@ test('model pass publishes and notifies reviewers; request is delimited and syst
   assert.match(delimiter, /^WP_MARKET_REVIEW_/);
   assert.equal(userMessage.split(delimiter).length, 3);
   assert.match(userMessage, /# changed/);
+});
+
+test('model review accepts JSON code blocks but keeps strict result validation', async t => {
+  const pass = createMarketModelReview({
+    baseUrl: 'https://model.example/v1', models: 'review', keyFor: () => 'key',
+    fetcher: async url => String(url).endsWith('/models') ? response({ data: [{ id: 'review' }] })
+      : response({ choices: [{ message: { content: '```json\n{"verdict":"pass","reasons":[]}\n```' } }] }),
+  });
+  const approved = await approvedStore(t, pass);
+  const result = await approved.submit(author, bundle('# code block'), meta('1.0.1'));
+  assert.equal(result.status, 'approved');
+
+  const invalid = createMarketModelReview({
+    baseUrl: 'https://model.example/v1', models: 'review', keyFor: () => 'key',
+    fetcher: async url => String(url).endsWith('/models') ? response({ data: [{ id: 'review' }] })
+      : response({ choices: [{ message: { content: '```json\n{"safe":true,"reason":"无风险"}\n```' } }] }),
+  });
+  assert.deepEqual(await invalid(author, bundle('# invalid code block')), { verdict: 'error', reasons: [] });
+  const pending = await approvedStore(t, invalid);
+  const invalidResult = await pending.submit(author, bundle('# invalid code block'), meta('1.0.1'));
+  assert.equal(invalidResult.status, 'pending');
+  assert.ok(invalidResult.manualReasons.some(item => item.rule === 'model-review'));
 });
 
 test('model manual is pending with bounded sanitized reasons', async t => {
