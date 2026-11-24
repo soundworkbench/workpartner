@@ -700,6 +700,180 @@ test('model failures, unavailable models and oversized content become model-revi
   assert.equal(requests, 0);
 });
 
+function hedgedReview(fetcher, options = {}) {
+  return createMarketModelReview({
+    baseUrl: 'https://model.example/v1', models: 'preferred,backup', keyFor: () => 'key',
+    hedgeMs: 30, timeoutMs: 250, fetcher, ...options,
+  });
+}
+
+test('model review hedges a hung first request and aborts it after a fast pass', async () => {
+  const calls = []; const aborted = [];
+  const review = hedgedReview(async (url, options) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }, { id: 'backup' }] });
+    calls.push(options);
+    if (calls.length === 1) {
+      options.signal.addEventListener('abort', () => aborted.push(options.signal));
+      return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+    }
+    return response({ choices: [{ message: { content: '{"verdict":"pass","reasons":[]}' } }] });
+  });
+  assert.deepEqual(await review(author, bundle('# hedge')), { verdict: 'pass', reasons: [] });
+  assert.equal(calls.length, 2);
+  assert.equal(aborted.length, 1);
+  assert.equal(aborted[0].aborted, true);
+});
+
+test('model review starts the next attempt immediately after a fast HTTP failure', async () => {
+  const calls = []; let secondAt;
+  const started = performance.now();
+  const review = hedgedReview(async (url, options) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }] });
+    calls.push(options);
+    if (calls.length === 1) return response({}, false, 500);
+    secondAt = performance.now();
+    return response({ choices: [{ message: { content: '{"verdict":"pass","reasons":[]}' } }] });
+  });
+  assert.deepEqual(await review(author, bundle('# fast failure')), { verdict: 'pass', reasons: [] });
+  assert.equal(calls.length, 2);
+  assert.ok(secondAt - started < 30);
+});
+
+test('model review keeps the first valid manual conclusion even if a later pass arrives', async () => {
+  const calls = [];
+  const review = hedgedReview(async (url, options) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }] });
+    calls.push(options);
+    if (calls.length === 1) return new Promise(resolve => setTimeout(() => resolve(response({
+      choices: [{ message: { content: '{"verdict":"manual","reasons":["疑似风险"]}' } }],
+    })), 35));
+    return new Promise(resolve => setTimeout(() => resolve(response({
+      choices: [{ message: { content: '{"verdict":"pass","reasons":[]}' } }],
+    })), 50));
+  });
+  assert.deepEqual(await review(author, bundle('# first conclusion')), { verdict: 'manual', reasons: ['疑似风险'] });
+  assert.equal(calls.length, 2);
+});
+
+test('model review uses the preferred model twice before rotating to the next available model', async () => {
+  const models = [];
+  const review = hedgedReview(async (url, options) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'provider/preferred' }, { id: 'provider/backup' }] });
+    const body = JSON.parse(options.body); models.push(body.model);
+    if (models.length < 3) return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+    return response({ choices: [{ message: { content: '{"verdict":"pass","reasons":[]}' } }] });
+  });
+  assert.deepEqual(await review(author, bundle('# model rotation')), { verdict: 'pass', reasons: [] });
+  assert.deepEqual(models, ['provider/preferred', 'provider/preferred', 'provider/backup']);
+});
+
+test('model review aborts all in-flight requests at the overall deadline', async () => {
+  const signals = [];
+  const review = hedgedReview(async (url, options) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }] });
+    signals.push(options.signal);
+    return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+  }, { timeoutMs: 80, maxAttempts: 2 });
+  assert.deepEqual(await review(author, bundle('# all hung')), { verdict: 'error', reasons: [] });
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every(signal => signal.aborted));
+});
+
+test('model review aborts a hanging models response body at the overall deadline', async () => {
+  let modelsSignal;
+  let bodyStarted = false;
+  const review = createMarketModelReview({
+    baseUrl: 'https://model.example/v1', models: 'preferred', keyFor: () => 'key',
+    timeoutMs: 50, maxAttempts: 1,
+    fetcher: async (url, options) => {
+      if (!String(url).endsWith('/models')) throw new Error('chat request should not start');
+      modelsSignal = options.signal;
+      return {
+        ok: true,
+        json: () => new Promise((resolve, reject) => {
+          bodyStarted = true;
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        }),
+      };
+    },
+  });
+  const started = performance.now();
+  assert.deepEqual(await review(author, bundle('# models body')), { verdict: 'error', reasons: [] });
+  assert.ok(performance.now() - started < 1000);
+  assert.equal(bodyStarted, true);
+  assert.equal(modelsSignal.aborted, true);
+});
+
+test('model review aborts a hanging chat response body at the overall deadline', async () => {
+  let chatSignal;
+  let bodyStarted = false;
+  const review = createMarketModelReview({
+    baseUrl: 'https://model.example/v1', models: 'preferred', keyFor: () => 'key',
+    timeoutMs: 50, maxAttempts: 1,
+    fetcher: async (url, options) => {
+      if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }] });
+      chatSignal = options.signal;
+      return {
+        ok: true,
+        json: () => new Promise((resolve, reject) => {
+          bodyStarted = true;
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        }),
+      };
+    },
+  });
+  const started = performance.now();
+  assert.deepEqual(await review(author, bundle('# chat body')), { verdict: 'error', reasons: [] });
+  assert.ok(performance.now() - started < 1000);
+  assert.equal(bodyStarted, true);
+  assert.equal(chatSignal.aborted, true);
+});
+
+test('model review aborts a losing chat response body after a valid winner arrives', async () => {
+  const signals = [];
+  let firstBodyStarted = false;
+  const review = hedgedReview(async (url, options) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }, { id: 'backup' }] });
+    signals.push(options.signal);
+    if (signals.length === 1) {
+      return {
+        ok: true,
+        json: () => new Promise((resolve, reject) => {
+          firstBodyStarted = true;
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        }),
+      };
+    }
+    return response({ choices: [{ message: { content: '{"verdict":"pass","reasons":[]}' } }] });
+  });
+  assert.deepEqual(await review(author, bundle('# losing body')), { verdict: 'pass', reasons: [] });
+  assert.equal(firstBodyStarted, true);
+  assert.equal(signals.length, 2);
+  assert.equal(signals[0].aborted, true);
+});
+
+test('model review returns error when every attempt fails', async () => {
+  let calls = 0;
+  const review = hedgedReview(async (url) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }] });
+    calls++;
+    return response({}, false, 500);
+  });
+  assert.deepEqual(await review(author, bundle('# all failures')), { verdict: 'error', reasons: [] });
+  assert.equal(calls, 3);
+});
+
+test('model review honors maxAttempts one', async () => {
+  let calls = 0;
+  const review = hedgedReview(async (url) => {
+    if (String(url).endsWith('/models')) return response({ data: [{ id: 'preferred' }] });
+    calls++;
+    return response({}, false, 500);
+  }, { maxAttempts: 1 });
+  assert.deepEqual(await review(author, bundle('# one attempt')), { verdict: 'error', reasons: [] });
+  assert.equal(calls, 1);
+});
+
 test('autoPublish false skips model requests and concurrent submissions cannot overwrite one another', async t => {
   let calls = 0;
   const releases = [];
