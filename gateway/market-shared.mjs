@@ -1037,8 +1037,10 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
       actor = user?.slug;
       if (!user) {
         if (req.method === 'GET' && url.pathname.endsWith('/review')) {
+          const next = new URL(url.href);
+          next.searchParams.delete('t');
           res.writeHead(302, {
-            location: '/_wp/login?next=' + encodeURIComponent(url.pathname + url.search),
+            location: '/_wp/login?next=' + encodeURIComponent(next.pathname + next.search),
             'cache-control': 'no-store',
           });
           res.end();
@@ -1054,23 +1056,16 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
         const id = url.searchParams.get('version');
         const requested = url.searchParams.get('action');
         const token = url.searchParams.get('t');
+        let tokenCheck;
         if (requested === 'approve' && token && !store.admin(user)) throw fail(403, '只有配置的审批人可以审批。');
-        if (requested === 'approve' && token && store.admin(user)) {
-          const checked = store.reviewToken?.(token, name, id);
-          if (checked?.processed) {
-            html(res, `<!doctype html><meta charset="utf-8"><title>审批完成</title><h1>这个版本已处理：${esc(checked.version?.status || '')}</h1>`);
-            return true;
-          }
-          if (checked?.claims) {
-            const result = await store.review(user, name, id, 'approve');
-            html(res, `<!doctype html><meta charset="utf-8"><title>审批完成</title><h1>已批准并发布 ${esc(result.semver ? `v${result.semver}` : '未标注')}</h1>`);
-            return true;
-          }
-        }
+        if (requested === 'approve' && token && store.admin(user)) tokenCheck = store.reviewToken?.(token, name, id);
         const source = store.source(user, name, id);
         const catalog = store.list(user);
         const info = [...catalog.pending, ...catalog.reviewed].find(item => item.name === name && item.version === id);
-        const hint = requested === 'approve' ? '链接已失效或需要确认，请在下方操作' : '';
+        const hint = requested !== 'approve' ? ''
+          : tokenCheck?.processed ? `链接已使用，这个版本已处理：${tokenCheck.version?.status || ''}`
+            : tokenCheck?.claims ? '请查看附带文件，确认后在下方批准'
+              : token ? '链接已失效或需要确认，请在下方操作' : '请查看附带文件，确认后在下方批准';
         const reasonItems = [...(info?.manualReasons || []), ...(info?.findings || []).filter(item => item.level === 'manual')];
         const reasons = [...new Map(reasonItems.map(item => [
           `${item.rule || ''}:${item.file || ''}:${item.line || ''}:${item.label || ''}`,
@@ -1079,21 +1074,21 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
           .map(item => `<li>${esc(item.file ? `${item.file} 第 ${item.line} 行：${item.label}` : `${item.rule}：${item.label}`)}</li>`)
           .join('');
         const live = catalog.company.find(item => item.name === name);
-        const formName = JSON.stringify(name);
-        const formVersion = JSON.stringify(id);
         const reviewScript = `<script>
           document.querySelector('form').onsubmit = async event => {
             event.preventDefault();
+            const form = event.target;
             const status = document.querySelector('[role=status]');
             try {
-              const response = await fetch(${JSON.stringify(prefix)}, {
+              const response = await fetch(form.dataset.prefix, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   action: event.submitter.value,
-                  name: ${formName},
-                  version: ${formVersion},
-                  reason: event.target.reason.value,
+                  name: form.dataset.name,
+                  version: form.dataset.version,
+                  token: form.dataset.token,
+                  reason: form.reason.value,
                 }),
               });
               const result = await response.json();
@@ -1112,9 +1107,9 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
           `<ul>${reasons}</ul><p>含脚本 ${info?.scripts ?? 0} 个。技能以安装者身份运行。请查看附带文件后审批。</p>`,
           '<a href="/#/market">返回技能市场查看所有待审版本</a>',
           `<pre>${esc(source)}</pre>`,
-          '<form><label for="reason">拒绝原因</label>',
+          `<form data-prefix="${esc(prefix)}" data-name="${esc(name)}" data-version="${esc(id)}" data-token="${esc(tokenCheck?.claims ? token : '')}"><label for="reason">拒绝原因</label>`,
           `<textarea id="reason" name="reason" maxlength="1000" ${requested === 'reject' ? 'autofocus' : ''}></textarea>`,
-          '<button name="action" value="approve">批准</button> <button name="action" value="reject">拒绝</button>',
+          `<button name="action" value="approve" ${requested === 'approve' ? 'autofocus' : ''}>批准</button> <button name="action" value="reject">拒绝</button>`,
           ...(live?.version === id ? [' <button name="action" value="withdraw">下架</button>'] : []),
           '<button name="action" value="resend">重发审批卡片</button></form><p role="status"></p>',
           `${reviewScript}</html>`,
@@ -1130,7 +1125,6 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
         json(res, 405, { message: '请求方法不支持。' });
         return true;
       }
-      if (!signed && req.headers.origin !== origin) throw fail(403, '请求来源不受信任。');
       if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) throw fail(415, '请求必须使用 JSON。');
       const chunks = [];
       let size = 0;
@@ -1149,6 +1143,15 @@ export function createSharedSkillsHandler({ store, authenticate, tokenAuthentica
       skillName = body.name;
       action = ['install', 'uninstall', 'withdraw', 'approve', 'reject', 'resend', 'notify-author', 'submit'].includes(body.action)
         ? body.action : 'unknown';
+      // Cookie callers keep the main Origin rule; approval always needs the exact Origin, even when signed.
+      if ((!signed || body.action === 'approve') && req.headers.origin !== origin) throw fail(403, '请求来源不受信任。');
+      const approvalToken = typeof body.token === 'string' ? body.token : typeof body.t === 'string' ? body.t : '';
+      if (body.action === 'approve' && approvalToken) {
+        if (!store.admin(user)) throw fail(403, '只有配置的审批人可以审批。');
+        const checked = store.reviewToken?.(approvalToken, body.name, body.version);
+        if (!checked?.claims) throw fail(403, '审批令牌无效或已失效。');
+        if (checked.processed) throw fail(409, '这个版本已经审批，请刷新市场查看。');
+      }
       if (['submit', 'install'].includes(body.action) && (user.backend !== 'aionui' || !/^[a-zA-Z0-9_-]+$/.test(user.slug))) {
         throw fail(403, '请先开通新版工作伙伴。');
       }

@@ -79,7 +79,7 @@ export function marketNotifications(organization, fetcher = fetch) {
               {
                 tag: 'button',
                 type: 'primary',
-                text: { tag: 'plain_text', content: '批准并发布' },
+                text: { tag: 'plain_text', content: '查看并批准' },
                 url: approve,
               },
               {
