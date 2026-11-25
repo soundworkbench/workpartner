@@ -23,15 +23,17 @@ function json(res, status, body, extra = {}) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
     'x-content-type-options': 'nosniff', 'content-length': Buffer.byteLength(text), ...extra });
   res.end(text);
+  return true;
 }
 
 function page(res, status, title, message) {
   const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
   res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title><body style="font-family:-apple-system,sans-serif;display:grid;place-items:center;height:90vh"><main><h2>${escape(title)}</h2><p>${escape(message)}</p></main></body>`);
+  return true;
 }
 
-function fail(res, status, error) { json(res, status, { error }); }
+function fail(res, status, error) { return json(res, status, { error }); }
 
 function readBody(req, max = 4096) {
   return new Promise((resolve, reject) => {
@@ -175,7 +177,7 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
       if (!parameters) return page(res, 400, '桌面登录请求无效', 'redirect_uri、code_challenge、code_challenge_method 或 state 不符合要求。');
       if (organization.features?.myKey !== true) return page(res, 403, '桌面版暂未开放', '桌面版钥匙功能尚未开放。');
       const who = sessionAuthenticate(req), user = who && currentUser(who.unionId);
-      if (!who) { const next = `${url.pathname}${url.search}`; return res.writeHead(302, { location: `/_wp/login?next=${encodeURIComponent(next)}`, 'cache-control': 'no-store' }).end(); }
+      if (!who) { const next = `${url.pathname}${url.search}`; res.writeHead(302, { location: `/_wp/login?next=${encodeURIComponent(next)}`, 'cache-control': 'no-store' }); res.end(); return true; }
       if (!user || !admitted(user)) return page(res, 403, '桌面版暂未开放', '你的工作伙伴尚未开通桌面版登录。');
       const current = now();
       for (const [oldCode, old] of pending) if (old.until <= current) removePending(oldCode, old);
@@ -192,7 +194,7 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
         removePending(oldest);
       }
       const target = new URL(parameters.redirectUri); target.searchParams.set('code', code); target.searchParams.set('state', parameters.state);
-      res.writeHead(302, { location: target.href, 'cache-control': 'no-store' }); return res.end();
+      res.writeHead(302, { location: target.href, 'cache-control': 'no-store' }); res.end(); return true;
     }
     if (url.pathname === TOKEN) {
       if (req.method !== 'POST') return fail(res, 405, 'method_not_allowed');
@@ -216,7 +218,7 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
       const result = authToken(req); if (!result) return fail(res, 401, 'invalid_token');
       if (!allowKey(result.user)) return fail(res, 403, 'key_not_allowed');
       const fp = url.searchParams.get('fp');
-      if (fp !== null && !/^[a-f0-9]{12}$/i.test(fp)) return fail(res, 400, 'invalid_fingerprint');
+      if (fp !== null && fp !== '' && !/^[a-f0-9]{12}$/i.test(fp)) return fail(res, 400, 'invalid_fingerprint');
       const retry = rateLimited(result.user.unionId, policy().rate);
       if (retry) return json(res, 429, { error: 'rate_limited' }, { 'retry-after': String(retry) });
       let key;
