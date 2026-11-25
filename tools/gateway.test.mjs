@@ -154,8 +154,9 @@ export function createGatewayExtension({ docker, runtime, personalRuntime, SESSI
   let conversation = { id: 'new-chat', name: 'Initial', extra: { backend: 'codex' } };
   const upstream = http.createServer(async (req, res) => {
     if (req.url === '/login') { res.writeHead(200, { 'set-cookie': 'personal-session=fixture; HttpOnly' }); return res.end('{}'); }
-    upstreamHits.push({ path: req.url, headers: req.headers });
-    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const hit = { path: req.url, headers: req.headers, bytes: 0 };
+    upstreamHits.push(hit);
+    const chunks = []; for await (const chunk of req) { hit.bytes += chunk.length; if (!req.url.startsWith('/api/upload')) chunks.push(chunk); }
     if (req.method === 'PATCH') conversation = { ...conversation, ...JSON.parse(Buffer.concat(chunks)) };
     res.setHeader('content-type', 'application/json'); res.setHeader('set-cookie', 'private-cookie=upstream');
     res.end(req.url.startsWith('/api/conversations') ? JSON.stringify({ data: conversation }) : 'workspace response');
@@ -230,8 +231,42 @@ globalThis.fetch = async (url, init) => {
     assert.equal(done.status, 302, output);
     return done.headers['set-cookie'][0].split(';')[0];
   }
-  return { request, login, calls, upstreamHits, dir, org, user, output: () => output };
+  return { request, login, calls, upstreamHits, dir, org, user, port: () => ports.gateway, output: () => output };
 }
+
+test('large request bodies stream to the workspace before the upload finishes', async t => {
+  const f = await fixture(t);
+  const cookie = await f.login(), headers = { cookie, origin: 'https://' + f.org.publicHost };
+  const part = Buffer.alloc(2 * 1024 * 1024, 1), total = part.length * 2;
+  const response = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: f.port(), path: '/api/upload', method: 'POST',
+      headers: { host: f.org.publicHost, ...headers, 'content-type': 'application/octet-stream', 'content-length': total } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.write(part);
+    // A buffering gateway would wait for the whole body; the workspace must see bytes while the client still holds the rest.
+    const started = Date.now();
+    const poll = setInterval(() => {
+      const hit = f.upstreamHits.findLast(hit => hit.path === '/api/upload');
+      if (hit?.bytes > 0) { clearInterval(poll); req.end(part); }
+      else if (Date.now() - started > 5000) { clearInterval(poll); req.destroy(); reject(new Error('Upload was not streamed: ' + f.output())); }
+    }, 20);
+  });
+  assert.equal(response, 200);
+  assert.equal(f.upstreamHits.findLast(hit => hit.path === '/api/upload').bytes, total);
+  const chunked = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: f.port(), path: '/api/upload-chunked', method: 'POST',
+      headers: { host: f.org.publicHost, ...headers, 'content-type': 'application/octet-stream' } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject); req.write(part); req.end(part);
+  });
+  assert.equal(chunked, 200);
+  assert.equal(f.upstreamHits.findLast(hit => hit.path === '/api/upload-chunked').bytes, total);
+  const small = await f.request('/api/conversations', { method: 'POST', headers, body: '{}' });
+  assert.equal(small.status, 200);
+});
 
 test('Docker gateway warns once and ignores per-user Kubernetes images', async t => {
   for (const userImages of [{ user1: 'workspace:pilot' }, {}, undefined]) await t.test(JSON.stringify(userImages) ?? 'omitted', async t => {
