@@ -186,6 +186,12 @@
     "reset": { "enabled": false, "blockedNote": "" },
     "reference": { "weekly": 0, "accounts": {} }
   },
+  "desktop": {
+    "enabled": false,
+    "allow": [],
+    "tokenDays": 30,
+    "keyRateLimitPerMinute": 30
+  },
   "feedback": {
     "allow": [],
     "handlers": [],

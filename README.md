@@ -33,6 +33,14 @@ Use a Linux host with Docker, Node.js 24, Python 3, outbound HTTPS, a domain wit
 
 Set `ORG_DIR` to the absolute path of the organization directory prepared in step 1. The gateway supplies model defaults and the picker catalog at runtime. Later model-configuration changes replace idle personal containers without rebuilding the image. Appearance remains a build input; see [organization configuration](docs/organization.md).
 
+Desktop client login is disabled by default. To enable it for a production user, add a `desktop` section to `organization.json`:
+
+```json
+"desktop": { "enabled": true, "allow": ["tang"], "tokenDays": 30, "keyRateLimitPerMinute": 30 }
+```
+
+See the [desktop authentication interface](docs/desktop-auth.md) for the PKCE flow and key endpoint.
+
 ## Repository map
 
 | Directory | Purpose |

@@ -33,6 +33,14 @@ flowchart LR
 
 `ORG_DIR` 为第 1 步准备的组织目录的绝对路径。模型默认值与选择器目录由网关在运行时传入；以后修改模型配置，空闲时重建个人容器即可，无需重建镜像。外观仍属于构建输入，详见[组织配置说明](docs/organization.md)。
 
+桌面客户端登录默认关闭。需要时在 `organization.json` 增加 `desktop` 段落（生产上线前只把实际用户加入名单）：
+
+```json
+"desktop": { "enabled": true, "allow": ["tang"], "tokenDays": 30, "keyRateLimitPerMinute": 30 }
+```
+
+完整接口和安全约束见[桌面版登录接口](docs/desktop-auth.md)。
+
 ## 目录
 
 | 目录 | 用途 |

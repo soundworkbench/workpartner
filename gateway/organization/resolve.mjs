@@ -71,6 +71,13 @@ export function organizationData(environment = process.env) {
   if (!/^[A-Z_][A-Z0-9_]*$/.test(data.model.keyEnvironment) || !/^[A-Z_][A-Z0-9_]*$/.test(data.model.baseEnvironment)) throw new Error('Invalid model environment variable');
   if (!['pool', 'exec'].includes(data.model.keyMode)) throw new Error('Invalid model key mode');
   if (!['unrestricted', 'pilot-group'].includes(data.identity.admission)) throw new Error('Invalid admission policy');
+  const desktop = data.desktop;
+  if (!desktop || typeof desktop.enabled !== 'boolean' || !Array.isArray(desktop.allow)
+    || desktop.allow.some(value => typeof value !== 'string' || !value)
+    || !Number.isSafeInteger(desktop.tokenDays) || desktop.tokenDays < 1
+    || !Number.isSafeInteger(desktop.keyRateLimitPerMinute) || desktop.keyRateLimitPerMinute < 1) {
+    throw new Error('Invalid desktop configuration');
+  }
   const dnsNdots = data.runtime.k8s?.dnsNdots;
   if (dnsNdots !== undefined && (!Number.isInteger(dnsNdots) || dnsNdots < 1 || dnsNdots > 15)) {
     throw new Error('runtime.k8s.dnsNdots must be an integer from 1 to 15');
