@@ -26,7 +26,7 @@ function fixture(t, options = {}) {
     const response = { headers: {}, writeHead(status, values) { this.statusCode = status; Object.assign(this.headers, values); }, end(value = '') { this.body = value; } };
     const pending = handler(req, response, new URL(route, 'https://workspace.example.test'));
     if (body !== undefined) { req.emit('data', Buffer.from(body)); req.emit('end'); }
-    await pending;
+    response.handleResult = await pending;
     return response;
   }
   function authorize(slug = 'ok') {
@@ -40,35 +40,43 @@ function fixture(t, options = {}) {
 
 test('desktop authorize, token, key and fingerprint flow is one-time and audited', async t => {
   const f = fixture(t); const flow = f.authorize(); const auth = await flow.request;
-  assert.equal(auth.statusCode, 302); const callback = new URL(auth.headers.location); const code = callback.searchParams.get('code');
+  assert.equal(auth.statusCode, 302); assert.strictEqual(auth.handleResult, true); const callback = new URL(auth.headers.location); const code = callback.searchParams.get('code');
   const tokenResponse = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect, device_name: 'CRY AI' }) });
-  assert.equal(tokenResponse.statusCode, 200); const token = JSON.parse(tokenResponse.body); assert.match(token.access_token, /^wpd\./);
+  assert.equal(tokenResponse.statusCode, 200); assert.strictEqual(tokenResponse.handleResult, true); const token = JSON.parse(tokenResponse.body); assert.match(token.access_token, /^wpd\./);
   assert.equal(JSON.parse(tokenResponse.body).user.union_id, person.unionId);
   const key = await f.request('/_wp/api/desktop/key', { headers: { authorization: `Bearer ${token.access_token}` } });
-  assert.equal(key.statusCode, 200); const value = JSON.parse(key.body); assert.equal(value.key, 'fixture-desktop-key'); assert.equal(value.base_url, 'https://models.example.test');
+  assert.equal(key.statusCode, 200); assert.strictEqual(key.handleResult, true); const value = JSON.parse(key.body); assert.equal(value.key, 'fixture-desktop-key'); assert.equal(value.base_url, 'https://models.example.test');
   assert.ok(!fs.readFileSync(path.join(f.directory, 'desktop-auth/audit.log'), 'utf8').includes(value.key));
+  const emptyFingerprint = await f.request('/_wp/api/desktop/key?fp=', { headers: { authorization: `Bearer ${token.access_token}` } });
+  assert.equal(emptyFingerprint.statusCode, 200); assert.strictEqual(emptyFingerprint.handleResult, true); assert.equal(JSON.parse(emptyFingerprint.body).key, 'fixture-desktop-key');
+  const omittedFingerprint = await f.request('/_wp/api/desktop/key', { headers: { authorization: `Bearer ${token.access_token}` } });
+  assert.equal(omittedFingerprint.statusCode, 200); assert.strictEqual(omittedFingerprint.handleResult, true); assert.equal(JSON.parse(omittedFingerprint.body).key, 'fixture-desktop-key');
+  const invalidFingerprint = await f.request('/_wp/api/desktop/key?fp=xyz', { headers: { authorization: `Bearer ${token.access_token}` } });
+  assert.equal(invalidFingerprint.statusCode, 400); assert.deepEqual(JSON.parse(invalidFingerprint.body), { error: 'invalid_fingerprint' }); assert.strictEqual(invalidFingerprint.handleResult, true);
   const same = await f.request('/_wp/api/desktop/key?fp=' + value.fingerprint, { headers: { authorization: `Bearer ${token.access_token}` } }); assert.equal(same.statusCode, 204); assert.equal(same.body, '');
-  const replay = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) }); assert.equal(replay.statusCode, 400);
+  assert.strictEqual(same.handleResult, true);
+  const replay = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) }); assert.equal(replay.statusCode, 400); assert.deepEqual(JSON.parse(replay.body), { error: 'invalid_grant' }); assert.strictEqual(replay.handleResult, true);
 });
 
 test('authorize validates loopback redirect and PKCE parameters', async t => {
   const f = fixture(t); const base = new URL('/_wp/desktop/authorize', 'https://workspace.example.test');
   const challenge = 'A'.repeat(43); const bad = ['https://127.0.0.1:12345/cb', 'http://localhost:12345/cb', 'http://10.0.0.1:12345/cb', 'http://127.0.0.1:12345/', 'http://127.0.0.1:12345/cb?x=1', 'http://127.0.0.1:999/cb', 'http://127.0.0.1:65536/cb'];
-  for (const value of bad) { base.search = new URLSearchParams({ redirect_uri: value, code_challenge: challenge, code_challenge_method: 'S256', state: 's' }); assert.equal((await f.request(base.pathname + base.search)).statusCode, 400); }
-  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: 'short', code_challenge_method: 'S256', state: 's' }); assert.equal((await f.request(base.pathname + base.search)).statusCode, 400);
-  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'plain', state: 's' }); assert.equal((await f.request(base.pathname + base.search)).statusCode, 400);
-  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state: ' ' }); assert.equal((await f.request(base.pathname + base.search)).statusCode, 400);
+  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state: 's' }); const login = await f.request(base.pathname + base.search); assert.equal(login.statusCode, 302); assert.strictEqual(login.handleResult, true);
+  for (const value of bad) { base.search = new URLSearchParams({ redirect_uri: value, code_challenge: challenge, code_challenge_method: 'S256', state: 's' }); const response = await f.request(base.pathname + base.search); assert.equal(response.statusCode, 400); assert.strictEqual(response.handleResult, true); }
+  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: 'short', code_challenge_method: 'S256', state: 's' }); { const response = await f.request(base.pathname + base.search); assert.equal(response.statusCode, 400); assert.strictEqual(response.handleResult, true); }
+  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'plain', state: 's' }); { const response = await f.request(base.pathname + base.search); assert.equal(response.statusCode, 400); assert.strictEqual(response.handleResult, true); }
+  base.search = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state: ' ' }); { const response = await f.request(base.pathname + base.search); assert.equal(response.statusCode, 400); assert.strictEqual(response.handleResult, true); }
 });
 
 test('refresh, generation revocation, live admission and bearer separation', async t => {
   const f = fixture(t); const flow = f.authorize(); const auth = await flow.request; const code = new URL(auth.headers.location).searchParams.get('code');
   const issued = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) }); const token = JSON.parse(issued.body).access_token;
-  const refresh = await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers: { authorization: `Bearer ${token}` } }); assert.equal(refresh.statusCode, 200);
-  assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: 'Bearer zpd.fake.token' } })).statusCode, 401);
+  const refresh = await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers: { authorization: `Bearer ${token}` } }); assert.equal(refresh.statusCode, 200); assert.strictEqual(refresh.handleResult, true);
+  const invalidKey = await f.request('/_wp/api/desktop/key', { headers: { authorization: 'Bearer zpd.fake.token' } }); assert.equal(invalidKey.statusCode, 401); assert.strictEqual(invalidKey.handleResult, true);
   assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: 'Bearer ' + token.slice(0, -1) + 'x' } })).statusCode, 401);
-  assert.equal((await f.request('/_wp/api/desktop/revoke-all', { method: 'POST', headers: { authorization: `Bearer ${token}` } })).statusCode, 200);
-  assert.equal((await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers: { authorization: `Bearer ${token}` } })).statusCode, 401);
-  f.config.desktop.allow = []; assert.equal((await f.request('/_wp/desktop/authorize?redirect_uri=' + encodeURIComponent(redirect) + '&code_challenge=' + 'A'.repeat(43) + '&code_challenge_method=S256&state=s', { headers: { cookie: 'wp_sid=ok' } })).statusCode, 403);
+  const revoked = await f.request('/_wp/api/desktop/revoke-all', { method: 'POST', headers: { authorization: `Bearer ${token}` } }); assert.equal(revoked.statusCode, 200); assert.strictEqual(revoked.handleResult, true);
+  const revokedRefresh = await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers: { authorization: `Bearer ${token}` } }); assert.equal(revokedRefresh.statusCode, 401); assert.strictEqual(revokedRefresh.handleResult, true);
+  f.config.desktop.allow = []; const deniedAuthorize = await f.request('/_wp/desktop/authorize?redirect_uri=' + encodeURIComponent(redirect) + '&code_challenge=' + 'A'.repeat(43) + '&code_challenge_method=S256&state=s', { headers: { cookie: 'wp_sid=ok' } }); assert.equal(deniedAuthorize.statusCode, 403); assert.strictEqual(deniedAuthorize.handleResult, true);
 });
 
 test('web revoke requires same origin and rate limiting is per person', async t => {
@@ -189,7 +197,7 @@ test('legacy desktop and feishu desktop paths are left to their original handler
   const f = fixture(t);
   assert.equal(f.handle.isDesktopRoute(new URL('/_wp/desktop-login', 'https://workspace.example.test')), false);
   assert.equal(f.handle.isDesktopRoute(new URL('/_wp/feishu/desktop-start', 'https://workspace.example.test')), false);
-  assert.equal((await f.request('/_wp/desktop-login')).statusCode, undefined);
-  assert.equal((await f.request('/_wp/feishu/desktop-start')).statusCode, undefined);
+  const legacy = await f.request('/_wp/desktop-login'); assert.equal(legacy.statusCode, undefined); assert.strictEqual(legacy.handleResult, false);
+  const feishu = await f.request('/_wp/feishu/desktop-start'); assert.equal(feishu.statusCode, undefined); assert.strictEqual(feishu.handleResult, false);
 });
 
