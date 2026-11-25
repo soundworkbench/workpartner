@@ -793,5 +793,14 @@ html body main.layout-content { position:relative; }
 .wp-cron-window-error { color: var(--color-danger-light-4, #c33); }
 @media (max-width: 767px) {
   .wp-cron-window-times > .wp-cron-window-field { flex-basis: 100%; }
-  .wp-cron-window input { font-size: 16px; }
+  .wp-cron-modal input,
+  .wp-cron-modal textarea,
+  .wp-cron-modal .arco-input,
+  .wp-cron-modal .arco-input-number-input,
+  .wp-cron-modal .arco-picker-input input,
+  .wp-cron-modal .arco-select-view-input,
+  .wp-cron-window input,
+  .wp-cron-window textarea { font-size: 16px; }
+  /* Arco's size/variant selector is more specific than the generic input rule. */
+  .wp-cron-modal .arco-select-view-input { font-size: 16px !important; }
 }

@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 
 const read = path => fs.readFileSync(new URL(path, import.meta.url), 'utf8');
 const overlay = read('../image/rebrand/overlay/wp-cron-window.js');
+const css = read('../image/rebrand/overlay/wp-overlay.css');
 const fixture = read('./fixtures/aionui-2.1.47-cron.js');
 const extracted = spawnSync('python3', ['-I', '-c', `
 import ast, json, sys
@@ -25,6 +26,19 @@ let patched = fixture;
 for (const [a, b] of functionPatches) {
   assert.equal(fixture.split(a).length - 1, 1, `fixture anchor: ${a}`);
   patched = patched.replace(a, b);
+}
+const requiredFormAnchors = [
+  'u.setFieldsValue({name:n.name,assistant:o,prompt:n.target.payload.text})',
+  'g.mode==="advanced"&&t.createElement(E,{label:a("cron.page.form.cronExpr"),field:"customCronExpr"',
+  'className:"w-[min(560px,calc(100vw-32px))] max-w-560px"',
+];
+for (const prefix of requiredFormAnchors) {
+  const pair = patches.find(([a]) => a.startsWith(prefix));
+  assert.ok(pair, `missing form patch: ${prefix}`);
+  assert.equal(fixture.split(pair[0]).length - 1, 1, `fixture form anchor: ${pair[0]}`);
+}
+for (const [a, b] of windowPatches.filter(([a]) => formOnly.some(prefix => a.startsWith(prefix)))) {
+  if (fixture.includes(a)) { assert.equal(fixture.split(a).length - 1, 1, `fixture form anchor: ${a}`); patched = patched.replace(a, b); }
 }
 for (const [a, b] of patches.filter(pair => !windowPatches.includes(pair))) {
   if (patched.includes(a)) { assert.equal(patched.split(a).length - 1, 1, a); patched = patched.replace(a, b); }
@@ -68,6 +82,29 @@ test('window expressions reopen and display readable labels', () => {
     assert.equal(fixed.xt(fixed.vt(expr)), expr); assert.equal(fixed.Obo(expr, () => 'native'), description);
   }
 });
+test('advanced cron validation accepts mixed weekday syntax and rejects invalid ranges', () => {
+  const validate = fixed.window.wpCronWindow.validateAdvanced;
+  for (const expr of [
+    '0,30 1-2 * * *',
+    '0 9 * * *',
+    '0 9 * * TUE,WED',
+    '0 9 * * WED,MON',
+    '0 9 * * SAT-SUN',
+    '0 9 * * 1-5',
+    '0 9 * * 0,7',
+    '*/15 * * * *',
+    '0 9 * * MON-FRI/2',
+  ]) assert.equal(validate(expr), '', expr);
+  for (const expr of [
+    '61 * * * *',
+    'a b c',
+    '0 9 * * FOO',
+    '0 9 * * 5-1',
+    '0 9 * *',
+    '0 9 * * * *',
+    '*/0 * * * *',
+  ]) assert.match(validate(expr), /Cron/, expr);
+});
 test('unrecognized hour and minute syntax never renders as a clock time', () => {
   for (const expr of ['0,30 1-2 * * *', '0 */2 * * *', '*/30 1-2 * * MON-FRI', '*/5 * * * MON', '0 24 * * MON', '0 9 * * * *']) {
     assert.equal(fixed.yt(expr).frequency, 'custom', expr);
@@ -99,6 +136,35 @@ test('save rejects invalid windows before validation or a request', async () => 
   context.g.wpw = context.window.wpCronWindow.defaults(); await context.je();
   assert.equal(validations, 1); assert.equal(requests, 1);
 });
+test('advanced save rejects invalid expressions and preserves a legacy expression', async () => {
+  const context = app(patched);
+  const errors = []; const requests = [];
+  Object.assign(context, {
+    b: 'custom', g: { mode: 'advanced', advancedExpression: '0 9 * * FOO' },
+    le: { error: e => errors.push(e) },
+    u: { validate: async () => {
+      if (context.g.mode === 'advanced') {
+        const error = context.window.wpCronWindow.validateAdvanced(context.g.advancedExpression);
+        if (error) throw new Error(error);
+      }
+      return {};
+    } },
+    request: expr => requests.push(expr), x: () => {}, V: true,
+    n: { schedule: { kind: 'cron', expr: '0,30 1-2 * * *' } },
+    tt: () => ({}), re: { expr: 'normalized value', description: 'rule' },
+  });
+  vm.runInContext(`var ${replacement('je=async')}${replacement('x(!0);')}result=N;request(r)}catch(e){le.error(e)}};`, context);
+  await context.je();
+  assert.equal(requests.length, 0);
+  assert.equal(errors.length, 1);
+
+  const expr = '0,30 1-2 * * *';
+  context.g = context.vt(expr);
+  context.n.schedule.expr = expr;
+  context.re = { expr: 'normalized value', description: 'rule' };
+  await context.je();
+  assert.deepEqual(requests, [expr]);
+});
 test('unchanged old schedules preserve exact stored bytes; edited controls use the new expression', () => {
   const context = app(patched);
   const snippet = replacement('x(!0);');
@@ -112,4 +178,28 @@ test('unchanged old schedules preserve exact stored bytes; edited controls use t
     else context.C = '12:00';
     assert.equal(context.schedule().expr, 'normalized value', expr);
   }
+});
+
+test('advanced legacy edits populate the required form field and preserve the expression', () => {
+  const fields = {};
+  const expr = '0,30 1-2 * * *';
+  fixed.cronEditInit({ setFieldsValue: value => Object.assign(fields, value) }, { name: 'legacy', target: { payload: { text: 'run' } } }, fixed.yt(expr), 'assistant', expr);
+  assert.equal(fields.customCronExpr, expr);
+  assert.equal(fixed.window.wpCronWindow.validateAdvanced(expr), '');
+  assert.match(fixed.window.wpCronWindow.validateAdvanced('not a cron expression'), /Cron/);
+  assert.match(fixed.window.wpCronWindow.validateAdvanced('99 99 * * *'), /Cron/);
+  const field = fixed.cronAdvancedField({ createElement: (type, props, ...children) => ({ type, props, children }) }, 'Item', 'TextArea', key => key,
+    { mode: 'advanced', advancedExpression: expr }, () => {}, { setFieldsValue: value => Object.assign(fields, value) });
+  field.children[0].props.onChange('bad');
+  assert.equal(fields.customCronExpr, 'bad');
+  assert.match(patched, /customCronExpr:r\.frequency==="custom"\?e:void 0/);
+  assert.match(patched, /validateAdvanced\(e\)/);
+});
+
+test('automation modal inputs use a mobile 16px rule scoped to the modal', () => {
+  const mobile = css.slice(css.lastIndexOf('@media (max-width: 767px)'));
+  assert.match(mobile, /\.wp-cron-modal input/);
+  assert.match(mobile, /\.wp-cron-modal textarea/);
+  assert.match(mobile, /\.wp-cron-modal \.arco-select-view-input\s*\{\s*font-size:\s*16px\s*!important\s*;\s*\}/);
+  assert.match(patched, /wp-cron-modal w-\[min\(560px/);
 });

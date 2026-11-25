@@ -91,6 +91,46 @@
     return days + ' ' + s.start + '–' + end + (zh ? ' ' : ', ') + (s.every === 60 ? (zh ? '每小时' : 'hourly') : (zh ? '每 ' + s.every + ' 分钟' : 'every ' + s.every + ' min'));
   }
   function label(expr, lang) { var s = parse(expr); return s ? describe(s, lang) : null; }
+  function numericCronField(value, min, max) {
+    return value.split(',').every(function (part) {
+      var pieces = part.split('/');
+      if (pieces.length > 2 || (pieces.length === 2 && (!/^\d+$/.test(pieces[1]) || Number(pieces[1]) < 1))) return false;
+      if (pieces[0] === '*') return true;
+      var bounds = pieces[0].split('-');
+      if (bounds.length > 2 || bounds.some(function (n) { return !/^\d+$/.test(n); })) return false;
+      var start = Number(bounds[0]), end = bounds.length === 2 ? Number(bounds[1]) : start;
+      return start >= min && end <= max && start <= end;
+    });
+  }
+  function weekdayCronValue(value) {
+    var token = value.toUpperCase();
+    if (/^\d+$/.test(token)) {
+      var number = Number(token);
+      return number >= 0 && number <= 7 ? (number === 0 ? 7 : number) : null;
+    }
+    var index = WEEK.indexOf(token);
+    return index < 0 ? null : index + 1;
+  }
+  function weekdayCronField(value) {
+    return value.split(',').every(function (part) {
+      var pieces = part.split('/');
+      if (pieces.length > 2 || (pieces.length === 2 && (!/^\d+$/.test(pieces[1]) || Number(pieces[1]) < 1))) return false;
+      if (pieces[0] === '*') return true;
+      var bounds = pieces[0].split('-');
+      if (bounds.length > 2 || bounds.some(function (token) { return weekdayCronValue(token) === null; })) return false;
+      return bounds.length === 1 || weekdayCronValue(bounds[0]) <= weekdayCronValue(bounds[1]);
+    });
+  }
+  function validateAdvanced(expr, lang) {
+    var value = typeof expr === 'string' ? expr.trim() : '';
+    if (!value) return copy('请输入 Cron 表达式', 'Enter a cron expression', lang);
+    var fields = value.split(/\s+/);
+    if (fields.length !== 5) return copy('Cron 表达式必须包含 5 个字段', 'Cron expressions must contain 5 fields', lang);
+    var numeric = [[0, 59], [0, 23], [1, 31], [1, 12]];
+    for (var i = 0; i < 4; i++) if (!numericCronField(fields[i], numeric[i][0], numeric[i][1])) return copy('Cron 表达式格式不正确', 'Enter a valid cron expression', lang);
+    if (!weekdayCronField(fields[4])) return copy('Cron 表达式格式不正确', 'Enter a valid cron expression', lang);
+    return '';
+  }
   function render(h, ctx) {
     var s = ctx.state || defaults(), el = h.createElement, zh = chinese(), error = validate(s);
     function text(a, b) { return zh ? a : b; }
@@ -115,5 +155,5 @@
         el('div', null, describe(s)), el('div', null, preview), el('div', null, text('生成的 Cron：', 'Generated Cron: '), el('code', null, build(s)))),
       s.days === 'monthly' && s.monthDays.some(function (d) { return d >= 29; }) && el('div', null, text('没有这一天的月份不执行', 'Months without this day are skipped')));
   }
-  root.wpCronWindow = { defaults: defaults, build: build, validate: validate, parse: parse, describe: describe, label: label, runTimes: runTimes, render: render };
+  root.wpCronWindow = { defaults: defaults, build: build, validate: validate, validateAdvanced: validateAdvanced, parse: parse, describe: describe, label: label, runTimes: runTimes, render: render };
 })(typeof window === 'object' ? window : globalThis);
