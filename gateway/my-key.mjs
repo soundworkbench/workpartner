@@ -17,6 +17,19 @@ const positive = value => number(value) && value > 0;
 const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 const fail = status => Object.assign(new Error('My key request failed'), { status });
 
+/** Shared admission check for web and desktop access to a user's key. */
+export function myKeyAllowed(user, config) {
+  return Boolean(typeof user?.slug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(user.slug)
+    && user?.unionId && Array.isArray(config?.allow)
+    && config.allow.some(value => value === '*' || value === user.slug || value === user.unionId));
+}
+
+/** Read a key without exposing filesystem errors to callers. */
+export async function readMyKey(keyFor, user) {
+  try { return (await keyFor(user))?.trim() || null; }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
 export function maskKey(key) {
   return key.length < 12 ? '••••••••' : (key.startsWith('sk-') ? 'sk-' : '') + '••••••••' + key.slice(-4);
 }
@@ -163,11 +176,8 @@ export function createMyKey({ organization, organizationData, authenticate, sess
         revealSeconds: Number.isInteger(config?.revealSeconds) ? Math.max(2, Math.min(300, config.revealSeconds)) : 30 };
     } catch { return { allow: [], baseUrl: '', revealSeconds: 30 }; }
   }
-  const admitted = (user, config) => Boolean(typeof user?.slug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(user.slug) && user?.unionId && config.allow.some(v => v === '*' || v === user.slug || v === user.unionId));
-  async function readKey(user) {
-    try { return (await keyFor(user))?.trim() || null; }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  }
+  const admitted = (user, config) => myKeyAllowed(user, config);
+  async function readKey(user) { return readMyKey(keyFor, user); }
   const reply = (res, status, data) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
       ...(data === undefined ? { 'content-length': 0 } : {}) });
@@ -230,6 +240,15 @@ export function createMyKey({ organization, organizationData, authenticate, sess
     return true;
   };
   handle.close = reset.close;
-  handle.clientFor = user => organization.features?.myKey === false || !admitted(user, policy()) ? '' : myKeyClient();
+  handle.clientFor = user => {
+    if (organization.features?.myKey === false || !admitted(user, policy())) return '';
+    let desktop = false;
+    try {
+      const config = organizationData()?.desktop;
+      desktop = config?.enabled === true && Array.isArray(config.allow)
+        && config.allow.some(value => value === '*' || value === user?.slug || value === user?.unionId);
+    } catch { /* Configuration errors hide the optional desktop control. */ }
+    return myKeyClient({ desktop });
+  };
   return handle;
 }

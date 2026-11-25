@@ -132,6 +132,7 @@ const chatTitles = createChatTitles({ enabled: organization.features.autoTitle, 
   timeoutMs: process.env.WP_TITLE_TIMEOUT_MS, models: process.env.WP_TITLE_MODELS });
 import { createFeedback } from './feedback.mjs';
 import { createMyKey } from './my-key.mjs';
+import { createDesktopAuth } from './desktop-auth.mjs';
 import { createVoice } from './voice.mjs';
 import { createFeishuBot } from './feishu-bot.mjs';
 import { createFeishuModel } from './feishu-model.mjs';
@@ -145,6 +146,9 @@ myKey = organization.features.myKey === true ? createMyKey({ organization, organ
   authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
   runtime, restarted: slug => aionui.forget(slug), keyFile: modelKeyFile,
 }) : undefined;
+
+const desktopAuth = createDesktopAuth({ organization, organizationData, users, sessionAuthenticate: sessionOf,
+  keyFor: modelKeyFor, keyFile: modelKeyFile, sessionKey: SESSION_KEY });
 
 feishuBot = createFeishuBot({ organization, organizationData,
   authenticate: req => userFor(req).user, runtime,
@@ -306,8 +310,8 @@ function welcomeNew(res, who) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (migration.forward(req, res, null)) return;
     const url = new URL(req.url, `https://${PUBLIC_HOST}`);
+    if (!desktopAuth.isDesktopRoute(url) && migration.forward(req, res, null)) return;
     const host = String(req.headers.host || "").toLowerCase();
     if (preview?.isPreviewHost(host)) {
       const user = previewSessionUser(req, { key: SESSION_KEY, host: organization.server.previewHost, users });
@@ -322,6 +326,7 @@ const server = http.createServer(async (req, res) => {
     if (host !== PUBLIC_HOST && host !== `${PUBLIC_HOST}:443` && !oldHost && host !== new URL(organization.runtime.gatewayOrigin).host) {
       res.writeHead(403); return res.end();
     }
+    if (await desktopAuth(req, res, url)) return;
     const user = userFor(req).user || (req.headers.authorization && tokenUser(req, SESSION_KEY, users()));
     const loginCallback = (url.pathname === '/_wp/callback' || url.pathname === organization.identity.callbackPath)
       && !String(url.searchParams.get('state') || '').startsWith('feishu-');

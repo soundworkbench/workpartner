@@ -1,11 +1,12 @@
 /** Gateway-only UI. The serialized installer contains no deployment or identity data. */
 export function myKeyClient(_options = {}) {
-  return `\n;(${installMyKey.toString()})({});`;
+  return `\n;(${installMyKey.toString()})(${JSON.stringify({ desktop: _options.desktop === true })});`;
 }
 
-function installMyKey() {
+function installMyKey(options = {}) {
   try {
     const API = '/_wp/api/my-key', ui = {};
+    const desktop = options.desktop === true;
     let dialog, observer, data, hideTimer, statusTimer, settings, language, revoked = false;
     let tab = 'claude', loading = false, busy = false, version = 0, status = '';
     let confirming = false, resetBusy = false, resetResult = '', pollTimer, pollStarted = 0;
@@ -136,6 +137,7 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       ui.keyTitle = node('h3'); ui.value = mark(node('code', '', 'wp-my-key-value'), 'value');
       ui.toggle = button('toggle', () => ui.value.dataset.state === 'shown' ? hide() : reveal('show'));
       ui.copy = button('copy', () => reveal('copy')); ui.actions = node('div', undefined, 'wp-my-key-row'); ui.actions.append(ui.toggle, ui.copy);
+      ui.revokeAll = button('revoke-all', revokeAll); ui.revokeAll.hidden = !desktop; ui.revokeAll.className = 'wp-my-key-revoke'; ui.actions.append(ui.revokeAll);
       ui.reset = button('reset', () => { if (!data?.reset?.allowed || resetBusy) return; confirming = true; renderReset(); ui.resetCancel.focus(); });
       ui.resetNote = mark(node('p', '', 'wp-my-key-muted'), 'reset-note');
       ui.confirm = mark(node('div'), 'confirm'); ui.confirm.setAttribute('role', 'alertdialog'); ui.confirm.setAttribute('aria-labelledby', 'wp-my-key-confirm-title');
@@ -169,7 +171,7 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       ui.status.textContent = status === 'reset-progress' ? t('正在重置钥匙，工作伙伴会重启约 1 分钟…', 'Resetting the key; your workspace restarts for about a minute…')
         : status === 'reset-wait' ? t('还在处理中，请稍后重新打开「我的钥匙」查看。', 'Still working. Reopen My key later to check.')
         : status === 'error' ? t('操作失败，请稍后再试。', 'Something went wrong. Please try again.')
-        : status === 'copied' ? t('已复制', 'Copied') : status === 'shown' ? t(`${data.revealSeconds} 秒后自动隐藏`, `Hides automatically in ${data.revealSeconds} seconds`) : '';
+        : status === 'copied' ? t('已复制', 'Copied') : status === 'desktop-revoked' ? t('已退出所有桌面设备', 'All desktop devices signed out') : status === 'shown' ? t(`${data.revealSeconds} 秒后自动隐藏`, `Hides automatically in ${data.revealSeconds} seconds`) : '';
     }
     function renderKey() {
       const shown = ui.value.dataset.state === 'shown';
@@ -181,9 +183,23 @@ html[data-theme="dark"] .wp-my-key-dialog { --wp-my-key-warn:#ffcf85; --wp-my-ke
       ui.toggle.textContent = shown ? t('隐藏', 'Hide') : t('显示', 'Show'); ui.copy.textContent = t('复制', 'Copy');
       ui.copyConfig.textContent = t('复制整段', 'Copy all');
       for (const control of [ui.toggle, ui.copy, ui.copyConfig]) control.disabled = !data?.key || busy || resetBusy || loading;
+      if (desktop) {
+        ui.revokeAll.hidden = false; ui.revokeAll.textContent = t('退出所有桌面设备', 'Sign out desktop devices');
+        ui.revokeAll.disabled = busy || resetBusy || loading;
+      } else ui.revokeAll.hidden = true;
       ui.notice.textContent = t('这把钥匙与你本人实名绑定，每次使用都会按人记录，用于额度管理和安全审计，请只用于本人工作。',
         'This key is bound to your real identity. Every use is recorded per person for quota management and security audits; use it only for your own work.');
       renderReset(); renderStatus();
+    }
+    async function revokeAll() {
+      if (!desktop || busy || resetBusy || loading) return;
+      busy = true; renderKey();
+      try {
+        const response = await fetch('/_wp/api/desktop/revoke-all', { method: 'POST', credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error('revoke failed');
+        status = 'desktop-revoked';
+      } catch { status = 'error'; }
+      finally { busy = false; renderKey(); }
     }
     function hide() {
       clearTimeout(hideTimer); clearTimeout(statusTimer); status = '';
