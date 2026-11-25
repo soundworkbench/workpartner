@@ -16,6 +16,7 @@ const CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
 const STATE_RE = /^[\x21-\x7e]{1,256}$/;
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+let generationBumpQueue = Promise.resolve();
 
 function json(res, status, body, extra = {}) {
   const text = body === undefined ? '' : JSON.stringify(body);
@@ -101,12 +102,17 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
     if (!codes.length) pendingByUser.delete(record.unionId);
   }
   function bump(unionId) {
-    const value = readGenerations();
-    value[unionId] = generation(unionId) + 1;
-    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    const temporary = `${generationFile}.${randomBytes(8).toString('hex')}`;
-    fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
-    fs.renameSync(temporary, generationFile);
+    const operation = generationBumpQueue.then(() => {
+      const value = readGenerations();
+      const current = Number.isSafeInteger(value[unionId]) && value[unionId] >= 0 ? value[unionId] : 0;
+      value[unionId] = current + 1;
+      fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+      const temporary = `${generationFile}.${randomBytes(8).toString('hex')}`;
+      fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
+      fs.renameSync(temporary, generationFile);
+    });
+    generationBumpQueue = operation.catch(() => {});
+    return operation;
   }
   function sign(data) { return crypto.createHmac('sha256', tokenKey).update(`wpd.${data}`).digest('base64url'); }
   function issue(user, did = '') {
@@ -238,7 +244,7 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
         const who = sessionAuthenticate(req); user = who && currentUser(who.unionId);
         if (!user || !admitted(user)) return fail(res, 401, 'invalid_session');
       }
-      try { bump(user.unionId); } catch { return fail(res, 500, 'state_unavailable'); }
+      try { await bump(user.unionId); } catch { return fail(res, 500, 'state_unavailable'); }
       return json(res, 200, { ok: true });
     }
     return false;

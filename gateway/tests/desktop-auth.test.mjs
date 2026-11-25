@@ -113,9 +113,18 @@ test('expired bearer token and cookie or zpd values are rejected', async t => {
   const issued = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) });
   const token = JSON.parse(issued.body).access_token;
   assert.equal((await f.request('/_wp/api/desktop/key', { headers: { cookie: 'wp_sid=ok' } })).statusCode, 401);
+  assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: 'Bearer ok' } })).statusCode, 401);
   assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: 'Bearer zpd.fake.token' } })).statusCode, 401);
   f.setClock(Date.parse('2026-12-26T00:00:01Z'));
   assert.equal((await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers: { authorization: `Bearer ${token}` } })).statusCode, 401);
+});
+
+test('issued desktop token is rejected after its user leaves users.json', async t => {
+  const f = fixture(t); const flow = f.authorize(); const auth = await flow.request; const code = new URL(auth.headers.location).searchParams.get('code');
+  const issued = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) });
+  const token = JSON.parse(issued.body).access_token;
+  f.users.splice(0, 1);
+  assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: `Bearer ${token}` } })).statusCode, 401);
 });
 
 test('desktop feature gate and disabled policy reject every desktop operation', async t => {
@@ -162,6 +171,18 @@ test('generation read failures fail closed and revoke does not rewrite state', a
   assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: `Bearer ${token}` } })).statusCode, 401);
   const before = fs.readFileSync(file); assert.equal((await f.request('/_wp/api/desktop/revoke-all', { method: 'POST', headers: { cookie: 'wp_sid=ok', origin: 'https://workspace.example.test' } })).statusCode, 500);
   assert.deepEqual(fs.readFileSync(file), before);
+});
+
+test('concurrent revocations preserve every user generation bump', async t => {
+  const users = Array.from({ length: 20 }, (_, index) => ({ slug: `user-${index}`, unionId: `union-${index}`, name: `User ${index}` }));
+  const f = fixture(t, { users, sessionFor: req => users.find(user => req.headers.cookie === `wp_sid=${user.slug}`) || null });
+  f.config.desktop.allow = ['*'];
+  const responses = await Promise.all(users.map(user => f.request('/_wp/api/desktop/revoke-all', {
+    method: 'POST', headers: { cookie: `wp_sid=${user.slug}`, origin: 'https://workspace.example.test' },
+  })));
+  assert.deepEqual(responses.map(response => response.statusCode), Array(20).fill(200));
+  const generations = JSON.parse(fs.readFileSync(path.join(f.directory, 'desktop-auth/generations.json'), 'utf8'));
+  for (const user of users) assert.equal(generations[user.unionId], 1, user.unionId);
 });
 
 test('legacy desktop and feishu desktop paths are left to their original handlers', async t => {
