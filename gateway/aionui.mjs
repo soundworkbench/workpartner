@@ -103,6 +103,7 @@ const bridgeTurnScript = `(${bridgeTurnReader.toString()})()`;
  * @param o.topTimeoutMs 查消息桥进程和对话状态的超时（默认 5 秒），进程查询超时按空闲处理
  * @param o.uid 在本人容器里查消息桥状态时使用的用户
  * @param o.reconcileExclude 后台巡检不碰的用户 slug
+ * @param o.reconcileWaitMs 后台巡检等待占用任务完成的最长时间（默认 30 秒；测试用）
  * @param o.now 当前毫秒数（测试用）
  */
 export function createAionui(o) {
@@ -116,6 +117,7 @@ export function createAionui(o) {
   const maxDeferMs = o.maxDeferMs ?? 30 * 60000;
   const newRoundGapMs = o.newRoundGapMs ?? 10 * 60000;
   const topTimeoutMs = o.topTimeoutMs ?? 5000;
+  const reconcileWaitMs = o.reconcileWaitMs ?? 30000;
   const sessions = new Map();     // slug -> cookie 文本
   const joined = new Map();       // slug -> 上次确认网关和模型出口 在其网络里的时间
   const jobs = new Map();         // slug -> 进行中的开通、启动或重置
@@ -424,16 +426,39 @@ export function createAionui(o) {
   // 同时进行的任务仍受 maxJobs 限制，排不上的留到下一轮；reconcileExclude 里的人不碰。
   const reconcileExclude = new Set(o.reconcileExclude || []);
   let reconcileTimer, reconciling;
+  async function waitForReconcileJob(job) {
+    let timer;
+    const timeout = new Promise(resolve => {
+      timer = setTimeout(resolve, reconcileWaitMs);
+    });
+    try {
+      await Promise.race([Promise.resolve(job).catch(() => {}), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   function reconcileImages(users) {
     if (o.kind !== 'k8s') return Promise.resolve();
     if (reconciling) return reconciling;
     reconciling = (async () => {
-      for (const user of users()) {
+      const occupied = [];
+      const reconcile = async (user) => {
         const { slug } = user;
-        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || jobs.has(slug) || resolving.has(slug)) continue;
         const check = resolveUpstream(user, true).finally(() => resolving.delete(slug));
         resolving.set(slug, check);
         await check.catch(error => log(`后台巡检失败 ${slug}：${error.message}`));
+      };
+      for (const user of users()) {
+        const { slug } = user;
+        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || resolving.has(slug)) continue;
+        if (jobs.has(slug)) { occupied.push({ user, job: jobs.get(slug) }); continue; }
+        await reconcile(user);
+      }
+      await Promise.all(occupied.map(({ job }) => job ? waitForReconcileJob(job) : undefined));
+      for (const { user } of occupied) {
+        const { slug } = user;
+        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || jobs.has(slug) || resolving.has(slug)) continue;
+        await reconcile(user);
       }
     })().finally(() => { reconciling = undefined; });
     return reconciling;
