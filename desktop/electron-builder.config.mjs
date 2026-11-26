@@ -7,8 +7,9 @@ const resource = name => {
 export default {
   appId: brand.appId, productName: brand.productName, extraMetadata: { productName: brand.productName },
   directories: { output: process.env.WP_DESKTOP_OUTPUT || 'release' },
-  files: ['dist/**', 'brand/default/brand.json', 'brand/default/resources/tray-windows.ico'],
+  files: ['THIRD-PARTY-NOTICES.txt', 'dist/**', 'brand/default/brand.json', 'brand/default/resources/tray-windows.ico'],
   protocols: [{ name: brand.displayName, schemes: [brand.protocol] }],
+  toolsets: { nsis: '1.2.1' },
   npmRebuild: false, electronLanguages: ['en-US', 'zh-CN'],
   mac: { target: 'dmg', identity: '-', icon: resource('icon.icns'),
     extendInfo: { CFBundleDisplayName: brand.displayName, NSMicrophoneUsageDescription: '语音输入需要使用麦克风。' } },
