@@ -46,15 +46,15 @@ function rewrittenPreview(href: string, url: string) {
 
 // Each top-level document owns one click. Every attempted use consumes it.
 export function linkGesture(now = () => performance.now()) {
-  let grant: { href: string | null; expires: number } | undefined;
+  let grant: { href: string; expires: number } | undefined;
   return {
-    record(href: string | null) { grant = { href, expires: now() + 1000 }; },
+    record(href: string) { grant = { href, expires: now() + 1000 }; },
     clear() { grant = undefined; },
     consume(url: string, preview = false) {
       const click = grant;
       grant = undefined;
       if (!click || now() >= click.expires) return false;
-      return click.href === url || (preview && (click.href === null || rewrittenPreview(click.href, url)));
+      return click.href === url || (preview && rewrittenPreview(click.href, url));
     }
   };
 }

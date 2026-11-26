@@ -63,6 +63,11 @@ export function installPreviewClient({ previewHost, scope }) {
   document.addEventListener("auxclick", openLink, true);
   const open = window.open;
   window.open = function (url, ...rest) {
-    return open.call(this, url === undefined || url === null || url === "" ? url : previewUrl(url), ...rest);
+    const target = url === undefined || url === null || url === "" ? url : previewUrl(url);
+    if (window.wpDesktop?.openPreview && URL.parse(target, location.href)?.origin === `https://${previewHost}`) {
+      window.wpDesktop.openPreview(new URL(target, location.href).href);
+      return null;
+    }
+    return open.call(this, target, ...rest);
   };
 }

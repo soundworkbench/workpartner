@@ -48,6 +48,11 @@ async function run() {
   }
   const failures = [];
   async function check(name, action) {
+    let nativeHandler;
+    app.once('web-contents-created', (_event, contents) => {
+      const install = contents.setWindowOpenHandler.bind(contents);
+      contents.setWindowOpenHandler = handler => { nativeHandler = handler; install(handler); };
+    });
     const { win } = createWindow({ defaultGatewayUrl: gateway, previewHost, displayName: 'Smoke', loginOrigins: [provider] }, () => {});
     const wc = win.webContents;
     wc.setBackgroundThrottling(false);
@@ -73,7 +78,7 @@ async function run() {
       wc.debugger.attach();
       await win.loadURL(gateway + '/');
       await js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-      await action({ click, js, none, wc, win });
+      await action({ click, js, none, wc, win, nativeHandler });
       assert.ok([win, ...win.getChildWindows()].every(window => !window.isVisible()));
       console.log('PASS', name);
     } catch (error) {
@@ -87,14 +92,14 @@ async function run() {
   }
   const open = 'window.open(' + JSON.stringify(local) + ', "_blank", "noopener")';
   const loaded = () => until(() => visits.includes(final), '预览窗口没有加载网关改写后的完整地址');
-  await check('真实按钮点击通过 window.open 打开预览', async ({ click, js, win }) => {
+  await check('主 frame 真实按钮点击经 client.mjs 和桌面 API 打开预览', async ({ click, js, win }) => {
     await click(open);
     assert.equal(await js('window.trusted'), true);
     await loaded();
     assert.equal(win.getChildWindows().length, 1);
   });
-  await check('没有点击的 window.open 被拒绝', async ({ js, none }) => {
-    await js('void ' + open);
+  await check('没有点击直接调用桌面 API 被拒绝', async ({ js, none }) => {
+    await js('window.wpDesktop.openPreview(' + JSON.stringify(final) + ')');
     await none();
   });
   await check('点击超过一秒的 window.open 被拒绝', async ({ click, js, none }) => {
@@ -120,8 +125,32 @@ async function run() {
     await js('frames[0].eval(\'top.location.assign("https://preview.example.org/frame")\')');
     await none();
   });
-  await check('可信按钮导航到预览域加载预览', async ({ click, win }) => {
-    await click('location.assign(' + JSON.stringify(final) + ')');
+  await check('可信点击结束后立即调用 API 也被拒绝', async ({ click, js, none }) => {
+    await click('');
+    await js('window.wpDesktop.openPreview(' + JSON.stringify(final) + ')');
+    await none();
+  });
+  await check('主 frame 有效点击后原生弹窗处理器拒绝所有来源且不读取请求', async ({ click, js, nativeHandler, none }) => {
+    // An opaque request exercises the installed Electron callback without initiating navigation.
+    const request = new Proxy({}, { get() { assert.fail('原生弹窗处理器读取了请求'); } });
+    await click('event.preventDefault()', 'a');
+    assert.equal(await js('window.trusted'), true);
+    assert.deepEqual(nativeHandler(request), { action: 'deny' });
+    await none();
+  });
+  await check('子 frame 无桌面 API，原生弹窗产生零个窗口', async ({ wc, none }) => {
+    const frame = wc.mainFrame.frames[0];
+    assert.equal(await frame.executeJavaScript('typeof window.wpDesktop'), 'undefined');
+    await frame.executeJavaScript('void window.open(' + JSON.stringify(final) + ')');
+    await none();
+  });
+  await check('预览 IPC 拒绝子 frame 来源并保留主 frame 的凭证', async ({ wc, win, none }) => {
+    // Exercise the receiver with Electron frame identities, without enabling IPC in a child.
+    const main = { sender: wc, senderFrame: wc.mainFrame };
+    wc.ipc.emit('wp-gesture', main, final);
+    wc.ipc.emit('wp-open-preview', { sender: wc, senderFrame: wc.mainFrame.frames[0] }, final);
+    await none();
+    wc.ipc.emit('wp-open-preview', main, final);
     await loaded();
     assert.equal(win.getChildWindows().length, 1);
   });
@@ -135,15 +164,15 @@ async function run() {
     assert.equal(await js('document.querySelector("a").href'), final);
     assert.equal(win.getChildWindows().length, 1);
   });
-  await check('脚本外链与点击地址相同时才外开', async ({ click, js }) => {
+  await check('脚本普通外链被拒绝，真实链接仍可外开', async ({ click, js }) => {
     const external = 'https://docs.example.org/guide';
     const log = mock.method(console, 'log');
     try {
-      await js('document.querySelector("a").href = ' + JSON.stringify(external));
-      await click('event.preventDefault(); window.open("https://docs.example.org/other")', 'a');
-      await click('event.preventDefault(); window.open(' + JSON.stringify(external) + ')', 'a');
-      const opened = log.mock.calls.filter(call => call.arguments[1] === '记录外链');
-      assert.deepEqual(opened.map(call => call.arguments[2]), [external]);
+      await click('window.open(' + JSON.stringify(external) + ')');
+      await js('Object.assign(document.querySelector("a"), { href: ' + JSON.stringify(external) + ', target: "_blank" })');
+      await click('', 'a');
+      await until(() => log.mock.calls.some(call => call.arguments[1] === '记录外链'), '外链未分派');
+      assert.deepEqual(log.mock.calls.filter(call => call.arguments[1] === '记录外链').map(call => call.arguments[2]), [external]);
     } finally { log.mock.restore(); }
   });
   await check('个人授权弹窗回退且登录页新标签链接留在主窗口', async ({ click, wc, js, none }) => {

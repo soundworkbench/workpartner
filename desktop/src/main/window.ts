@@ -8,7 +8,7 @@ import { linkGesture, navigationPolicy } from './links.js';
 export type Brand = { productName: string; displayName: string; appId: string; protocol: string; defaultGatewayUrl: string; previewHost: string; loginOrigins: string[] };
 const offlineFile = fileURLToPath(new URL('./offline.html', import.meta.url));
 const offlineURL = pathToFileURL(offlineFile).href;
-const safePrefs = { sandbox: true, contextIsolation: true, nodeIntegration: false, disableDialogs: testMode,
+const safePrefs = { sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false, disableDialogs: testMode,
   offscreen: testMode, preload: fileURLToPath(new URL('../preload/shell-preload.cjs', import.meta.url)) };
 
 function initialBounds(file: string) {
@@ -63,34 +63,37 @@ export function createWindow(brand: Brand, onGateway: () => void) {
   function documentGesture(contents: WebContents) {
     const click = linkGesture();
     let owner: WebFrameMain | null = null;
-    contents.ipc.on('wp-gesture', (event, href) => {
-      if (event.sender === contents && event.senderFrame === contents.mainFrame && (typeof href === 'string' || href === null)) {
+    function record(event: Electron.IpcMainEvent, href: unknown) {
+      if (event.sender === contents && event.senderFrame === contents.mainFrame && typeof href === 'string' && URL.canParse(href)) {
         owner = event.senderFrame;
         click.record(href);
       }
       event.returnValue = null;
+    }
+    contents.ipc.on('wp-gesture', record);
+    if (contents === wc) contents.ipc.on('wp-preview-gesture', (event, url) => {
+      if (wc.mainFrame.origin === origin && typeof url === 'string' && route(url, 'navigation') === 'preview') {
+        record(event, url);
+      } else event.returnValue = null;
     });
     contents.on('did-navigate', () => click.clear());
     contents.on('render-process-gone', () => click.clear());
-    return (url: string, frame: WebFrameMain | null | undefined | 'native-popup', previewTarget = false) => {
-      const matches = click.consume(url, previewTarget);
-      return matches && owner === contents.mainFrame && (frame === 'native-popup' || frame === owner);
+    return (url: string, frame: WebFrameMain | null | undefined, previewTarget = false) => {
+      return owner !== null && frame === owner && owner === contents.mainFrame && click.consume(url, previewTarget);
     };
   }
 
   function bind(contents: WebContents, preview: boolean) {
     const consumeClick = documentGesture(contents);
     const isPreview = (url: string) => route(url, 'navigation') === 'preview';
-    contents.setWindowOpenHandler(({ url }) => {
-      // Electron supplies the WebContents but no initiator frame for native popups.
-      if (!preview && consumeClick(url, 'native-popup', isPreview(url))) {
-        const target = route(url, 'popup', true);
-        if (target === 'preview') openPreview(url);
-      }
-      // The shell owns preview windows and external dispatch. A denied native
-      // WindowProxy also preserves the gateway's same-window authorization fallback.
-      return { action: 'deny' };
-    });
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    if (contents === wc) {
+      contents.ipc.on('wp-open-preview', (event, url) => {
+        if (event.sender !== wc || event.senderFrame !== wc.mainFrame || wc.mainFrame.origin !== origin ||
+            typeof url !== 'string' || !isPreview(url) || !consumeClick(url, event.senderFrame, true)) return;
+        openPreview(url);
+      });
+    }
     contents.ipc.on('wp-open-link', (event, url) => {
       if (event.sender !== contents || typeof url !== 'string' || !consumeClick(url, event.senderFrame, isPreview(url))) return;
       const target = route(url, 'popup', true);
