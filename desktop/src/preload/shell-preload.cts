@@ -6,11 +6,20 @@ if (process.isMainFrame) {
   const trusted = (event: MouseEvent) => event.isTrusted && (event.button === 0 || event.button === 1);
   for (const type of ['click', 'auxclick'] as const) {
     window.addEventListener(type, event => {
-      if (!trusted(event)) return;
+      if (!trusted(event) || !navigator.userActivation.isActive || event.defaultPrevented || event.altKey) return;
       const anchor = event.composedPath().find((el): el is HTMLAnchorElement => el instanceof HTMLAnchorElement && el.hasAttribute('href'));
-      // Deliver the original href before page handlers or the default navigation can run.
-      ipcRenderer.sendSync('wp-gesture', anchor && !anchor.hasAttribute('download') ? anchor.href : null);
-    }, true);
+      if (!anchor || anchor.hasAttribute('download')) return;
+      // The gateway rewrites loopback links during document capture. Read the result
+      // in window bubble, while the trusted click still has transient activation.
+      const href = anchor.href;
+      ipcRenderer.sendSync('wp-gesture', href);
+      const target = (anchor.target || document.querySelector<HTMLBaseElement>('base[target]')?.target || '').toLowerCase();
+      if (event.button === 1 || event.ctrlKey || event.metaKey || event.shiftKey ||
+          (target && !['_self', '_top', '_parent'].includes(target))) {
+        event.preventDefault();
+        ipcRenderer.send('wp-open-link', href);
+      }
+    });
   }
   window.addEventListener('offline', event => {
     if (event.isTrusted) ipcRenderer.send('wp-offline');

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, net, screen, shell, type WebContents } from 'electron';
+import { app, BrowserWindow, WebContentsView, net, screen, shell, type WebContents, type WebFrameMain } from 'electron';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,24 +62,34 @@ export function createWindow(brand: Brand, onGateway: () => void) {
 
   function documentGesture(contents: WebContents) {
     const click = linkGesture();
+    let owner: WebFrameMain | null = null;
     contents.ipc.on('wp-gesture', (event, href) => {
-      if (event.senderFrame === contents.mainFrame) click.record(typeof href === 'string' ? href : undefined);
+      if (event.sender === contents && event.senderFrame === contents.mainFrame && typeof href === 'string') {
+        owner = event.senderFrame;
+        click.record(href);
+      }
       event.returnValue = null;
     });
     contents.on('did-navigate', () => click.record());
     contents.on('render-process-gone', () => click.record());
-    return click;
+    return (url: string, frame?: WebFrameMain | null) => {
+      const matches = click.consume(url);
+      return matches && !!frame && frame === owner && frame === contents.mainFrame;
+    };
   }
 
   function bind(contents: WebContents, preview: boolean) {
-    const click = documentGesture(contents);
-    contents.setWindowOpenHandler(({ url }) => {
-      const target = route(url, 'popup', click.consume(url));
+    const consumeClick = documentGesture(contents);
+    // Native popup details omit the initiating frame and user activation. Only
+    // the isolated preload can request a new-window link on its frame's IPC.
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    contents.ipc.on('wp-open-link', (event, url) => {
+      if (event.sender !== contents || typeof url !== 'string' || !consumeClick(url, event.senderFrame)) return;
+      const target = route(url, 'popup', true);
       if (!preview && target === 'main') navigate(url);
       if (target === 'preview') openPreview(url);
-      return { action: 'deny' };
     });
-    const guard = (event: Electron.Event<{ url: string; isMainFrame: boolean }>, redirect: boolean) => {
+    const guard = (event: Electron.Event<Electron.WebContentsWillFrameNavigateEventParams>, redirect: boolean) => {
       const { url } = event;
       if (!event.isMainFrame) {
         if (!/^(https?:|about:|blob:|data:)/i.test(url)) event.preventDefault();
@@ -88,7 +98,7 @@ export function createWindow(brand: Brand, onGateway: () => void) {
       if (!preview && offline && contents.getURL() === offlineURL && url === 'about:blank#retry') {
         event.preventDefault(); navigate(destination); return;
       }
-      const clicked = !redirect && click.consume(url);
+      const clicked = !redirect && consumeClick(url, event.initiator);
       const target = route(url, redirect ? 'redirect' : clicked ? 'click' : 'navigation', clicked);
       if (redirect) testLog('重定向 ' + target, url);
       if (!preview && target === 'main') return;
@@ -127,7 +137,7 @@ export function createWindow(brand: Brand, onGateway: () => void) {
     child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     child.webContents.on('will-navigate', event => {
       event.preventDefault();
-      if (!toolbarClick.consume(event.url)) return;
+      if (!toolbarClick(event.url, event.initiator)) return;
       if (event.url === 'about:blank#refresh') page.reload();
       else if (route(event.url, 'navigation') === 'preview') route(event.url, 'preview-toolbar', true);
     });

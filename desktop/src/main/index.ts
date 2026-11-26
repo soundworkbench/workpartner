@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { testMode, testLog } from './test-mode.js';
 import { join } from 'node:path';
 import { createWindow, type Brand } from './window.js';
+import { registerProtocol } from './protocol.js';
 import { deepTarget } from './links.js';
 import { createTray } from './tray.js';
 import { DesktopAuth } from './auth.js';
@@ -45,8 +46,8 @@ else {
 function start() {
   const store = session.defaultSession;
   store.setUserAgent(app.userAgentFallback.replace(/(\(KHTML, like Gecko\)).*?( Chrome\/)/, '$1$2').replace(/\sElectron\/\S+/g, ''), 'zh-CN,zh');
-  if (!testMode && app.isPackaged && !app.setAsDefaultProtocolClient(brand.protocol)) {
-    console.warn('桌面深链协议注册失败', brand.protocol);
+  if (!testMode && app.isPackaged) {
+    registerProtocol(brand.protocol, app.getPath('userData'), protocol => app.setAsDefaultProtocolClient(protocol));
   }
   const { win, navigate, probe } = createWindow(brand, () => void auth.sync());
   open = url => {
