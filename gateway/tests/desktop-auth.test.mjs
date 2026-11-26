@@ -19,7 +19,7 @@ function fixture(t, options = {}) {
   let clock = Date.parse('2026-11-25T00:00:00Z');
   const users = options.users || [person];
   const handler = createDesktopAuth({ organization, organizationData: () => config, users: () => users,
-    sessionAuthenticate: req => options.sessionFor?.(req, users) || (req.headers.cookie === 'wp_sid=ok' ? person : null),
+    onRevoke: options.onRevoke, sessionAuthenticate: req => options.sessionFor?.(req, users) || (req.headers.cookie === 'wp_sid=ok' ? person : null),
     keyFor: () => fs.readFileSync(keyFile, 'utf8'), keyFile: () => keyFile, sessionKey: 'fixture-session-key', now: () => clock });
   async function request(route, { method = 'GET', headers = {}, body } = {}) {
     const req = new EventEmitter(); req.method = method; req.headers = headers;
@@ -135,16 +135,33 @@ test('issued desktop token is rejected after its user leaves users.json', async 
   assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: `Bearer ${token}` } })).statusCode, 401);
 });
 
-test('desktop feature gate and disabled policy reject every desktop operation', async t => {
-  const f = fixture(t); f.organization.features.myKey = false;
-  const flow = f.authorize(); assert.equal((await flow.request).statusCode, 403);
-  f.organization.features.myKey = true; const valid = f.authorize(); const auth = await valid.request; const code = new URL(auth.headers.location).searchParams.get('code');
-  const tokenResponse = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: valid.verifier, redirect_uri: redirect }) });
-  const token = JSON.parse(tokenResponse.body).access_token; const pending = f.authorize(); const pendingAuth = await pending.request;
+test('desktop admission is independent of model key access', async t => {
+  const revoked = [];
+  const f = fixture(t, { onRevoke: id => revoked.push(id) });
   f.organization.features.myKey = false;
-  assert.equal((await f.request('/_wp/api/desktop/key', { headers: { authorization: `Bearer ${token}` } })).statusCode, 403);
-  assert.equal((await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code: new URL(pendingAuth.headers.location).searchParams.get('code'), code_verifier: pending.verifier, redirect_uri: redirect }) })).statusCode, 400);
-  f.organization.features.myKey = true; const disabled = f.authorize(); const disabledAuth = await disabled.request; f.config.desktop.enabled = false;
+  const flow = f.authorize();
+  const auth = await flow.request;
+  assert.equal(auth.statusCode, 302);
+  const code = new URL(auth.headers.location).searchParams.get('code');
+  const issued = await f.request('/_wp/api/desktop/token', { method: 'POST',
+    body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) });
+  assert.equal(issued.statusCode, 200);
+  const token = JSON.parse(issued.body).access_token;
+  const headers = { authorization: `Bearer ${token}` };
+  assert.equal(f.handle.authenticate({ headers }).user.unionId, person.unionId);
+  assert.equal((await f.request('/_wp/api/desktop/key', { headers })).statusCode, 403);
+  assert.equal((await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers })).statusCode, 200);
+  assert.equal((await f.request('/_wp/api/desktop/revoke-all', { method: 'POST', headers })).statusCode, 200);
+  assert.deepEqual(revoked, [person.unionId]);
+  assert.equal(f.handle.verify(token), null);
+});
+
+test('disabling desktop rejects pending codes and previously issued tokens', async t => {
+  const f = fixture(t);
+  const valid = f.authorize(); const auth = await valid.request; const code = new URL(auth.headers.location).searchParams.get('code');
+  const tokenResponse = await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code, code_verifier: valid.verifier, redirect_uri: redirect }) });
+  const token = JSON.parse(tokenResponse.body).access_token;
+  const disabled = f.authorize(); const disabledAuth = await disabled.request; f.config.desktop.enabled = false;
   assert.equal((await f.request('/_wp/desktop/authorize?' + new URLSearchParams({ redirect_uri: redirect, code_challenge: 'A'.repeat(43), code_challenge_method: 'S256', state: 's' }), { headers: { cookie: 'wp_sid=ok' } })).statusCode, 403);
   assert.equal((await f.request('/_wp/api/desktop/token', { method: 'POST', body: JSON.stringify({ code: new URL(disabledAuth.headers.location).searchParams.get('code'), code_verifier: disabled.verifier, redirect_uri: redirect }) })).statusCode, 400);
   assert.equal((await f.request('/_wp/api/desktop/refresh', { method: 'POST', headers: { authorization: `Bearer ${token}` } })).statusCode, 401);

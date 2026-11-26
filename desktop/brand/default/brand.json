@@ -1,0 +1,8 @@
+{
+  "productName": "WorkPartner",
+  "displayName": "工作伙伴",
+  "appId": "org.workpartner.desktop",
+  "protocol": "workpartner",
+  "defaultGatewayUrl": "https://workspace.example.org",
+  "previewHost": "preview.example.org"
+}
