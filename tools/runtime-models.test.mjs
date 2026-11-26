@@ -944,3 +944,59 @@ test('image reconciliation replaces idle stale running workspaces, skips busy an
   await docker.reconcileImages(users);
   assert.deepEqual(calls, []);
 });
+
+test('image reconciliation retries a user occupied by keep-running in the same cycle', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-reconcile-race-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'aionui-first.pass'), 'fixture');
+  const state = { running: false, image: 'old' };
+  const calls = [];
+  const runtime = {
+    inspect: async () => { await new Promise(resolve => setImmediate(resolve)); return {
+      exists: true, replicas: state.running ? 1 : 0, running: state.running, name: 'first', image: state.image,
+      imageId: state.image === 'new' ? 'new-id' : 'old-id', address: { host: '127.0.0.1', port: 9 }, env: [],
+    }; },
+    imageId: async () => 'new-id', ensureIsolation: async () => {}, processes: async () => [],
+    stop: async () => { calls.push('stop'); state.running = false; },
+    remove: async () => calls.push('remove'),
+    create: async () => { calls.push('create'); state.image = 'new'; },
+    start: async () => { calls.push('start'); state.running = true; },
+    address: async () => null,
+  };
+  const user = { slug: 'first', backend: 'aionui' };
+  const aionui = createAionui({ runtime, kind: 'k8s', image: 'new', secretDir: dir, log() {} });
+  t.after(() => aionui.close());
+  await Promise.all([aionui.keepRunning(() => [user]), aionui.reconcileImages(() => [user])]);
+  await aionui.pending('first');
+  assert.deepEqual(calls, ['start', 'stop', 'remove', 'create', 'start']);
+});
+
+test('image reconciliation does not wait for a long keep-running job before checking later users', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-reconcile-long-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const slug of ['first', 'second']) fs.writeFileSync(path.join(dir, `aionui-${slug}.pass`), 'fixture');
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const state = { first: { running: false, image: 'old' }, second: { running: true, image: 'old' } };
+  const calls = [];
+  const runtime = {
+    inspect: async slug => { const s = state[slug]; return { exists: true, replicas: s.running ? 1 : 0, running: s.running,
+      name: slug, image: s.image, imageId: s.image === 'new' ? 'new-id' : 'old-id', address: { host: '127.0.0.1', port: 9 }, env: [] }; },
+    imageId: async () => 'new-id', ensureIsolation: async () => {}, processes: async () => [],
+    stop: async slug => { calls.push(['stop', slug]); state[slug].running = false; },
+    remove: async slug => calls.push(['remove', slug]),
+    create: async user => { calls.push(['create', user.slug]); state[user.slug].image = 'new'; },
+    start: async slug => { calls.push(['start', slug]); state[slug].running = true; if (slug === 'first') await gate; },
+    address: async () => null,
+  };
+  const users = () => [{ slug: 'first', backend: 'aionui' }, { slug: 'second', backend: 'aionui' }];
+  const aionui = createAionui({ runtime, kind: 'k8s', image: 'new', secretDir: dir, log() {} });
+  t.after(() => aionui.close());
+  const keep = aionui.keepRunning(users);
+  await new Promise(resolve => setImmediate(resolve));
+  await aionui.reconcileImages(users);
+  assert.ok(calls.some(([call, slug]) => call === 'stop' && slug === 'second'));
+  release();
+  await keep;
+  await aionui.pending('second');
+});

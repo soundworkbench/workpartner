@@ -428,12 +428,29 @@ export function createAionui(o) {
     if (o.kind !== 'k8s') return Promise.resolve();
     if (reconciling) return reconciling;
     reconciling = (async () => {
-      for (const user of users()) {
+      const occupied = [];
+      const reconcile = async (user) => {
         const { slug } = user;
-        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || jobs.has(slug) || resolving.has(slug)) continue;
         const check = resolveUpstream(user, true).finally(() => resolving.delete(slug));
         resolving.set(slug, check);
         await check.catch(error => log(`后台巡检失败 ${slug}：${error.message}`));
+      };
+      for (const user of users()) {
+        const { slug } = user;
+        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || resolving.has(slug)) continue;
+        if (jobs.has(slug)) { occupied.push(user); continue; }
+        await reconcile(user);
+      }
+      for (const user of occupied) {
+        const { slug } = user;
+        const job = jobs.get(slug);
+        if (job) {
+          // Let a short keep-running job finish, but do not hold the whole round behind a long rebuild.
+          await Promise.resolve();
+          await Promise.race([job.catch(() => {}), new Promise(resolve => setImmediate(resolve))]);
+        }
+        if (user.backend !== 'aionui' || reconcileExclude.has(slug) || !owns(user) || jobs.has(slug) || resolving.has(slug)) continue;
+        await reconcile(user);
       }
     })().finally(() => { reconciling = undefined; });
     return reconciling;
