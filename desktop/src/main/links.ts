@@ -35,16 +35,26 @@ export function navigationPolicy(gateway: string, previewHost: string, loginOrig
   };
 }
 
+// A loopback anchor can change during document capture, after the preload recorded it.
+function rewrittenPreview(href: string, url: string) {
+  const source = URL.parse(href), target = new URL(url);
+  return source?.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(source.hostname) &&
+    !source.username && !source.password && target.pathname === '/_wp_preview/start' &&
+    target.searchParams.get('port') === (source.port || '80') &&
+    target.searchParams.get('path') === source.pathname + source.search + source.hash;
+}
+
 // Each top-level document owns one click. Every attempted use consumes it.
-export function linkGesture(now = Date.now) {
-  let href: string | undefined;
-  let expires = 0;
+export function linkGesture(now = () => performance.now()) {
+  let grant: { href: string | null; expires: number } | undefined;
   return {
-    record(url?: string) { href = url; expires = now() + 1000; },
-    consume(url: string) {
-      const allowed = url === href && now() < expires;
-      href = undefined;
-      return allowed;
+    record(href: string | null) { grant = { href, expires: now() + 1000 }; },
+    clear() { grant = undefined; },
+    consume(url: string, preview = false) {
+      const click = grant;
+      grant = undefined;
+      if (!click || now() >= click.expires) return false;
+      return click.href === url || (preview && (click.href === null || rewrittenPreview(click.href, url)));
     }
   };
 }

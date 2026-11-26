@@ -64,27 +64,35 @@ export function createWindow(brand: Brand, onGateway: () => void) {
     const click = linkGesture();
     let owner: WebFrameMain | null = null;
     contents.ipc.on('wp-gesture', (event, href) => {
-      if (event.sender === contents && event.senderFrame === contents.mainFrame && typeof href === 'string') {
+      if (event.sender === contents && event.senderFrame === contents.mainFrame && (typeof href === 'string' || href === null)) {
         owner = event.senderFrame;
         click.record(href);
       }
       event.returnValue = null;
     });
-    contents.on('did-navigate', () => click.record());
-    contents.on('render-process-gone', () => click.record());
-    return (url: string, frame?: WebFrameMain | null) => {
-      const matches = click.consume(url);
-      return matches && !!frame && frame === owner && frame === contents.mainFrame;
+    contents.on('did-navigate', () => click.clear());
+    contents.on('render-process-gone', () => click.clear());
+    return (url: string, frame: WebFrameMain | null | undefined | 'native-popup', previewTarget = false) => {
+      const matches = click.consume(url, previewTarget);
+      return matches && owner === contents.mainFrame && (frame === 'native-popup' || frame === owner);
     };
   }
 
   function bind(contents: WebContents, preview: boolean) {
     const consumeClick = documentGesture(contents);
-    // Native popup details omit the initiating frame and user activation. Only
-    // the isolated preload can request a new-window link on its frame's IPC.
-    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    const isPreview = (url: string) => route(url, 'navigation') === 'preview';
+    contents.setWindowOpenHandler(({ url }) => {
+      // Electron supplies the WebContents but no initiator frame for native popups.
+      if (!preview && consumeClick(url, 'native-popup', isPreview(url))) {
+        const target = route(url, 'popup', true);
+        if (target === 'preview') openPreview(url);
+      }
+      // The shell owns preview windows and external dispatch. A denied native
+      // WindowProxy also preserves the gateway's same-window authorization fallback.
+      return { action: 'deny' };
+    });
     contents.ipc.on('wp-open-link', (event, url) => {
-      if (event.sender !== contents || typeof url !== 'string' || !consumeClick(url, event.senderFrame)) return;
+      if (event.sender !== contents || typeof url !== 'string' || !consumeClick(url, event.senderFrame, isPreview(url))) return;
       const target = route(url, 'popup', true);
       if (!preview && target === 'main') navigate(url);
       if (target === 'preview') openPreview(url);
@@ -98,13 +106,16 @@ export function createWindow(brand: Brand, onGateway: () => void) {
       if (!preview && offline && contents.getURL() === offlineURL && url === 'about:blank#retry') {
         event.preventDefault(); navigate(destination); return;
       }
-      const clicked = !redirect && consumeClick(url, event.initiator);
+      const clicked = !redirect && consumeClick(url, event.initiator, isPreview(url));
       const target = route(url, redirect ? 'redirect' : clicked ? 'click' : 'navigation', clicked);
       if (redirect) testLog('重定向 ' + target, url);
       if (!preview && target === 'main') return;
       if (preview && (target === 'preview' || url.startsWith(origin + '/_wp/preview/authorize?'))) return;
       event.preventDefault();
-      if (target === 'preview') openPreview(url);
+      if (!preview && target === 'preview') {
+        if (clicked) openPreview(url);
+        else console.warn('[desktop] 已拦截没有有效点击凭证的预览导航');
+      }
     };
     contents.on('will-frame-navigate', event => guard(event, false));
     contents.on('will-redirect', event => guard(event, true));
