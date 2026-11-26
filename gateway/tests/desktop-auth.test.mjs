@@ -218,3 +218,37 @@ test('legacy desktop and feishu desktop paths are left to their original handler
   const feishu = await f.request('/_wp/feishu/desktop-start'); assert.equal(feishu.statusCode, undefined); assert.strictEqual(feishu.handleResult, false);
 });
 
+
+test('revocation separates authorization generations, including overlapping requests', async t => {
+  const f = fixture(t);
+  const revoke = () => f.request('/_wp/api/desktop/revoke-all', { method: 'POST',
+    headers: { cookie: 'wp_sid=ok', origin: 'https://workspace.example.test' } });
+  async function exchange(flow) {
+    const auth = await flow.request;
+    assert.equal(auth.statusCode, 302);
+    const code = new URL(auth.headers.location).searchParams.get('code');
+    return f.request('/_wp/api/desktop/token', { method: 'POST',
+      body: JSON.stringify({ code, code_verifier: flow.verifier, redirect_uri: redirect }) });
+  }
+  const stale = f.authorize();
+  await stale.request;
+  assert.equal((await revoke()).statusCode, 200);
+  const rejected = await exchange(stale);
+  assert.equal(rejected.statusCode, 400);
+  assert.deepEqual(JSON.parse(rejected.body), { error: 'invalid_grant' });
+
+  const issued = await exchange(f.authorize());
+  assert.equal(issued.statusCode, 200);
+  assert.equal((await revoke()).statusCode, 200);
+  assert.equal(f.handle.verify(JSON.parse(issued.body).access_token), null);
+
+  const pending = f.authorize();
+  const [result, revoked] = await Promise.all([exchange(pending), revoke()]);
+  assert.equal(revoked.statusCode, 200);
+  if (result.statusCode === 200) assert.equal(f.handle.verify(JSON.parse(result.body).access_token), null);
+  else {
+    assert.equal(result.statusCode, 400);
+    assert.deepEqual(JSON.parse(result.body), { error: 'invalid_grant' });
+  }
+  assert.equal((await exchange(f.authorize())).statusCode, 200);
+});

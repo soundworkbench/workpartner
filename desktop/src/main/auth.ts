@@ -5,7 +5,7 @@ import { hostname } from 'node:os';
 const day = 86_400_000;
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
 type Credential = { access_token: string; expires_at: string };
-type Saved = Credential & { binding: string };
+type Saved = Credential & { binding: string; union_id: string };
 type Vault = { encryptString(value: string): Buffer; decryptString(value: Buffer): string; isEncryptionAvailable(): boolean };
 type Transport = {
   cookie(): Promise<string | undefined>;
@@ -18,7 +18,7 @@ export class DesktopAuth {
   private queue = Promise.resolve();
   private nextCheck = 0;
   constructor(private origin: string, private file: string, private vault: Vault, private io: Transport,
-    private status: (text: string) => void) {}
+    private status: (text: string) => void, private warn: (text: string) => void = console.warn) {}
 
   clear() {
     ++this.epoch;
@@ -38,23 +38,40 @@ export class DesktopAuth {
     return this.queue;
   }
 
+  private async sessionUser(): Promise<string | null> {
+    const me = await this.io.fetch(this.origin + '/_wp/me', { credentials: 'include' });
+    if (me.status === 401) return null;
+    if (!me.ok) throw new Error('网关暂不可用');
+    const { union_id } = await me.json();
+    return typeof union_id === 'string' && union_id.length ? union_id : null;
+  }
+
   private async check(epoch: number) {
     const sid = await this.io.cookie();
     if (epoch !== this.epoch) return;
     if (!sid) { this.clear(); return; }
     const binding = hash(this.origin + '\n' + sid);
-    if (existsSync(this.file + '.revoked') && readFileSync(this.file + '.revoked', 'utf8') === binding) {
-      this.status('桌面登录已失效，请退出后重新登录');
-      return;
-    }
     if (!this.vault.isEncryptionAvailable()) { this.status('系统凭据存储不可用'); return; }
+    const unionId = await this.sessionUser();
+    if (epoch !== this.epoch) return;
+    if (!unionId) { this.clear(); return; }
+    const revoked = this.file + '.revoked';
+    const identityBinding = hash(binding + '\n' + unionId);
+    if (existsSync(revoked)) {
+      const marker = readFileSync(revoked, 'utf8');
+      // Older clients recorded just the cookie binding.
+      if (marker === binding || marker === identityBinding) {
+        this.status('桌面登录已失效，请退出后重新登录');
+        return;
+      }
+    }
     let saved: Saved | undefined;
     try {
       saved = JSON.parse(this.vault.decryptString(readFileSync(this.file)));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    if (saved && saved.binding !== binding) {
+    if (saved && (saved.binding !== binding || saved.union_id !== unionId)) {
       rmSync(this.file, { force: true });
       saved = undefined;
     }
@@ -72,9 +89,6 @@ export class DesktopAuth {
         method: 'POST', headers: { Authorization: 'Bearer ' + saved.access_token }
       });
     } else {
-      const me = await this.io.fetch(this.origin + '/_wp/me', { credentials: 'include' });
-      if (me.status === 401) { if (epoch === this.epoch) this.status('尚未登录'); return; }
-      if (!me.ok) throw new Error('网关暂不可用');
       const verifier = randomBytes(32).toString('base64url');
       const state = randomBytes(24).toString('base64url');
       // Intercept Location in the main process before any request reaches the loopback address.
@@ -94,19 +108,27 @@ export class DesktopAuth {
         body: JSON.stringify({ code, code_verifier: verifier, redirect_uri: redirect, device_name: hostname() })
       });
     }
-    const currentSid = await this.io.cookie();
-    if (epoch !== this.epoch || currentSid !== sid) return;
+    if (epoch !== this.epoch) return;
     if (saved && [401, 403].includes(response.status)) {
       this.clear();
-      writeFileSync(this.file + '.revoked', binding, { mode: 0o600 });
+      writeFileSync(revoked, identityBinding, { mode: 0o600 });
       this.status('桌面登录已失效，请退出后重新登录');
       return;
     }
     if (!response.ok) throw new Error('无法获取桌面凭据');
-    const value = await response.json() as Credential;
-    if (!value.access_token?.startsWith('wpd.') || !(Date.parse(value.expires_at) > now)) throw new Error('凭据无效');
+    const value = await response.json() as Credential & { user?: { union_id?: string } };
+    const sameIdentity = value.user?.union_id === unionId &&
+      await this.sessionUser() === unionId && await this.io.cookie() === sid;
     if (epoch !== this.epoch) return;
-    const encrypted = this.vault.encryptString(JSON.stringify({ binding, access_token: value.access_token, expires_at: value.expires_at }));
+    if (!sameIdentity) {
+      this.clear();
+      const message = '会话身份与桌面凭据不一致，已丢弃凭据';
+      this.warn(message);
+      this.status(message);
+      return;
+    }
+    if (!value.access_token?.startsWith('wpd.') || !(Date.parse(value.expires_at) > now)) throw new Error('凭据无效');
+    const encrypted = this.vault.encryptString(JSON.stringify({ binding, union_id: unionId, access_token: value.access_token, expires_at: value.expires_at }));
     writeFileSync(this.file + '.tmp', encrypted, { mode: 0o600 });
     renameSync(this.file + '.tmp', this.file);
     this.nextCheck = now + Math.min(day, (Date.parse(value.expires_at) - now) / 2);

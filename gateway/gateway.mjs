@@ -367,7 +367,7 @@ const server = http.createServer(async (req, res) => {
       const { who, user } = userFor(req);
       if (!user) { res.writeHead(401); return res.end(); }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ name: who.name, avatar: who.avatar }));
+      return res.end(JSON.stringify({ name: who.name, avatar: who.avatar, union_id: who.unionId }));
     }
     const r = await resolve(req);
     if (r.deny !== undefined) {

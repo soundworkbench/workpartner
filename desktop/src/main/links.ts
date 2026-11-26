@@ -24,6 +24,7 @@ export function navigationPolicy(gateway: string, previewHost: string, loginOrig
   let lastOpen = -Infinity;
   return (url: string, source: NavigationSource, gesture = false) => {
     const target = linkKind(url, gateway, previewHost, loginOrigins);
+    if (source === 'popup' && !gesture) return 'blocked';
     const toolbar = source === 'preview-toolbar' && target === 'preview';
     if (target !== 'external' && !toolbar) return target;
     if (gesture && (source === 'click' || source === 'popup' || toolbar) && now() - lastOpen >= 5000) {
@@ -31,5 +32,19 @@ export function navigationPolicy(gateway: string, previewHost: string, loginOrig
       openExternal(new URL(url).href);
     }
     return 'blocked';
+  };
+}
+
+// Each top-level document owns one click. Every attempted use consumes it.
+export function linkGesture(now = Date.now) {
+  let href: string | undefined;
+  let expires = 0;
+  return {
+    record(url?: string) { href = url; expires = now() + 1000; },
+    consume(url: string) {
+      const allowed = url === href && now() < expires;
+      href = undefined;
+      return allowed;
+    }
   };
 }

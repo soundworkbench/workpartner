@@ -45,7 +45,9 @@ else {
 function start() {
   const store = session.defaultSession;
   store.setUserAgent(app.userAgentFallback.replace(/(\(KHTML, like Gecko\)).*?( Chrome\/)/, '$1$2').replace(/\sElectron\/\S+/g, ''), 'zh-CN,zh');
-  if (!testMode && app.isPackaged) app.setAsDefaultProtocolClient(brand.protocol);
+  if (!testMode && app.isPackaged && !app.setAsDefaultProtocolClient(brand.protocol)) {
+    console.warn('桌面深链协议注册失败', brand.protocol);
+  }
   const { win, navigate, probe } = createWindow(brand, () => void auth.sync());
   open = url => {
     if (!testMode) {

@@ -11,6 +11,8 @@
   "engines": { "node": ">=22.12.0" },
   "scripts": {
     "build": "tsc && node -e \"require('node:fs').copyFileSync('src/main/offline.html','dist/main/offline.html')\"",
+    "build:test": "tsc --outDir dist-test && node -e \"const fs = require('node:fs'); fs.copyFileSync('src/main/offline.html', 'dist-test/main/offline.html'); fs.writeFileSync('dist-test/main/build-mode.js', 'export const testMode = true;')\"",
+    "package:test": "npm run build:test && electron-builder --dir --config electron-builder.test.config.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "start": "npm run build && electron .",
     "package": "npm run build && electron-builder --config electron-builder.config.mjs"

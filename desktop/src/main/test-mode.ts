@@ -1,4 +1,5 @@
-export const testMode = process.env.WP_DESKTOP_TEST === '1';
+import { testMode } from './build-mode.js';
+export { testMode };
 
 export function testLog(action: string, url?: string) {
   if (!testMode) return;

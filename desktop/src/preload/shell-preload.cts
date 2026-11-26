@@ -7,15 +7,10 @@ if (process.isMainFrame) {
   for (const type of ['click', 'auxclick'] as const) {
     window.addEventListener(type, event => {
       if (!trusted(event)) return;
-      // WindowOpenHandler does not expose Chromium's userGesture flag.
-      ipcRenderer.send('wp-gesture', true);
-      setTimeout(() => ipcRenderer.send('wp-gesture', false), 0);
+      const anchor = event.composedPath().find((el): el is HTMLAnchorElement => el instanceof HTMLAnchorElement && el.hasAttribute('href'));
+      // Deliver the original href before page handlers or the default navigation can run.
+      ipcRenderer.sendSync('wp-gesture', anchor && !anchor.hasAttribute('download') ? anchor.href : null);
     }, true);
-    window.addEventListener(type, event => {
-      if (!trusted(event) || event.defaultPrevented) return;
-      const anchor = event.composedPath().find(el => el instanceof HTMLAnchorElement);
-      if (anchor && !anchor.hasAttribute('download')) ipcRenderer.send('wp-link', anchor.href);
-    });
   }
   window.addEventListener('offline', event => {
     if (event.isTrusted) ipcRenderer.send('wp-offline');

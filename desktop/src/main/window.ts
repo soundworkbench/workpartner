@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { testLog, testMode } from './test-mode.js';
-import { navigationPolicy } from './links.js';
+import { linkGesture, navigationPolicy } from './links.js';
 
 export type Brand = { productName: string; displayName: string; appId: string; protocol: string; defaultGatewayUrl: string; previewHost: string; loginOrigins: string[] };
 const offlineFile = fileURLToPath(new URL('./offline.html', import.meta.url));
@@ -60,21 +60,22 @@ export function createWindow(brand: Brand, onGateway: () => void) {
     finally { probing = false; }
   }
 
+  function documentGesture(contents: WebContents) {
+    const click = linkGesture();
+    contents.ipc.on('wp-gesture', (event, href) => {
+      if (event.senderFrame === contents.mainFrame) click.record(typeof href === 'string' ? href : undefined);
+      event.returnValue = null;
+    });
+    contents.on('did-navigate', () => click.record());
+    contents.on('render-process-gone', () => click.record());
+    return click;
+  }
+
   function bind(contents: WebContents, preview: boolean) {
-    let gestureUntil = 0;
-    contents.ipc.on('wp-gesture', (event, active) => {
-      if (event.senderFrame === contents.mainFrame) gestureUntil = active === true ? Date.now() + 500 : 0;
-    });
-    contents.on('did-start-navigation', details => {
-      if (details.isMainFrame) gestureUntil = 0;
-    });
-    contents.ipc.on('wp-link', (event, url) => {
-      if (event.senderFrame === contents.mainFrame && typeof url === 'string') route(url, 'click', true);
-    });
+    const click = documentGesture(contents);
     contents.setWindowOpenHandler(({ url }) => {
-      const target = route(url, 'popup', Date.now() < gestureUntil);
-      gestureUntil = 0;
-      if (target === 'main') navigate(url);
+      const target = route(url, 'popup', click.consume(url));
+      if (!preview && target === 'main') navigate(url);
       if (target === 'preview') openPreview(url);
       return { action: 'deny' };
     });
@@ -87,22 +88,29 @@ export function createWindow(brand: Brand, onGateway: () => void) {
       if (!preview && offline && contents.getURL() === offlineURL && url === 'about:blank#retry') {
         event.preventDefault(); navigate(destination); return;
       }
-      const target = route(url, redirect ? 'redirect' : 'navigation');
+      const clicked = !redirect && click.consume(url);
+      const target = route(url, redirect ? 'redirect' : clicked ? 'click' : 'navigation', clicked);
       if (redirect) testLog('重定向 ' + target, url);
       if (!preview && target === 'main') return;
       if (preview && (target === 'preview' || url.startsWith(origin + '/_wp/preview/authorize?'))) return;
       event.preventDefault();
       if (target === 'preview') openPreview(url);
-      if (target === 'main') navigate(url);
     };
     contents.on('will-frame-navigate', event => guard(event, false));
     contents.on('will-redirect', event => guard(event, true));
   }
 
+  let previewWindow: { child: BrowserWindow; page: WebContents } | undefined;
   function openPreview(url: string) {
+    if (previewWindow && !previewWindow.child.isDestroyed()) {
+      void previewWindow.page.loadURL(url).catch(() => {});
+      if (!testMode) previewWindow.child.focus();
+      return;
+    }
     const child = new BrowserWindow({ parent: win, show: !testMode, title: '工作区预览', width: 960, height: 720, webPreferences: safePrefs });
     const view = new WebContentsView({ webPreferences: safePrefs });
     const page = view.webContents;
+    previewWindow = { child, page };
     bind(page, true);
     child.contentView.addChildView(view);
     const layout = () => {
@@ -111,19 +119,27 @@ export function createWindow(brand: Brand, onGateway: () => void) {
     };
     layout();
     child.on('resize', layout);
-    child.on('closed', () => { if (!page.isDestroyed()) page.close(); });
+    child.on('closed', () => {
+      if (previewWindow?.child === child) previewWindow = undefined;
+      if (!page.isDestroyed()) page.close();
+    });
+    const toolbarClick = documentGesture(child.webContents);
     child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     child.webContents.on('will-navigate', event => {
       event.preventDefault();
+      if (!toolbarClick.consume(event.url)) return;
       if (event.url === 'about:blank#refresh') page.reload();
+      else if (route(event.url, 'navigation') === 'preview') route(event.url, 'preview-toolbar', true);
     });
-    child.webContents.ipc.on('wp-link', (event, href) => {
-      if (event.senderFrame === child.webContents.mainFrame && href === 'about:blank#browser') {
-        route(url, 'preview-toolbar', true);
-      }
-    });
-    void child.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
-      '<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\';style-src \'unsafe-inline\'"><title>工作区预览</title><style>body{font:14px system-ui;margin:10px}a{margin-right:16px}</style><a href="about:blank#refresh">刷新</a><a href="about:blank#browser">在浏览器中打开</a>'));
+    function toolbar(href: string) {
+      const link = route(href, 'navigation') === 'preview'
+        ? '<a href="' + href.replaceAll('&', '&amp;').replaceAll('"', '&quot;') + '">在浏览器中打开</a>' : '';
+      void child.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+        '<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\';style-src \'unsafe-inline\'"><title>工作区预览</title><style>body{font:14px system-ui;margin:10px}a{margin-right:16px}</style><a href="about:blank#refresh">刷新</a>' + link)).catch(() => {});
+    }
+    page.on('did-navigate', (_event, href) => toolbar(href));
+    page.on('did-navigate-in-page', (_event, href, main) => { if (main) toolbar(href); });
+    toolbar(url);
     void page.loadURL(url).catch(() => {});
   }
 

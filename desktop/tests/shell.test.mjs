@@ -71,3 +71,33 @@ test('自定义协议在点击、新窗口和重定向中均被拦截', () => {
   }
   assert.deepEqual(opened, []);
 });
+
+test('无手势的三次预览弹窗全部拒绝', () => {
+  const { route } = shell();
+  const decisions = Array.from({ length: 3 }, () => route('https://' + preview + '/view', 'popup', false));
+  assert.deepEqual(decisions, Array(3).fill('blocked'));
+});
+test('点击凭证只允许原链接，一次有效，一秒过期', async () => {
+  const { linkGesture } = await import('../dist/main/links.js');
+  const { opened, route } = shell();
+  let now = 100;
+  const click = linkGesture(() => now);
+  const a = 'https://docs.example.org/a', b = 'https://docs.example.org/b';
+  click.record(a);
+  route(b, 'popup', click.consume(b));
+  assert.deepEqual(opened, []);
+  click.record(a);
+  assert.equal(click.consume(a), true);
+  assert.equal(click.consume(a), false);
+  click.record(a);
+  now += 1000;
+  assert.equal(click.consume(a), false);
+});
+
+test('发布构建不会从运行环境启用测试模式', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e',
+    "import { testMode } from './dist/main/test-mode.js'; process.exitCode = Number(testMode)"],
+    { cwd: new URL('../', import.meta.url), env: { ...process.env, WP_DESKTOP_TEST: '1' } });
+  assert.equal(child.status, 0);
+});
