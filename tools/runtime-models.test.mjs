@@ -945,14 +945,14 @@ test('image reconciliation replaces idle stale running workspaces, skips busy an
   assert.deepEqual(calls, []);
 });
 
-test('image reconciliation retries a user occupied by keep-running in the same cycle', async t => {
+test('image reconciliation retries an idle first user occupied by keep-running', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-reconcile-race-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.writeFileSync(path.join(dir, 'aionui-first.pass'), 'fixture');
   const state = { running: false, image: 'old' };
   const calls = [];
   const runtime = {
-    inspect: async () => { await new Promise(resolve => setImmediate(resolve)); return {
+    inspect: async () => { await new Promise(resolve => setTimeout(resolve, 25)); return {
       exists: true, replicas: state.running ? 1 : 0, running: state.running, name: 'first', image: state.image,
       imageId: state.image === 'new' ? 'new-id' : 'old-id', address: { host: '127.0.0.1', port: 9 }, env: [],
     }; },
@@ -966,12 +966,17 @@ test('image reconciliation retries a user occupied by keep-running in the same c
   const user = { slug: 'first', backend: 'aionui' };
   const aionui = createAionui({ runtime, kind: 'k8s', image: 'new', secretDir: dir, log() {} });
   t.after(() => aionui.close());
-  await Promise.all([aionui.keepRunning(() => [user]), aionui.reconcileImages(() => [user])]);
+  const cycleMs = 50;
+  aionui.startKeepRunning(() => [user], cycleMs);
+  aionui.startReconcileImages(() => [user], cycleMs);
+  // The first two same-time ticks must be enough despite the 25ms inspect API delay.
+  await new Promise(resolve => setTimeout(resolve, cycleMs * 2 + 30));
+  aionui.close();
   await aionui.pending('first');
   assert.deepEqual(calls, ['start', 'stop', 'remove', 'create', 'start']);
 });
 
-test('image reconciliation does not wait for a long keep-running job before checking later users', async t => {
+test('image reconciliation bounds a long keep-running job and checks later users', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wp-runtime-reconcile-long-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   for (const slug of ['first', 'second']) fs.writeFileSync(path.join(dir, `aionui-${slug}.pass`), 'fixture');
@@ -990,7 +995,7 @@ test('image reconciliation does not wait for a long keep-running job before chec
     address: async () => null,
   };
   const users = () => [{ slug: 'first', backend: 'aionui' }, { slug: 'second', backend: 'aionui' }];
-  const aionui = createAionui({ runtime, kind: 'k8s', image: 'new', secretDir: dir, log() {} });
+  const aionui = createAionui({ runtime, kind: 'k8s', image: 'new', reconcileWaitMs: 10, secretDir: dir, log() {} });
   t.after(() => aionui.close());
   const keep = aionui.keepRunning(users);
   await new Promise(resolve => setImmediate(resolve));
