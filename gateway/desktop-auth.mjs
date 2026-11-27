@@ -253,6 +253,9 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
     }
     return false;
   }
+  handle.admitted = user => {
+    try { return admitted(user && currentUser(user.unionId)); } catch { return false; }
+  };
   handle.verify = verify;
   handle.authenticate = authToken;
   handle.isDesktopRoute = url => [AUTHORIZE, TOKEN, REFRESH, KEY, REVOKE].includes(url.pathname);

@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { createDesktopMcp } from './desktop-mcp.mjs';
 import { createMigration } from './migration.mjs';
 import { createFeishu } from './feishu.mjs';
 import { issueToken, tokenUser, writeContainerToken } from './market-auth.mjs';
@@ -12,9 +13,10 @@ import { RELAY_PORT } from '../preview/policy.mjs';
 import { createPreview, writeRelayKey } from '../preview/gateway.mjs';
 
 /** Initialize organization-selected services with the gateway's identity and personal container resolver. */
-export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, dataTools, extraClient, migration = createMigration(organization) }) {
+export async function createGatewayServices({ organization, runtime: personalRuntime, legacyRuntime = personalRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, dataTools, extraClient, organizationData = () => organization, desktopRelay, migration = createMigration(organization) }) {
   const { features, runtime, server } = organization;
   const authenticate = req => tokenUser(req, SESSION_KEY, users());
+  const desktopMcp = desktopRelay && createDesktopMcp({ authenticate, desktopRelay });
   const enabled = () => features.feishuAuthorization && process.env.FEISHU_USER_AUTH_ENABLED !== '0';
   const prepareNextFeishu = features.feishuAuthorization ? createNextFeishuPreparation({
     organization, runtime: personalRuntime, tokenFor: user => issueToken(SESSION_KEY, user),
@@ -52,7 +54,8 @@ export async function createGatewayServices({ organization, runtime: personalRun
   const marketPrepared = new Map();
   async function prepare(user, options) {
     if (!migration.owns(user)) return;
-    if ((features.marketSkills || organization.dataTools) && !features.feishuAuthorization && user.backend === 'aionui'
+    if ((features.marketSkills || organization.dataTools || organizationData().desktop?.enabled === true)
+      && !features.feishuAuthorization && user.backend === 'aionui'
       && (options?.force || (marketPrepared.get(user.slug) || 0) < Date.now())) {
       await writeContainerToken(SESSION_KEY, user, personalRuntime, runtime.uid);
       marketPrepared.set(user.slug, Date.now() + 86400000);
@@ -64,6 +67,16 @@ export async function createGatewayServices({ organization, runtime: personalRun
     try { await prepare(user); }
     catch (error) { console.error(`[identity] ${user.slug}: personal setup unavailable (${error.code || error.name}); gateway startup continues`); }
   }
+  // Renew container credentials even when no browser request visits this gateway.
+  let preparing = false;
+  const tokenTimer = desktopRelay && setInterval(async () => {
+    if (preparing) return;
+    preparing = true;
+    try { for (const user of users()) { try { await prepare(user); } catch { /* Retry on the next pass; never log credentials. */ } } }
+    catch { /* An unavailable user list or policy is retried without exposing details. */ }
+    finally { preparing = false; }
+  }, 60000);
+  tokenTimer?.unref();
   let internal, timer;
   if (feishu) {
     let maintaining = false;
@@ -96,18 +109,45 @@ export async function createGatewayServices({ organization, runtime: personalRun
   }
   return { prepareNextFeishu: prepare, preview, feishu, feishuSettings,
     listen(extension) {
-      if (!feishu && !extension?.internal && !organization.dataTools && migration.kind !== 'k8s') return;
+      if (!feishu && !extension?.internal && !organization.dataTools && !desktopRelay && migration.kind !== 'k8s') return;
       // This listener is internal-only; token services authenticate signed identities,
       // while adoption preparation requires a loopback peer and current ownership.
       internal = http.createServer(async (req, res) => {
-        if (await prepareInternal(req, res)) return;
-        if (req.url === '/token' && feishu) return feishu.token(req, res);
-        if (await dataTools?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
-        if (await extension?.internal?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
-        res.writeHead(404); res.end();
+        let url;
+        try {
+          url = new URL(req.url, 'http://gateway.internal');
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9_.:-]+$/.test(error.code) ? error.code : 'ERR_INVALID_URL';
+          console.warn(`[internal] url ${code}`);
+          try { if (!res.destroyed && !res.writableEnded) { res.writeHead(400); res.end(); } } catch { try { res.destroy?.(); } catch {} }
+          return;
+        }
+        let route = 'desktopMcp';
+        try {
+          if (await desktopMcp?.(req, res, url)) return;
+          route = 'prepareInternal';
+          if (await prepareInternal(req, res)) return;
+          if (req.url === '/token' && feishu) {
+            route = 'feishu.token';
+            return await feishu.token(req, res);
+          }
+          route = 'dataTools';
+          if (await dataTools?.(req, res, url)) return;
+          route = 'extension.internal';
+          if (await extension?.internal?.(req, res, url)) return;
+          res.writeHead(404); res.end();
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9_.:-]+$/.test(error.code) ? error.code : 'ERR_INTERNAL';
+          console.warn(`[internal] ${route} ${code}`);
+          try {
+            if (res.destroyed || res.writableEnded) return;
+            if (!res.headersSent) res.writeHead(500);
+            res.end();
+          } catch { try { res.destroy?.(); } catch {} }
+        }
       });
       return internal.listen(runtime.internalPort, '0.0.0.0');
     },
-    async close() { clearInterval(timer); if (internal) await new Promise(resolve => internal.close(resolve)); },
+    async close() { desktopRelay?.close(); clearInterval(tokenTimer); clearInterval(timer); if (internal) await new Promise(resolve => internal.close(resolve)); },
   };
 }
