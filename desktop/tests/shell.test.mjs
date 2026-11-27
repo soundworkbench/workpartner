@@ -8,6 +8,9 @@ const preview = 'preview.example.org';
 const { loginOrigins } = JSON.parse(readFileSync(new URL('../brand/default/brand.json', import.meta.url)));
 test('工作区、登录、预览和外部导航使用不同的窗口策略', () => {
   for (const host of ['accounts', 'passport', 'open']) assert.equal(linkKind('https://' + host + '.feishu.cn', origin, preview, loginOrigins), 'main');
+  // 飞书登录页会先顶层跳到字节统一账号做静默登录检查，再跳回飞书。
+  assert.equal(linkKind('https://accounts.doubao.com/flow-account/oauth/authorize/', origin, preview, loginOrigins), 'main');
+  assert.equal(linkKind('https://www.feishu.cn/suite/passport/authentication/idpx/doubao/callback', origin, preview, loginOrigins), 'main');
   assert.equal(linkKind(origin + '/_wp/login', origin, preview, loginOrigins), 'main');
   assert.equal(linkKind('https://' + preview + '/view', origin, preview, loginOrigins), 'preview');
   for (const url of ['https://docs.example.org', 'http://' + preview, 'https://' + preview + '.example.org']) {

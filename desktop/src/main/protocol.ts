@@ -8,6 +8,10 @@ export function registerProtocol(protocol: string, userData: string, register: (
   } catch (error) {
     message += ' ' + String(error);
   }
+  desktopLog(userData, message);
+}
+
+export function desktopLog(userData: string, message: string) {
   console.warn(message);
   try {
     appendFileSync(join(userData, 'desktop.log'), new Date().toISOString() + ' ' + message + '\n', { mode: 0o600 });
