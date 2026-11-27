@@ -7,9 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { fork } from 'node:child_process';
+import { Duplex } from 'node:stream';
+import { runInNewContext } from 'node:vm';
 import { WebSocket } from 'ws';
 import { createDesktopAuth } from '../desktop-auth.mjs';
-import { createDesktopRelay } from '../desktop-relay.mjs';
+import { createDesktopRelay, rejectUpgrade } from '../desktop-relay.mjs';
 import { createGatewayServices } from '../services.mjs';
 import { createMigration } from '../migration.mjs';
 import { issueToken } from '../market-auth.mjs';
@@ -31,20 +33,56 @@ function inbox(ws) {
   ws.on('message', bytes => { const message = JSON.parse(bytes); const receive = waiting.shift(); if (receive) receive(message); else queue.push(message); });
   return () => queue.length ? Promise.resolve(queue.shift()) : new Promise(resolve => waiting.push(resolve));
 }
-async function connect(url, { id = crypto.randomUUID(), bearer = token(), headers = {}, hello = {}, autoPong = true, skipHello = false } = {}) {
-  const ws = new WebSocket(url, { autoPong, headers: { authorization: `Bearer ${bearer}`, 'x-wp-device-id': id, ...headers } });
+async function connect(url, { id = crypto.randomUUID(), bearer = token(), headers = {}, hello = {}, autoPong = true, skipHello = false, createConnection } = {}) {
+  const ws = new WebSocket(url, { autoPong, createConnection, headers: { authorization: `Bearer ${bearer}`, 'x-wp-device-id': id, ...headers } });
   const next = inbox(ws), closed = new Promise(resolve => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })));
   await once(ws, 'open');
   if (!skipHello) ws.send(JSON.stringify({ type: 'hello', protocolVersion: 1, deviceId: id, deviceName: 'Test computer', platform: 'linux', arch: 'x64', appVersion: '0.3.0', capabilities: ['fs.read'], allowedRoots: ['/documents'], ...hello }));
   return { ws, id, next, closed, send: message => ws.send(JSON.stringify(message)), ack: skipHello ? null : await next() };
 }
-async function rejected(url, headers = {}) {
+async function rejected(url, headers = {}, createConnection) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, { headers: { 'x-wp-device-id': crypto.randomUUID(), ...headers } });
+    const ws = new WebSocket(url, { createConnection, headers: { 'x-wp-device-id': crypto.randomUUID(), ...headers } });
     ws.on('unexpected-response', (req, res) => { res.resume(); resolve({ status: res.statusCode, headers: res.headers }); });
     ws.on('error', reject); ws.on('open', () => { ws.terminate(); reject(new Error('Expected rejection')); });
   });
 }
+// Execute the production listener without starting the gateway's unrelated services.
+const upgradeSource = fs.readFileSync(new URL('../gateway.mjs', import.meta.url), 'utf8').match(/server\.on\("upgrade",[\s\S]*?\n\}\);/)[0];
+function gatewayUpgrade(desktopRelay, migration, context = {}) {
+  let listener;
+  runInNewContext(upgradeSource, { URL, desktopRelay, migration, rejectUpgrade, preview: undefined,
+    server: { on(event, handler) { assert.equal(event, 'upgrade'); listener = handler; } }, ...context });
+  return listener;
+}
+
+function memoryGateway(t, kind, owner = kind) {
+  const dir = directory(t), ownersFile = path.join(dir, 'owners.json');
+  fs.writeFileSync(ownersFile, JSON.stringify({ version: 1, default: owner, users: {} }));
+  const migration = createMigration({ runtime: { kind, migration: { ownersFile, peerOrigin: 'http://peer.example.test' } } });
+  const forward = t.mock.method(migration, 'forward');
+  const auth = createDesktopAuth({ organization: { runtime: { stateDirectory: dir }, server: { publicOrigin: 'http://gateway.example.test' } },
+    organizationData: () => ({ desktop: { enabled: true, allow: ['*'] } }), users: () => [person, other], sessionKey: key });
+  const relay = createDesktopRelay({ desktopAuth: auth, migration, allowedHost: host => host === 'gateway.example.test', audit() {} });
+  const server = http.createServer();
+  server.on('upgrade', gatewayUpgrade(relay, migration));
+  const sockets = new Set();
+  // Real HTTP parsing and ws frames over paired streams; no listening socket is needed.
+  function createConnection() {
+    const client = new Duplex({ read() {}, write(chunk, encoding, done) { remote.push(chunk); done(); }, final(done) { remote.push(null); done(); } });
+    const remote = new Duplex({ read() {}, write(chunk, encoding, done) { client.push(chunk); done(); }, final(done) { client.push(null); done(); } });
+    for (const socket of [client, remote]) { sockets.add(socket); socket.on('error', () => {}); }
+    client.on('close', () => remote.destroy()); remote.on('close', () => client.destroy());
+    server.emit('connection', remote);
+    return client;
+  }
+  t.after(() => { relay.close(); for (const socket of sockets) socket.destroy(); server.close(); });
+  const url = 'ws://gateway.example.test/_wp/desktop/ws';
+  return { relay, migration, forward, createConnection, ownersFile,
+    connect: options => connect(url, { ...options, createConnection }),
+    rejected: headers => rejected(url, headers, createConnection) };
+}
+
 async function fixture(t, options = {}) {
   const dir = directory(t), config = { desktop: { enabled: true, allow: ['*'] } }, users = [person, other], audit = [], published = [];
   const organization = { features: {}, model: {}, runtime: { stateDirectory: dir, secureDirectory: dir, internalPort: 0, uid: 1001 }, server: { publicHost: '127.0.0.1', publicOrigin: 'http://127.0.0.1' } };
@@ -55,7 +93,7 @@ async function fixture(t, options = {}) {
     if (await auth(req, res, new URL(req.url, 'http://gateway'))) return;
     res.writeHead(404); res.end();
   });
-  server.on('upgrade', (req, socket, head) => relay.upgrade(req, socket, head));
+  server.on('upgrade', gatewayUpgrade(relay, options.migration ?? createMigration({ runtime: {} })));
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const services = await createGatewayServices({ organization, organizationData: () => config, desktopRelay: relay,
     runtime: { putFiles: async (...args) => published.push(args) }, SESSION_KEY: key, users: () => users, userFor: () => ({}), aionui: {} });
@@ -112,14 +150,116 @@ test('same-user RPC, explicit cross-user isolation, offline latency and local li
   code(await f.call({ path: '/documents/a', unionId: person.unionId }, other), 'INVALID_PARAMS');
 });
 
+test('memory upgrade: local desktop user bypasses migration.forward, including delegated handshakes', async t => {
+  const local = memoryGateway(t, 'docker');
+  for (const headers of [{}, { 'x-workpartner-delegated': '1' }]) {
+    const client = await local.connect({ headers });
+    assert.equal(client.ack.type, 'hello_ack');
+  }
+  assert.equal(local.forward.mock.callCount(), 0);
+  assert.equal(local.relay.registry.get(person.unionId).size, 2);
+});
+
+test('memory upgrade: authenticated desktop migration reaches owner once and completes hello/RPC', async t => {
+  const source = memoryGateway(t, 'docker', 'k8s'), target = memoryGateway(t, 'k8s');
+  const request = http.request, forwarded = [];
+  t.mock.method(http, 'request', function (options, ...args) {
+    if (options.hostname !== 'peer.example.test') return request.call(this, options, ...args);
+    forwarded.push(options);
+    return request.call(this, { ...options, createConnection: target.createConnection }, ...args);
+  });
+  const c = await source.connect();
+  assert.equal(c.ack.type, 'hello_ack');
+  assert.equal(source.forward.mock.callCount(), 1);
+  assert.equal(source.forward.mock.calls[0].arguments[2], person);
+  assert.equal(target.forward.mock.callCount(), 0);
+  assert.equal(forwarded.length, 1);
+  const sent = forwarded[0];
+  assert.equal(sent.hostname, 'peer.example.test');
+  assert.equal(sent.path, '/_wp/desktop/ws');
+  assert.equal(sent.headers['x-workpartner-delegated'], '1');
+  assert.equal(sent.headers.authorization, source.forward.mock.calls[0].arguments[0].headers.authorization);
+  assert.equal(sent.headers['x-wp-device-id'], c.id);
+  assert.equal(source.relay.registry.size, 0);
+  assert.equal(target.relay.registry.size, 1);
+  const result = target.relay.call(person, { name: 'desktop_read_file', arguments: { path: '/documents/a' } });
+  await respond(c); assert.equal(data(await result).content, 'hello');
+});
+
+test('memory upgrade: conflicting gateway ownership rejects delegated desktop handshake without looping', async t => {
+  const source = memoryGateway(t, 'docker', 'k8s'), target = memoryGateway(t, 'k8s', 'docker');
+  const request = http.request, forwarded = [];
+  t.mock.method(http, 'request', function (options, ...args) {
+    if (options.hostname !== 'peer.example.test') return request.call(this, options, ...args);
+    forwarded.push(options);
+    return request.call(this, { ...options, createConnection: target.createConnection }, ...args);
+  });
+  assert.equal((await source.rejected({ authorization: `Bearer ${token()}` })).status, 502);
+  assert.equal(forwarded.length, 1);
+  assert.equal(source.forward.mock.callCount(), 1);
+  assert.equal(target.forward.mock.callCount(), 1);
+  assert.equal(target.forward.mock.calls[0].arguments[2], person);
+  assert.equal(target.forward.mock.calls[0].arguments[0].headers['x-workpartner-delegated'], '1');
+  assert.equal(source.relay.registry.size, 0); assert.equal(target.relay.registry.size, 0);
+});
+
+test('memory upgrade: unauthenticated desktop requests reject 401 before migration even when owners are unavailable', async t => {
+  const source = memoryGateway(t, 'docker', 'k8s');
+  // Remove ownership before the first read to exercise the fail-closed migration state.
+  fs.unlinkSync(source.ownersFile);
+  const owns = t.mock.method(source.migration, 'owns');
+  for (const bearer of ['', token(person, { exp: 1 }), token() + 'x', issueToken(key, person)]) {
+    for (const delegated of [false, true]) {
+      const headers = { ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), ...(delegated ? { 'x-workpartner-delegated': '1' } : {}) };
+      assert.equal((await source.rejected(headers)).status, 401);
+    }
+  }
+  assert.equal(owns.mock.callCount(), 0);
+  assert.equal(source.forward.mock.callCount(), 0);
+});
+
+test('memory upgrade: unavailable ownership rejects authenticated desktop with migration 503', async t => {
+  const source = memoryGateway(t, 'docker');
+  fs.unlinkSync(source.ownersFile);
+  assert.equal((await source.rejected({ authorization: `Bearer ${token()}` })).status, 503);
+  assert.equal(source.forward.mock.callCount(), 1);
+  assert.equal(source.forward.mock.calls[0].arguments[2], person);
+  assert.equal(source.relay.registry.size, 0);
+});
+
+test('memory upgrade: non-desktop paths keep migration, preview, identity and legacy ordering', async () => {
+  for (const scenario of ['unavailable', 'preview', 'preview-origin', 'legacy']) {
+    const calls = [], socket = { destroy() { calls.push('destroy'); } }, head = Buffer.alloc(0);
+    const req = { url: '/socket', headers: { host: scenario === 'preview' ? 'preview.example.test' : 'gateway.example.test',
+      ...(scenario === 'preview-origin' ? { origin: 'https://preview.example.test' } : {}) } };
+    const migration = { forward(r, s, user, h) { assert.equal(r, req); assert.equal(s, socket); assert.equal(h, head); calls.push(user === null ? 'anonymous' : 'user'); return scenario === 'unavailable'; } };
+    const upgrade = gatewayUpgrade({ upgrade() { calls.push('desktop'); } }, migration, {
+      preview: { isPreviewHost: host => host === 'preview.example.test', upgrade() { calls.push('preview'); } },
+      previewSessionUser() { calls.push('preview-session'); return person; }, SESSION_KEY: key, organization: { server: {} }, users: () => [person],
+      userFor() { calls.push('session'); return { user: person }; }, legacy: { upgrade() { calls.push('legacy'); return true; } },
+    });
+    await upgrade(req, socket, head);
+    assert.deepEqual(calls, scenario === 'unavailable' ? ['anonymous'] : scenario === 'preview' ? ['anonymous', 'preview-session', 'user', 'preview']
+      : scenario === 'preview-origin' ? ['anonymous', 'destroy'] : ['anonymous', 'session', 'user', 'legacy']);
+  }
+});
+
 test('migration.forward transparently upgrades and relays frames to owning gateway', async t => {
-  const target = await fixture(t), dir = directory(t);
+  const dir = directory(t);
   fs.writeFileSync(path.join(dir, 'owners.json'), JSON.stringify({ version: 1, default: 'k8s', users: {} }));
+  const targetMigration = createMigration({ runtime: { kind: 'k8s', migration: { ownersFile: path.join(dir, 'owners.json'), peerOrigin: 'http://peer.example.test' } } });
+  const targetForward = t.mock.method(targetMigration, 'forward');
+  const target = await fixture(t, { migration: targetMigration });
   const migration = createMigration({ runtime: { kind: 'docker', migration: { ownersFile: path.join(dir, 'owners.json'), peerOrigin: target.url } } });
+  const sourceForward = t.mock.method(migration, 'forward');
   const source = await fixture(t, { migration });
   const c = await connect(source.wsUrl); assert.equal(source.relay.registry.size, 0); assert.equal(target.relay.registry.size, 1);
+  assert.equal(c.ack.type, 'hello_ack');
+  assert.equal(sourceForward.mock.callCount(), 1); assert.equal(sourceForward.mock.calls[0].arguments[2], person);
+  assert.equal(targetForward.mock.callCount(), 0);
   const result = target.call(); await respond(c); assert.equal(data(await result).content, 'hello');
   assert.equal((await rejected(source.wsUrl)).status, 401);
+  assert.equal(sourceForward.mock.callCount(), 1);
 });
 
 test('heartbeat pings, no-pong eviction, valid activity and inFlight cleanup', async t => {

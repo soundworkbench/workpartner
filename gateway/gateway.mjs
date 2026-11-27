@@ -423,6 +423,12 @@ const server = http.createServer(async (req, res) => {
 
 server.on("upgrade", async (req, socket, head) => {
   try {
+    // Desktop ownership is resolved only after authenticating its wpd. bearer.
+    if (new URL(req.url, 'http://gateway').pathname === '/_wp/desktop/ws') {
+      if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) return socket.destroy();
+      if (!desktopRelay) return rejectUpgrade(socket, 404);
+      return desktopRelay.upgrade(req, socket, head);
+    }
     if (migration.forward(req, socket, null, head)) return;
     if (preview?.isPreviewHost(String(req.headers.host || "").toLowerCase())) {
       const user = previewSessionUser(req, { key: SESSION_KEY, host: organization.server.previewHost, users });
@@ -430,10 +436,6 @@ server.on("upgrade", async (req, socket, head) => {
       return await preview.upgrade(req, socket, head);
     }
     if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) return socket.destroy();
-    if (new URL(req.url, 'http://gateway').pathname === '/_wp/desktop/ws') {
-      if (!desktopRelay) return rejectUpgrade(socket, 404);
-      return desktopRelay.upgrade(req, socket, head);
-    }
     if (migration.forward(req, socket, userFor(req).user || (req.headers.authorization && tokenUser(req, SESSION_KEY, users())), head)) return;
     if (legacy?.upgrade?.(req, socket, head)) return;
     const r = await resolve(req);

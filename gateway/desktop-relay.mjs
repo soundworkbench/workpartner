@@ -113,7 +113,7 @@ export function createDesktopRelay({ desktopAuth, migration, allowedHost, now = 
     if (new URL(req.url, 'http://gateway').search) return rejectUpgrade(socket, 401);
     const auth = desktopAuth.authenticate(req);
     if (!auth) return rejectUpgrade(socket, 401);
-    if (migration?.forward(req, socket, auth.user, head)) return;
+    if (migration && !migration.owns(auth.user) && migration.forward(req, socket, auth.user, head)) return;
     review(auth.user.unionId);
     const own = [...sessions].filter(s => s.user.unionId === auth.user.unionId);
     const ids = new Set(own.map(s => s.deviceId));
