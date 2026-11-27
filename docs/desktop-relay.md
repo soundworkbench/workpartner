@@ -634,7 +634,7 @@
    - 系统保留目录：POSIX `/System`、`/Library`、`/etc`、`/private/etc`、`/private/var`、`/proc`、`/sys`、`/dev`；Windows `C:\Windows`、`C:\Program Files`、`C:\Program Files (x86)`、`C:\ProgramData`。
    - 客户端自身目录：运行时动态获取的 `app.getPath('userData')`（保护本机 `desktop-token.enc`、`device-id`、`helper-config.json` 与审计日志）。
 
-**macOS 已知限制**。桌面端用 `/.vol` 定位已打开的目录，并核对设备号和 inode。卷不支持该别名或身份核对失败时，拒绝访问。校验与后续路径查找之间仍有竞态。触发它需要同一用户下已有进程能修改授权目录，该进程本身已能直接读取此用户有权访问的文件。
+**macOS 已知限制**。桌面端用 `/.vol` 定位已打开的目录，并核对设备号和 inode。卷不支持该别名或身份核对失败时，拒绝访问。校验与后续路径查找之间仍有竞态。触发它需要本机已有进程能修改授权目录（通常是同一用户的进程，也可能是对共享可写目录有写权限的其他用户进程）。同一用户的进程本身已能直接读取此用户的文件；授权共享可写目录时应注意这一风险。
 
 ---
 
