@@ -127,17 +127,35 @@ test('both logout actions reach the gateway logout page when cookie cleanup fail
   const { logoutDesktop } = await import('../dist/main/logout.js');
   const origin = 'https://example.org', preview = 'preview.example.org';
   for (const all of [false, true]) {
-    for (const failingOrigin of [origin, 'https://' + preview]) {
-      const calls = [];
-      await logoutDesktop(all, {
-        revokeAll: async () => { calls.push('revoke'); },
-        clear: () => calls.push('clear')
-      }, () => calls.push('close'), async url => {
-        calls.push(url);
-        if (url === failingOrigin) throw new Error();
-      }, origin, preview, url => calls.push(url), assert.fail);
-      assert.deepEqual(calls, [...(all ? ['revoke'] : []), 'clear', 'close', origin, 'https://' + preview, origin + '/_wp/logout']);
+    for (const relogin of [false, true]) {
+      for (const failingOrigin of [origin, 'https://' + preview]) {
+        const calls = [];
+        const notice = await logoutDesktop(all, relogin, {
+          revokeAll: async () => { calls.push('revoke'); },
+          clear: () => calls.push('clear')
+        }, () => calls.push('close'), async url => {
+          calls.push(url);
+          if (url === failingOrigin) throw new Error();
+        }, origin, preview, url => calls.push(url));
+        assert.equal(notice, '');
+        assert.deepEqual(calls, [...(all ? ['revoke'] : []), 'clear', 'close', origin, 'https://' + preview, origin + '/_wp/logout']);
+      }
     }
+  }
+});
+
+test('successful cookie cleanup honors relogin and reports an unconfirmed revoke-all', async () => {
+  const { logoutDesktop } = await import('../dist/main/logout.js');
+  const origin = 'https://example.org';
+  for (const relogin of [false, true]) {
+    const calls = [];
+    const notice = await logoutDesktop(!relogin, relogin, {
+      revokeAll: async () => { calls.push('revoke'); throw new Error(); },
+      clear: () => calls.push('clear')
+    }, () => calls.push('close'), async url => { calls.push(url); }, origin, 'preview.example.org', url => calls.push(url));
+    assert.deepEqual(calls, [...(relogin ? [] : ['revoke']), 'clear', 'close', origin, 'https://preview.example.org',
+      origin + (relogin ? '/_wp/login' : '/_wp/logout')]);
+    assert.equal(notice, relogin ? '' : '本机已退出，其他桌面设备的退出未确认');
   }
 });
 

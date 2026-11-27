@@ -13,10 +13,12 @@ export const retryDelay = (attempt: number, random = Math.random) =>
   Math.round(steps[Math.min(attempt, steps.length - 1)] * (0.8 + random() * 0.4));
 type Auth = { token(): string | undefined; refresh(): Promise<boolean>; markRevoked(): void };
 type Options = { origin: string; appVersion: string; settings: HelperSettings; auth: Auth;
-  status: (text: string) => void; loopbackTest?: boolean; run?: RunTool };
+  status: (text: string, connection: Connection) => void; loopbackTest?: boolean; run?: RunTool };
 type Incoming = Record<string, unknown>;
 function object(v: unknown): v is Incoming { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 function positive(v: unknown): v is number { return typeof v === 'number' && Number.isSafeInteger(v) && v > 0; }
+
+export type Connection = 'connected' | 'connecting' | 'offline' | 'revoked' | 'paused';
 
 export class DesktopRelay {
   private url: URL;
@@ -29,6 +31,7 @@ export class DesktopRelay {
   private attempt = 0;
   private epoch = 0;
   private waiting?: NodeJS.Timeout;
+  private slowRetry = false;
   private watchdog?: NodeJS.Timeout;
   private healthy?: NodeJS.Timeout;
   private lastActive = -Infinity;
@@ -39,6 +42,8 @@ export class DesktopRelay {
   private run: RunTool;
   private audit: ReturnType<typeof createAudit>;
   state = '尚未登录';
+  connection: Connection = 'offline';
+  get canRetry() { return !!this.waiting && !this.slowRetry; }
   constructor(private opts: Options) {
     this.url = new URL('/_wp/desktop/ws', opts.origin);
     if (this.url.protocol === 'https:') this.url.protocol = 'wss:';
@@ -47,7 +52,11 @@ export class DesktopRelay {
     this.run = opts.run || createToolRunner();
     this.audit = createAudit(opts.settings.userData);
   }
-  private status(text: string) { this.state = text; this.opts.status(text); }
+  private status(text: string, connection: Connection = 'offline') {
+    this.state = text;
+    this.connection = connection;
+    this.opts.status(text, connection);
+  }
   private abortAll() {
     for (const job of this.inflight.values()) job.abort();
     this.inflight.clear();
@@ -74,16 +83,18 @@ export class DesktopRelay {
       this.attempt = 0;
       this.attemptedRefresh = this.terminal = false;
       this.status('尚未登录');
-    } else if (reason === 'helper_paused' && !this.terminal) this.status('本机助手已暂停');
+    } else if (reason === 'helper_paused' && !this.terminal) this.status('本机助手已暂停', 'paused');
     if (reason === 'app_quit') this.terminal = true;
     return closed;
   }
-  private halt(text: string) { this.terminal = true; this.status(text); }
+  private halt(text: string, connection: Connection = 'offline') { this.terminal = true; this.status(text, connection); }
   private schedule(slowStatus?: string) {
     if (this.terminal || this.opts.settings.snapshot().paused || !this.opts.auth.token()) return;
-    this.status(slowStatus ?? '本机助手已断开，等待重连');
-    this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); },
-      slowStatus ? slowRetryMs : retryDelay(this.attempt++));
+    this.slowRetry = slowStatus !== undefined;
+    const delay = this.slowRetry ? slowRetryMs : retryDelay(this.attempt++);
+    this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); }, delay);
+    const text = slowStatus ?? '本机助手已断开，等待重连';
+    this.status(text + '（约 ' + Math.ceil(delay / 1000) + ' 秒）', 'offline');
   }
   wake() {
     if (this.terminal || this.refreshing || this.opts.settings.snapshot().paused) return;
@@ -99,11 +110,12 @@ export class DesktopRelay {
   }
   credentialsRevoked() {
     this.stop('user_logout');
-    this.halt('桌面登录已失效，请退出后重新登录');
+    this.halt('桌面登录已失效，请退出后重新登录', 'revoked');
   }
   private async refresh(epoch: number) {
     if (!this.attemptedRefresh) {
       this.refreshing = this.attemptedRefresh = true;
+      this.status('正在更新桌面凭据', 'connecting');
       let renewed = false;
       try { renewed = await this.opts.auth.refresh(); } catch { /* Failure invalidates this session. */ }
       if (this.epoch !== epoch) return;
@@ -113,9 +125,9 @@ export class DesktopRelay {
     this.revoke();
   }
   private revoke() {
-    this.halt('桌面登录已失效，请退出后重新登录');
+    this.halt('桌面登录已失效，请退出后重新登录', 'revoked');
     try { this.opts.auth.markRevoked(); }
-    catch { this.status('桌面登录已失效，本机撤销记录保存失败'); }
+    catch { this.status('桌面登录已失效，本机撤销记录保存失败', 'revoked'); }
   }
   private disconnected(code: number, reason: string, http: number) {
     this.resetConnection();
@@ -135,8 +147,8 @@ export class DesktopRelay {
     const { settings, auth, appVersion } = this.opts;
     const token = auth.token();
     if (!token || this.terminal || this.refreshing || this.waiting || this.ws) return;
-    if (settings.snapshot().paused) { this.status('本机助手已暂停'); return; }
-    this.status('本机助手连接中');
+    if (settings.snapshot().paused) { this.status('本机助手已暂停', 'paused'); return; }
+    this.status('本机助手连接中', 'connecting');
     const ws = new WebSocket(this.url, { headers: { Authorization: 'Bearer ' + token, 'X-WP-Protocol-Version': '1',
       'X-WP-Device-Id': settings.deviceId, 'X-WP-Platform': process.platform, 'X-WP-App-Version': appVersion },
       maxPayload: maxBytes, handshakeTimeout: 10000, perMessageDeflate: false, autoPong: false, followRedirects: false });
@@ -187,7 +199,7 @@ export class DesktopRelay {
         this.frameLimit = Math.min(maxBytes, msg.maxFrameBytes);
         this.concurrency = Math.min(4, msg.maxConcurrency);
         this.lastActive = -Infinity;
-        this.status('本机助手已连接');
+        this.status('本机助手已连接', 'connected');
         this.healthy = setTimeout(() => { this.attempt = 0; this.attemptedRefresh = false; }, 10000);
         this.settingsChanged();
       } else if (msg.type === 'rpc_req') void this.request(ws, msg);
@@ -213,6 +225,7 @@ export class DesktopRelay {
     }
     this.roots = allowedRoots;
     if (this.ready) this.send(this.ws, JSON.stringify({ type: 'state_update', deviceName, allowedRoots, preferred }));
+    else if (this.connection === 'paused' && !this.opts.auth.token()) this.status('尚未登录');
     else this.connect();
   }
   active() {

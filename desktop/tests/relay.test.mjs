@@ -368,6 +368,9 @@ test('confirmed unsupported handshakes and device limits retry after ten minutes
     gw.reject = status;
     d.relay.connect();
     await until(() => d.relay.state.includes(text));
+    assert.equal(d.relay.connection, 'offline');
+    assert.equal(d.relay.canRetry, false);
+    assert.match(d.relay.state, /600 秒/);
     const count = gw.attempts.length;
     gw.reject = 0;
     t.mock.timers.tick(599999);
@@ -403,8 +406,59 @@ test('a revocation persistence exception leaves the relay stopped and updates st
   await d.online();
   gw.devices.get(d.settings.deviceId).ws.close(4001, 'token_revoked');
   await until(() => d.state.status.includes('保存失败'));
+  assert.equal(d.relay.connection, 'revoked');
   d.relay.wake();
   d.relay.connect();
   await delay(20);
   assert.equal(gw.attempts.length, 1);
+});
+
+test('a paused device keeps its grants across restart and never retries until resumed', async t => {
+  const gw = await mockGateway(t), d = device(t, gw);
+  await d.settings.addDirectory();
+  await d.online();
+  gw.devices.get(d.settings.deviceId).ws.terminate();
+  await until(() => d.relay.canRetry);
+  d.settings.setPaused(true);
+  const saved = new HelperSettings(d.store, async () => undefined, () => restarted.settingsChanged());
+  const restarted = new DesktopRelay({ origin: gw.origin, loopbackTest: true, appVersion: '0.3.0', settings: saved,
+    auth: { token: () => gw.token, refresh: async () => false, markRevoked() {} }, status() {} });
+  t.after(() => restarted.stop('app_quit'));
+  assert.equal(saved.snapshot().paused, true);
+  assert.deepEqual(saved.snapshot().allowedRoots, [d.root]);
+  for (const relay of [d.relay, restarted]) {
+    relay.wake();
+    relay.connect();
+    relay.settingsChanged();
+    assert.equal(relay.connection, 'paused');
+  }
+  await delay(1300);
+  assert.equal(gw.attempts.length, 1);
+  saved.setPaused(false);
+  await until(() => restarted.connection === 'connected');
+  assert.equal(gw.attempts.length, 2);
+  assert.deepEqual(gw.devices.get(saved.deviceId).allowedRoots, [d.root]);
+});
+
+test('resuming a signed-out helper shows the signed-out state', async t => {
+  const gw = await mockGateway(t);
+  const d = device(t, gw, { auth: { token: () => undefined } });
+  d.settings.setPaused(true);
+  assert.equal(d.relay.connection, 'paused');
+  d.settings.setPaused(false);
+  assert.equal(d.relay.connection, 'offline');
+  assert.equal(d.relay.state, '尚未登录');
+  assert.equal(gw.attempts.length, 0);
+});
+
+test('each preferred toggle sends a state_update over the existing connection', async t => {
+  const gw = await mockGateway(t), d = device(t, gw);
+  d.relay.connect();
+  await d.online();
+  const peer = gw.devices.get(d.settings.deviceId);
+  for (const preferred of [true, false]) {
+    d.settings.setPreferred(preferred);
+    await until(() => peer.preferred === preferred);
+    assert.equal(gw.attempts.length, 1);
+  }
 });

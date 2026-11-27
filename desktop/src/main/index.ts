@@ -7,6 +7,8 @@ import { createWindow, type Brand } from './window.js';
 import { registerProtocol } from './protocol.js';
 import { deepTarget } from './links.js';
 import { createTray } from './tray.js';
+import { settingsWindow } from './settings-window.js';
+import { connectionLabels, logoutAction, type SettingsView } from './settings-actions.js';
 import { HelperSettings } from './helper-settings.js';
 import { DesktopRelay } from './relay.js';
 import { logoutDesktop } from './logout.js';
@@ -71,32 +73,68 @@ function start() {
       await store.cookies.remove(new URL(cookie.path || '/', url).href, cookie.name);
     }
   }
-  async function logout(all: boolean) {
-    if (loggingOut) return;
+  let notice = '', authDetail = '尚未登录';
+  function changed() { tray?.render(); access.changed(); }
+  async function confirmAll() {
+    if (testMode) return false;
+    const options: Electron.MessageBoxOptions = { type: 'warning', title: brand.displayName,
+      message: '退出所有桌面设备？', detail: '此账号下的所有桌面设备都将断开本机访问，需要重新登录。',
+      buttons: ['取消', '退出所有桌面设备'], defaultId: 0, cancelId: 0, noLink: true };
+    const owner = access.current();
+    try {
+      const answer = owner?.isVisible() ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+      return answer.response === 1;
+    } catch {
+      notice = '未能打开退出确认框，请重试';
+      changed();
+      return false;
+    }
+  }
+  const logout = logoutAction(() => auth.token(), confirmAll, async (all, relogin) => {
     loggingOut = true;
     try {
-      await logoutDesktop(all, auth, closePreviews, clearCookies, origin, brand.previewHost, url => open?.(url), tray.status);
-    } catch { tray.status('退出登录未完成，请重试'); }
-    finally { loggingOut = false; }
-  }
-  const tray = testMode ? { status: (value: string) => testLog(value), tray: undefined }
-    : createTray(brand, () => open?.(), () => void logout(false), () => void logout(true));
+      notice = await logoutDesktop(all, relogin, auth, closePreviews, clearCookies, origin, brand.previewHost, url => open?.(url));
+    } catch { notice = '退出登录未完成，请重试'; }
+    finally { loggingOut = false; changed(); }
+  });
   const settings: HelperSettings = new HelperSettings(app.getPath('userData'), async () => {
-    if (testMode) return;
-    const { canceled, filePaths } = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
-    if (!canceled && filePaths.length === 1) return filePaths[0];
-  }, () => relay.settingsChanged());
+    const owner = access.current();
+    if (testMode || !owner) return;
+    const { canceled, filePaths } = await dialog.showOpenDialog(owner, { properties: ['openDirectory'] });
+    if (!owner.isDestroyed() && !canceled && filePaths.length === 1) return filePaths[0];
+  }, () => { relay.settingsChanged(); changed(); });
   const auth = new DesktopAuth(origin, filename('desktop-token.enc'), safeStorage, {
     cookie: async () => (await store.cookies.get({ url: origin, name: 'wp_sid' }))[0]?.value,
     authorize: url => authorize(store, url),
     fetch: (url, options) => store.fetch(url, { credentials: 'omit', cache: 'no-store',
       redirect: 'error', signal: AbortSignal.timeout(15_000), ...options })
-  }, tray.status, undefined, state => {
-    if (state === 'available') { if (!quitting && !loggingOut) relay.connect(); }
+  }, text => { authDetail = text; changed(); }, undefined, state => {
+    if (state === 'available') { notice = ''; if (!quitting && !loggingOut) relay.connect(); changed(); }
     else if (state === 'revoked') relay.credentialsRevoked();
     else relay.stop('user_logout');
   }, () => settings.snapshot().deviceName);
-  const relay: DesktopRelay = new DesktopRelay({ origin, settings, auth, appVersion: app.getVersion(), status: tray.status });
+  const relay: DesktopRelay = new DesktopRelay({ origin, settings, auth, appVersion: app.getVersion(), status: (text, connection) => {
+    if (connection === 'revoked') authDetail = text;
+    testLog(text); changed();
+  } });
+  function view(): SettingsView {
+    const config = settings.snapshot();
+    const connection = config.paused && relay.connection !== 'revoked' ? 'paused' : relay.connection;
+    const detail = connection === 'paused' ? '已保留授权目录，恢复后可重新连接' :
+      (relay.state === '尚未登录' || connection === 'revoked') ? authDetail : relay.state;
+    return { ...config, connection, connectionLabel: connectionLabels[connection], detail, canRetry: relay.canRetry, canRevoke: !!auth.token(),
+      notice, platform: process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux',
+      version: app.getVersion() };
+  }
+  const access = settingsWindow('本机访问 · ' + brand.displayName, settings, view, logout);
+  const tray = testMode ? undefined : createTray(brand, view, {
+    show: () => open?.(), settings: access.open, retry: () => relay.wake(),
+    pause: value => {
+      try { settings.setPaused(value); }
+      catch { notice = '暂停设置保存失败，请重试'; changed(); }
+    },
+    logout, login: () => { void logout(false, true); }
+  });
   win.on('focus', () => relay.active());
   win.webContents.ipc.on('wp-online', event => {
     if (event.senderFrame === win.webContents.mainFrame) relay.wake();
@@ -140,12 +178,12 @@ function start() {
     const hint = filename('tray-hint');
     if (!existsSync(hint)) {
       writeFileSync(hint, '1');
-      if (Notification.isSupported()) new Notification({ title: brand.displayName, body: '工作伙伴仍在运行，可从系统托盘重新打开。' }).show();
+      if (Notification.isSupported()) new Notification({ title: brand.displayName, body: brand.displayName + '仍在运行，可从系统托盘重新打开。' }).show();
     }
   });
   const timer = setInterval(sync, 5 * 60_000);
   powerMonitor.on('resume', () => { void probe(); relay.wake(); sync(); });
-  app.on('will-quit', () => { clearInterval(timer); tray.tray?.destroy(); });
+  app.on('will-quit', () => { clearInterval(timer); tray?.tray.destroy(); });
   navigate(pending || origin + '/');
   if (!testMode && (pending || (!process.argv.includes('--hidden') && !app.getLoginItemSettings().wasOpenedAtLogin))) win.show();
   if (testMode) testLog(win.isVisible() ? '窗口可见' : '无界面运行');
