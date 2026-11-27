@@ -206,51 +206,24 @@ async function resolve(req) {
   return result;
 }
 
-// Keep the last representation metadata so repeat conditional requests do not wake a user container.
-const proxyResponseCache = new Map();
-const PROXY_RESPONSE_CACHE_LIMIT = 5000;
-const cacheScope = r => JSON.stringify(r.up?.address || {});
-const cacheEligible = req => ['GET', 'HEAD'].includes(req.method) && req.headers.range === undefined;
-function cachedProxyResponse(req, r) {
-  if (!cacheEligible(req) || !req.headers['if-none-match']) return null;
-  const scope = r ? cacheScope(r) : null;
-  for (const [key, entry] of [...proxyResponseCache].reverse()) {
-    if ((scope && entry.scope !== scope) || entry.url !== req.url || (process.env.WP_GATEWAY_COMPRESS === '0' && entry.headers['content-encoding'])
-      || !etagMatches(req, entry.etag)) continue;
-    proxyResponseCache.delete(key); proxyResponseCache.set(key, entry);
-    return entry;
-  }
-  return null;
-}
-function rememberProxyResponse(req, r, sourceEtag, etag, headers) {
-  if (!cacheEligible(req) || !etag) return;
-  const scope = cacheScope(r), url = req.url;
-  for (const [key, entry] of proxyResponseCache) {
-    if (entry.scope === scope && entry.url === url && entry.sourceEtag !== sourceEtag) proxyResponseCache.delete(key);
-  }
-  const key = `${scope}\0${url}\0${etag}`;
-  proxyResponseCache.delete(key);
-  proxyResponseCache.set(key, { scope, url, sourceEtag, etag, headers: { ...headers } });
-  while (proxyResponseCache.size > PROXY_RESPONSE_CACHE_LIMIT) proxyResponseCache.delete(proxyResponseCache.keys().next().value);
-}
 function conditionalHeaders(headers) {
   return Object.fromEntries(Object.entries(headers).filter(([name]) => !['content-length', 'content-encoding', 'transfer-encoding', 'content-type'].includes(name.toLowerCase())));
 }
 
 function proxy(req, res, r, body, retried) {
   const etag = r.etag?.(req);
-  const requestedEncoding = encodingFor(req);
-  const cached = cachedProxyResponse(req, r);
-  if (cached) {
-    res.writeHead(304, conditionalHeaders(cached.headers));
-    return res.end();
-  }
-  // Preserve the original no-upstream short circuit when the representation is known to be unencoded.
-  if ((!requestedEncoding || process.env.WP_GATEWAY_COMPRESS === '0') && etagMatches(req, etag)) {
-    const headers = r.responseHeaders({}, etag, 200, req.url.split('?')[0], req.method);
+  // Only the resolved container's image + URL validates static content. Encoding variants
+  // share that content, even if compression is now disabled or Accept-Encoding changed.
+  const variants = etag ? [etag, encodedEtag(etag, 'br'), encodedEtag(etag, 'gzip')] : [];
+  const matched = String(req.headers['if-none-match'] || '').split(',').map(value => value.trim())
+    .find(value => variants.some(candidate => etagMatches({ headers: { 'if-none-match': value } }, candidate)));
+  if (matched && req.headers.range === undefined) {
+    const headers = r.responseHeaders({}, matched, 200, req.url.split('?')[0], req.method);
+    headers.vary = mergeVary(headers.vary, 'accept-encoding');
     res.writeHead(304, conditionalHeaders(headers));
     return res.end();
   }
+  const requestedEncoding = encodingFor(req);
   const titleCreate = r.backend === "aionui" && req.method === "POST" && /^\/api\/conversations(?:\?|$)/.test(req.url);
   const headers = r.headers(req, r.cookie);
   if (titleCreate) headers["accept-encoding"] = "identity";
@@ -263,7 +236,6 @@ function proxy(req, res, r, body, retried) {
     }
     const responseHeaders = r.responseHeaders(ur.headers, etag, ur.statusCode, req.url.split('?')[0], req.method);
     const useCompression = compressible(ur.headers, ur.statusCode, req, requestedEncoding);
-    const sourceEtag = responseHeaders.etag;
     const responseEtag = encodedEtag(responseHeaders.etag, useCompression ? requestedEncoding : null);
     if (responseEtag) responseHeaders.etag = responseEtag;
     if (useCompression) {
@@ -271,14 +243,7 @@ function proxy(req, res, r, body, retried) {
       responseHeaders['content-encoding'] = requestedEncoding;
       responseHeaders.vary = mergeVary(responseHeaders.vary, 'accept-encoding');
     }
-    if (ur.statusCode === 200) rememberProxyResponse(req, r, sourceEtag, responseEtag, responseHeaders);
-    // 上游首部决定能否压缩及缓存策略，不能仅凭 Accept-Encoding 猜测表示的 ETag。
-    if (ur.statusCode === 200 && ['GET', 'HEAD'].includes(req.method) && !req.headers.range && etagMatches(req, responseEtag)) {
-      res.writeHead(304, conditionalHeaders(responseHeaders));
-      ur.resume();
-      return res.end();
-    }
-    res.writeHead(ur.statusCode, responseHeaders);
+    res.writeHead(ur.statusCode, ur.statusCode === 304 ? conditionalHeaders(responseHeaders) : responseHeaders);
     if (titleCreate && ur.statusCode >= 200 && ur.statusCode < 300) {
       const parts = []; let size = 0;
       ur.on("data", chunk => { size += chunk.length; if (size <= 65536) parts.push(chunk); });
@@ -429,11 +394,6 @@ const server = http.createServer(async (req, res) => {
       if (!user) { res.writeHead(401); return res.end(); }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ name: who.name, avatar: who.avatar, union_id: who.unionId }));
-    }
-    // The cached metadata is enough to answer a static conditional request even while its container restarts.
-    if (user) {
-      const cached = cachedProxyResponse(req);
-      if (cached) { res.writeHead(304, conditionalHeaders(cached.headers)); return res.end(); }
     }
     const r = await resolve(req);
     if (r.deny !== undefined) {

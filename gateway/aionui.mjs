@@ -40,7 +40,7 @@ export function etagMatches(req, etag) {
  * 转发给浏览器的 AionUi 响应首部：去掉 set-cookie；没有 Cache-Control 的补 no-cache（浏览器可以存，但每次先向服务器确认）。
  * AionUi 的静态文件只发 Last-Modified，浏览器会按启发式缓存，镜像升级后还在用旧页面。/assets/ 也不例外：
  * 换品牌时原地改了其中几十个文件，文件名里的 hash 不变、内容随版本变。
- * AionUi 不认 If-Modified-Since、也不发 ETag，所以 200 的静态文件由网关补 ETag（etag 参数），之后的确认由网关结合上游响应首部答复 304。
+ * AionUi 不认 If-Modified-Since、也不发 ETag，所以 200 的静态文件由网关补 ETag（etag 参数），之后由网关在路由解析后按镜像 ID + URL 答复 304。
  */
 export function aionuiResponseHeaders(upstream, etag, status = 200, pathname = '', method = 'GET') {
   const headers = { ...upstream };
@@ -52,7 +52,7 @@ export function aionuiResponseHeaders(upstream, etag, status = 200, pathname = '
     && (!policy || /(?:^|,)\s*(?:public|immutable)\s*(?:,|$)/i.test(policy))) {
     headers['cache-control'] = 'private, max-age=31536000, immutable';
   }
-  if (etag && status === 200 && !headers.etag) headers.etag = etag;
+  if (etag && status === 200) headers.etag = etag;
   return headers;
 }
 

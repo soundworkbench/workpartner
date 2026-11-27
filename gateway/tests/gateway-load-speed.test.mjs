@@ -6,7 +6,7 @@ import { brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
 import { createFeishuBot } from '../feishu-bot.mjs';
 import { createFeishuOnboarding } from '../feishu-onboarding.mjs';
 import { clientResponse } from '../client-response.mjs';
-import { aionuiResponseHeaders } from '../aionui.mjs';
+import { aionuiEtag, aionuiResponseHeaders } from '../aionui.mjs';
 import { gatewayFixture } from '../../tools/perf/gateway-fixture.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -21,6 +21,13 @@ async function call(handler, route, headers = {}, method = 'GET', body = {}) {
   return { status, headers: responseHeaders, body: raw, data: raw ? JSON.parse(raw) : undefined };
 }
 const agent = { id: 's12345678', kind: 'sub', name: '助手', setup: 'connected' };
+
+test('static ETags change with image ID and exclude dynamic routes', () => {
+  const req = { method: 'GET', url: '/index.html', headers: {} };
+  assert.notEqual(aionuiEtag('sha256:v1', req), aionuiEtag('sha256:v2', req));
+  assert.equal(aionuiEtag('sha256:v1', { ...req, url: '/api/data' }), null);
+  assert.equal(aionuiEtag('sha256:v1', { ...req, method: 'POST' }), null);
+});
 function botsFixture() {
   let now = 0, revision = 1, gate, failure, subAllowed = true;
   const calls = [];
@@ -232,6 +239,12 @@ test('real gateway response chain handles compression, caching and broken upstre
     assert.equal(second.headers['content-encoding'], undefined);
     assert.equal(second.headers['content-length'], undefined);
   });
+  await t.test('API upstream ETags never trigger gateway 304', async () => {
+    spec = { headers: { 'content-type': 'application/json', etag: '"upstream-api"' } };
+    const before = hits;
+    const response = await request('/api/data', { 'if-none-match': '"upstream-api"' });
+    assert.equal(response.status, 200); assert.equal(hits, before + 1);
+  });
   const exclusions = [
     ['Range', {}, { range: 'bytes=0-100' }], ['206', { status: 206 }],
     ['already encoded', { body: gzipSync(raw), headers: { 'content-encoding': 'gzip' } }],
@@ -276,10 +289,10 @@ test('real gateway response chain handles compression, caching and broken upstre
     assert.equal(second.status, 304); assert.equal(hits, forwarded);
     assert.equal(second.headers['content-encoding'], undefined); assert.equal(second.headers['content-length'], undefined);
   });
-  await t.test('upstream private policy survives marked asset 200 and 304', async () => {
+  await t.test('marked asset 304 uses its path cache policy', async () => {
     spec = { headers: { 'cache-control': 'private, no-store' } }; const first = await request();
     assert.equal(first.headers['cache-control'], 'private, no-store');
-    const second = await request(undefined, { 'if-none-match': first.headers.etag }); assert.equal(second.headers['cache-control'], 'private, no-store');
+    const second = await request(undefined, { 'if-none-match': first.headers.etag }); assert.equal(second.headers['cache-control'], 'private, max-age=31536000, immutable');
   });
   await t.test('client.js final content and login state determine ETag', async () => {
     const route = '/_wp/preview/client.js', first = await request(route, { 'accept-encoding': 'br' });
