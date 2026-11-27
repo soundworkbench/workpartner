@@ -107,8 +107,7 @@ export class DesktopAuth {
   private invalidate() {
     ++this.epoch;
     this.nextCheck = 0;
-    this.current = this.binding = this.sessionBinding = this.revokedBinding = undefined;
-    this.revokeStorageFailed = false;
+    this.current = this.binding = this.sessionBinding = undefined;
     this.changed('cleared');
   }
 
@@ -119,15 +118,25 @@ export class DesktopAuth {
     return binding;
   }
 
-  clear() {
-    this.invalidate();
+  clear({ sessionEnded = true } = {}) {
+    // The logout button can run before the gateway cookie is actually gone.
+    // Keep revocation evidence if cookie removal or logout navigation fails.
+    const keepOldToken = !sessionEnded && this.revokeStorageFailed && !!this.revokedBinding;
+    let notified = true;
+    try { this.invalidate(); } catch { notified = false; }
+    const files = keepOldToken ? [] : [this.file];
+    if (sessionEnded) {
+      this.revokedBinding = undefined;
+      this.revokeStorageFailed = false;
+      files.push(this.file + '.revoked', this.file + '.revoked.pending');
+    }
     let cleaned = true;
-    for (const file of [this.file, this.file + '.revoked', this.file + '.revoked.pending']) {
+    for (const file of files) {
       try { rmSync(file, { force: true }); }
       catch { cleaned = false; }
     }
-    this.status(cleaned ? '尚未登录' : '已退出，本机凭据文件清理失败');
-    return cleaned;
+    this.status(!cleaned ? '已退出，本机凭据文件清理失败' : notified ? '尚未登录' : '本机退出状态更新失败');
+    return cleaned && notified;
   }
 
   sync() {
@@ -246,6 +255,8 @@ export class DesktopAuth {
     const changed = this.current !== value.access_token;
     if (!this.current) this.status('已登录（已获取桌面凭据）');
     this.current = value.access_token;
+    this.revokedBinding = undefined;
+    this.revokeStorageFailed = false;
     if (changed) this.changed('available', unionId);
   }
 }

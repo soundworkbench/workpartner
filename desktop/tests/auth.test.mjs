@@ -238,6 +238,24 @@ test('empty and malformed revocation markers fail closed until logout', async t 
   assert.ok(existsSync(file));
 });
 
+test('starting logout keeps a revoked session blocked until its gateway cookie is gone', async t => {
+  const { logoutDesktop } = await import('../dist/main/logout.js');
+  const { file, state, client } = fixture(t);
+  const auth = client();
+  await auth.sync();
+  auth.markRevoked();
+  const origin = 'https://example.org';
+  await logoutDesktop(false, false, auth, () => {}, async () => { throw new Error('busy'); },
+    origin, 'preview.example.org', url => assert.equal(url, origin + '/_wp/logout'));
+  const next = client();
+  await next.sync();
+  assert.equal(next.token(), undefined);
+  assert.ok(existsSync(file + '.revoked'));
+  state.cookie = undefined;
+  await next.sync();
+  assert.equal(existsSync(file + '.revoked'), false);
+});
+
 test('credential deletion failures preserve all local and all-device logout steps', async t => {
   const { logoutDesktop } = await import('../dist/main/logout.js');
   const { file, client } = fixture(t);
@@ -260,7 +278,7 @@ test('credential deletion failures preserve all local and all-device logout step
         events.push('close');
       }, async url => { events.push(url); }, origin, preview, url => events.push(url));
       assert.deepEqual(events, [...(all ? ['revoke'] : []), 'close', origin, 'https://' + preview, origin + '/_wp/logout']);
-      assert.match(notice, /凭据文件清理失败/);
+      assert.match(notice, /凭据清理未完成/);
       assert.ok(existsSync(file));
     } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
   }
