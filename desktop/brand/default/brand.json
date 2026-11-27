@@ -1,0 +1,23 @@
+{
+  "productName": "WorkPartner",
+  "displayName": "工作伙伴",
+  "appId": "org.workpartner.desktop",
+  "protocol": "workpartner",
+  "defaultGatewayUrl": "https://workspace.example.org",
+  "previewHost": "preview.example.org",
+  "loginOrigins": [
+    "https://accounts.feishu.cn",
+    "https://open.feishu.cn",
+    "https://passport.feishu.cn",
+    "https://login.feishu.cn",
+    "https://accounts.doubao.com",
+    "https://www.feishu.cn",
+    "https://security.feishu.cn",
+    "https://accounts.larksuite.com",
+    "https://open.larksuite.com",
+    "https://passport.larksuite.com",
+    "https://login.larksuite.com",
+    "https://www.larksuite.com",
+    "https://security.larksuite.com"
+  ]
+}

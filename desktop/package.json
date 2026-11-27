@@ -1,0 +1,26 @@
+{
+  "name": "workpartner-desktop",
+  "productName": "WorkPartner",
+  "description": "工作伙伴桌面客户端",
+  "version": "0.3.0",
+  "private": true,
+  "author": "WorkPartner",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/main/offline.html','dist/main/offline.html')\"",
+    "build:test": "tsc --outDir dist-test && node -e \"const fs = require('node:fs'); fs.copyFileSync('src/main/offline.html', 'dist-test/main/offline.html'); fs.writeFileSync('dist-test/main/build-mode.js', 'export const testMode = true;')\"",
+    "package:test": "npm run build:test && electron-builder --dir --config electron-builder.test.config.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "start": "npm run build && electron .",
+    "package": "npm run build && electron-builder --config electron-builder.config.mjs"
+  },
+  "devDependencies": {
+    "electron": "45.5.0",
+    "electron-builder": "26.18.0",
+    "typescript": "5.9.3",
+    "@types/node": "22.19.0"
+  }
+}

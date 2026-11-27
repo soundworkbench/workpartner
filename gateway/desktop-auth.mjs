@@ -59,7 +59,7 @@ function bearer(req) {
 
 export function createDesktopAuth({ organization, organizationData, users, sessionAuthenticate = () => null,
   keyFor, keyFile = user => path.join(organization.runtime.secureDirectory, `${organization.model.keyPrefix || 'model-'}${user.slug}.key`),
-  sessionKey, now = Date.now, randomBytes = crypto.randomBytes }) {
+  sessionKey, onRevoke = () => {}, now = Date.now, randomBytes = crypto.randomBytes }) {
   const pending = new Map();
   const pendingByUser = new Map();
   const rates = new Map();
@@ -117,10 +117,10 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
     return operation;
   }
   function sign(data) { return crypto.createHmac('sha256', tokenKey).update(`wpd.${data}`).digest('base64url'); }
-  function issue(user, did = '') {
+  function issue(user, grantGeneration, did) {
     const iat = Math.floor(now() / 1000);
     const exp = iat + policy().tokenDays * 86400;
-    const data = Buffer.from(JSON.stringify({ u: user.unionId, g: generation(user.unionId), iat, exp, did })).toString('base64url');
+    const data = Buffer.from(JSON.stringify({ u: user.unionId, g: grantGeneration, iat, exp, did })).toString('base64url');
     return { access_token: `wpd.${data}.${sign(data)}`, expires_at: new Date(exp * 1000).toISOString(), user: { union_id: user.unionId, name: user.name, ...(user.avatar ? { avatar: user.avatar } : {}) } };
   }
   function verify(token) {
@@ -140,7 +140,7 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
       return { user, value };
     } catch { return null; }
   }
-  function tokenResponse(user, did) { return issue(user, typeof did === 'string' ? did.slice(0, 200) : ''); }
+  function tokenResponse(user, grantGeneration, did) { return issue(user, grantGeneration, typeof did === 'string' ? did.slice(0, 200) : ''); }
   function validRedirect(value) {
     if (typeof value !== 'string' || value.includes('%')) return false;
     const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{3,4})\/cb$/.exec(value);
@@ -175,14 +175,15 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
       if (req.method !== 'GET') return page(res, 405, '请求方法不支持', '请使用 GET。');
       const parameters = validAuthorize(url);
       if (!parameters) return page(res, 400, '桌面登录请求无效', 'redirect_uri、code_challenge、code_challenge_method 或 state 不符合要求。');
-      if (organization.features?.myKey !== true) return page(res, 403, '桌面版暂未开放', '桌面版钥匙功能尚未开放。');
       const who = sessionAuthenticate(req), user = who && currentUser(who.unionId);
       if (!who) { const next = `${url.pathname}${url.search}`; res.writeHead(302, { location: `/_wp/login?next=${encodeURIComponent(next)}`, 'cache-control': 'no-store' }); res.end(); return true; }
       if (!user || !admitted(user)) return page(res, 403, '桌面版暂未开放', '你的工作伙伴尚未开通桌面版登录。');
       const current = now();
       for (const [oldCode, old] of pending) if (old.until <= current) removePending(oldCode, old);
       const code = randomBytes(32).toString('base64url');
-      const record = { ...parameters, unionId: user.unionId, until: current + CODE_TTL, created: current };
+      let grantGeneration;
+      try { grantGeneration = generation(user.unionId); } catch { return fail(res, 500, 'state_unavailable'); }
+      const record = { ...parameters, unionId: user.unionId, grantGeneration, until: current + CODE_TTL, created: current };
       pending.set(code, record);
       const userCodes = pendingByUser.get(user.unionId) || [];
       userCodes.push(code);
@@ -203,15 +204,16 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
       const record = pending.get(code); if (record) removePending(code, record);
       if (!record || record.until <= now() || typeof body?.code_verifier !== 'string' || typeof body?.redirect_uri !== 'string'
         || body.redirect_uri !== record.redirectUri || crypto.createHash('sha256').update(body.code_verifier).digest('base64url') !== record.challenge) return fail(res, 400, 'invalid_grant');
-      if (organization.features?.myKey !== true) return fail(res, 400, 'invalid_grant');
       const user = currentUser(record.unionId); if (!user || !admitted(user)) return fail(res, 400, 'invalid_grant');
-      try { return json(res, 200, tokenResponse(user, body.device_name)); } catch { return fail(res, 500, 'state_unavailable'); }
+      try {
+        if (record.grantGeneration !== generation(user.unionId)) return fail(res, 400, 'invalid_grant');
+        return json(res, 200, tokenResponse(user, record.grantGeneration, body.device_name));
+      } catch { return fail(res, 500, 'state_unavailable'); }
     }
     if (url.pathname === REFRESH) {
       if (req.method !== 'POST') return fail(res, 405, 'method_not_allowed');
-      if (organization.features?.myKey !== true) return fail(res, 401, 'invalid_token');
       const result = authToken(req); if (!result) return fail(res, 401, 'invalid_token');
-      try { return json(res, 200, tokenResponse(result.user, result.value.did)); } catch { return fail(res, 500, 'state_unavailable'); }
+      try { return json(res, 200, tokenResponse(result.user, result.value.g, result.value.did)); } catch { return fail(res, 500, 'state_unavailable'); }
     }
     if (url.pathname === KEY) {
       if (req.method !== 'GET') return fail(res, 405, 'method_not_allowed');
@@ -238,7 +240,6 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
     }
     if (url.pathname === REVOKE) {
       if (req.method !== 'POST') return fail(res, 405, 'method_not_allowed');
-      if (organization.features?.myKey !== true) return fail(res, 403, 'desktop_unavailable');
       const tokenResult = authToken(req);
       let user = tokenResult?.user;
       if (!tokenResult) {
@@ -247,10 +248,13 @@ export function createDesktopAuth({ organization, organizationData, users, sessi
         if (!user || !admitted(user)) return fail(res, 401, 'invalid_session');
       }
       try { await bump(user.unionId); } catch { return fail(res, 500, 'state_unavailable'); }
+      await onRevoke(user.unionId);
       return json(res, 200, { ok: true });
     }
     return false;
   }
+  handle.verify = verify;
+  handle.authenticate = authToken;
   handle.isDesktopRoute = url => [AUTHORIZE, TOKEN, REFRESH, KEY, REVOKE].includes(url.pathname);
   return handle;
 }

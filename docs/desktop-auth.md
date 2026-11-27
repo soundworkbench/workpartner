@@ -1,6 +1,6 @@
 # 桌面版登录接口
 
-桌面客户端使用 `https://workpartner.corp.crysound.com` 完成飞书登录、PKCE 换取桌面令牌，并读取当前用户在「我的钥匙」中的钥匙。桌面版默认关闭，只有 `organization.json` 的 `desktop.enabled` 为 `true` 且用户匹配 `desktop.allow` 时开放；名单元素可以是用户 `slug`、飞书 `unionId` 或 `"*"`。
+桌面客户端使用组织配置的 HTTPS 网关完成飞书登录、PKCE 换取桌面令牌。启用「我的钥匙」后，还可读取当前用户的模型钥匙。桌面版默认关闭，只有 `organization.json` 的 `desktop.enabled` 为 `true` 且用户匹配 `desktop.allow` 时开放；名单元素可以是用户 `slug`、飞书 `unionId` 或 `"*"`。
 
 ## 登录和令牌
 
@@ -15,16 +15,18 @@
 `POST /_wp/api/desktop/token`
 
 ```json
-{"code":"…","code_verifier":"…","redirect_uri":"http://127.0.0.1:12345/cb","device_name":"CRY AI 工具箱"}
+{"code":"…","code_verifier":"…","redirect_uri":"http://127.0.0.1:12345/cb","device_name":"我的电脑"}
 ```
 
 成功返回 `{access_token, expires_at, user:{union_id,name,avatar?}}`。code 过期、重放、校验失败或回调地址不一致都返回 400，并作废该 code。令牌只用于桌面接口，不能替代 `wp_sid` 或 `zpd`。
 
 令牌到期前可用 `POST /_wp/api/desktop/refresh` 和 `Authorization: Bearer <access_token>` 换取新令牌。用户被移出 `users.json`、移出 `desktop.allow`、令牌过期或管理员执行撤销后，刷新返回 401。
 
+网页壳与飞书登录共用持久会话。主进程复用登录 Cookie 发起 PKCE，检查回环地址和 state 后换取令牌，并用系统密钥服务加密保存。令牌剩余不足七天时续期。退出网页登录或切换账号会清除本机凭据。未获桌面准入的用户仍可使用网页功能。
+
 ## 读取钥匙和撤销
 
-`GET /_wp/api/desktop/key` 使用桌面令牌读取钥匙，成功返回 `{key,fingerprint,base_url,issued_at}`。`fingerprint` 是钥匙 SHA-256 的前 12 位十六进制，`base_url` 来自 `myKey.publicBaseUrl`，`issued_at` 是钥匙文件修改时间。客户端已保存相同指纹时传 `?fp=…`，网关返回 204。此接口同时要求 `desktop.allow` 和 `myKey.allow`，无钥匙返回 404，按人限频返回 429 和 `Retry-After`。响应禁止缓存；审计只保存时间、unionId、设备名和指纹，不保存明文钥匙。
+`GET /_wp/api/desktop/key` 使用桌面令牌读取钥匙，成功返回 `{key,fingerprint,base_url,issued_at}`。`fingerprint` 是钥匙 SHA-256 的前 12 位十六进制，`base_url` 来自 `myKey.publicBaseUrl`，`issued_at` 是钥匙文件修改时间。客户端已保存相同指纹时传 `?fp=…`，网关返回 204。此接口另要求 `features.myKey: true` 和命中 `myKey.allow`，无钥匙返回 404，按人限频返回 429 和 `Retry-After`。响应禁止缓存；审计只保存时间、unionId、设备名和指纹，不保存明文钥匙。
 
 `POST /_wp/api/desktop/revoke-all` 可用桌面令牌调用，也可由网页登录态在同源 `Origin` 下调用，成功返回 `{"ok":true}`。它会把此人的持久化代次号加一，使已有桌面令牌立即失效。「我的钥匙」页面在桌面版开放时显示“退出所有桌面设备”按钮。
 
