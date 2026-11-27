@@ -16,7 +16,11 @@ function fixture(t) {
   const root = path.join(base, 'doc'), outside = root + 's', store = path.join(base, 'store');
   for (const dir of [root, outside, store]) fs.mkdirSync(dir);
   const state = { choice: root, changes: 0 };
-  const settings = () => new HelperSettings(store, async () => state.choice, () => state.changes++);
+  const settings = () => {
+    const settings = new HelperSettings(store, async () => state.choice, () => state.changes++);
+    settings.bindAccount('account-a');
+    return settings;
+  };
   const config = settings();
   function run(name, args, progress, deadline = Date.now() + 10000) {
     return executeTool('desktop_' + name, args, config.grants(), store, deadline, progress);
@@ -50,6 +54,21 @@ test('identity and private settings survive restart and directory changes', asyn
   next.removeDirectory(root);
   assert.deepEqual(settings().snapshot().allowedRoots, []);
   if (process.platform !== 'win32') for (const file of ['helper-config.json', 'device-id']) assert.equal(fs.statSync(path.join(store, file)).mode & 0o777, 0o600);
+});
+
+test('a picker opened in a previous login cannot grant its selection after an account switch', async t => {
+  const { root, store } = fixture(t);
+  let choose;
+  const config = new HelperSettings(store, () => new Promise(resolve => { choose = resolve; }), () => {});
+  config.bindAccount('account-a');
+  const pending = config.addDirectory();
+  config.bindAccount();
+  config.bindAccount('account-b');
+  choose(root);
+  await pending;
+  assert.deepEqual(config.grants(), []);
+  config.bindAccount('account-a');
+  assert.deepEqual(config.grants(), []);
 });
 
 test('lexical and canonical boundaries hide existence and block sensitive paths', async t => {
@@ -252,10 +271,10 @@ test('persisted identities reject a replaced root after restart and path-only gr
   ]) {
     assert.throws(() => executeTool('desktop_' + tool, args, restored.grants(), store, Date.now() + 1000), code('PATH_NOT_ALLOWED'));
   }
-  fs.writeFileSync(path.join(store, 'helper-config.json'), JSON.stringify({ preferred: true, allowedRoots: [root] }));
+  fs.writeFileSync(path.join(store, 'helper-config.json'), JSON.stringify({ preferred: true, grants: config.grants(), allowedRoots: [root] }));
   const legacy = settings();
   assert.deepEqual(legacy.grants(), []);
-  assert.ok(legacy.snapshot().preferred);
+  assert.equal(legacy.snapshot().preferred, false);
   await legacy.addDirectory();
   assert.notDeepEqual(legacy.grants(), config.grants());
 });

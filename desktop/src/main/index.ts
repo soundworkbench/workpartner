@@ -110,10 +110,13 @@ function start() {
     authorize: url => authorize(store, url),
     fetch: (url, options) => store.fetch(url, { credentials: 'omit', cache: 'no-store',
       redirect: 'error', signal: AbortSignal.timeout(15_000), ...options })
-  }, text => { authDetail = text; changed(); }, undefined, state => {
-    if (state === 'available') { notice = ''; if (!quitting && !loggingOut) relay.connect(); changed(); }
-    else if (state === 'revoked') relay.credentialsRevoked();
-    else relay.stop('user_logout');
+  }, text => { authDetail = text; changed(); }, undefined, (state, unionId) => {
+    if (state === 'available') {
+      if (quitting || loggingOut) return;
+      notice = '';
+    }
+    relay.credentialsChanged(state, unionId);
+    changed();
   }, () => settings.snapshot().deviceName);
   const relay: DesktopRelay = new DesktopRelay({ origin, settings, auth, appVersion: app.getVersion(), status: (text, connection) => {
     if (connection === 'revoked') authDetail = text;
@@ -152,11 +155,12 @@ function start() {
       (cookie.domain?.startsWith('.') && new URL(origin).hostname.endsWith('.' + domain)))) return;
     // Cookie replacement also emits a removal. Check the replacement's
     // binding in sync() so rewriting the same cookie preserves revocation.
-    if (removed && cause !== 'overwrite') {
+    if (removed && cause === 'overwrite') return;
+    if (removed) {
       auth.clear();
       closePreviews();
       void clearCookies('https://' + brand.previewHost).catch(() => {});
-    }
+    } else auth.cookieChanged(cookie.value);
     sync();
   }
   if (testMode) {

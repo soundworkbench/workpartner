@@ -51,11 +51,12 @@ export class DesktopAuth {
   private nextCheck = 0;
   private current?: string;
   private binding?: string;
+  private sessionBinding?: string;
   private revokedBinding?: string;
   private revokeStorageFailed = false;
   constructor(private origin: string, private file: string, private vault: Vault, private io: Transport,
     private status: (text: string) => void, private warn: (text: string) => void = console.warn,
-    private changed: (state: 'available' | 'cleared' | 'revoked') => void = () => {}, private deviceName = hostname) {}
+    private changed: (state: 'available' | 'cleared' | 'revoked', unionId?: string) => void = () => {}, private deviceName = hostname) {}
 
   token() { return this.current; }
 
@@ -106,9 +107,16 @@ export class DesktopAuth {
   private invalidate() {
     ++this.epoch;
     this.nextCheck = 0;
-    this.current = this.binding = this.revokedBinding = undefined;
+    this.current = this.binding = this.sessionBinding = this.revokedBinding = undefined;
     this.revokeStorageFailed = false;
     this.changed('cleared');
+  }
+
+  cookieChanged(sid: string) {
+    const binding = hash(this.origin + '\n' + sid);
+    if (this.sessionBinding && this.sessionBinding !== binding) this.invalidate();
+    this.sessionBinding = binding;
+    return binding;
   }
 
   clear() {
@@ -144,7 +152,8 @@ export class DesktopAuth {
     const sid = await this.io.cookie();
     if (epoch !== this.epoch) return;
     if (!sid) { this.clear(); return; }
-    const binding = hash(this.origin + '\n' + sid);
+    const binding = this.cookieChanged(sid);
+    epoch = this.epoch;
     if (!this.vault.isEncryptionAvailable()) { this.status('系统凭据存储不可用'); return; }
     const unionId = await this.sessionUser();
     if (epoch !== this.epoch) return;
@@ -237,6 +246,6 @@ export class DesktopAuth {
     const changed = this.current !== value.access_token;
     if (!this.current) this.status('已登录（已获取桌面凭据）');
     this.current = value.access_token;
-    if (changed) this.changed('available');
+    if (changed) this.changed('available', unionId);
   }
 }

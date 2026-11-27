@@ -108,6 +108,12 @@ export class DesktopRelay {
     this.attempt = 0;
     this.connect();
   }
+  credentialsChanged(state: 'available' | 'cleared' | 'revoked', unionId?: string) {
+    this.opts.settings.bindAccount(state === 'available' ? unionId : undefined);
+    if (state === 'available') this.connect();
+    else if (state === 'revoked') this.credentialsRevoked();
+    else this.stop('user_logout');
+  }
   credentialsRevoked() {
     this.stop('user_logout');
     this.halt('桌面登录已失效，请退出后重新登录', 'revoked');

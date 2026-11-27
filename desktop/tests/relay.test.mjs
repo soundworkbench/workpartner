@@ -37,6 +37,7 @@ function device(t, gateway, options = {}) {
     }
   };
   const settings = new HelperSettings(store, async () => root, () => relay.settingsChanged());
+  if (!options.auth) settings.bindAccount('account-a');
   relay = new DesktopRelay({
     origin: gateway.origin, appVersion: '0.3.0', loopbackTest: true, settings,
     auth: options.auth || auth, run: options.run, status: s => { state.status = s; }
@@ -221,11 +222,13 @@ test('upgrade failures, expired token refresh budget and legacy gateway probing'
   await until(() => b.state.revoked === 1);
   assert.equal(b.state.refreshes, 1);
 });
-test('real auth invalidates the saved credential and binds revocation to the active cookie', async t => {
+test('real auth isolates account grants across logout, login and subsequent revocation', async t => {
   const gw = await mockGateway(t);
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-revoked-')), file = path.join(base, 'desktop-token.enc');
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
-  const encrypted = new Map(), sid = randomUUID();
+  const encrypted = new Map();
+  let sid = randomUUID();
+  const first = sid;
   let minted = 0, all = 0;
   const vault = {
     isEncryptionAvailable: () => true,
@@ -254,21 +257,31 @@ test('real auth invalidates the saved credential and binds revocation to the act
       return Response.json({ access_token: gw.token, user: { union_id: sid }, expires_at: new Date(Date.now() + 86400000).toISOString() });
     }
   };
-  const auth = new DesktopAuth('https://example.com', file, vault, io, () => { });
-  await auth.sync();
+  const auth = new DesktopAuth('https://example.com', file, vault, io, () => {}, undefined,
+    (state, unionId) => a.relay.credentialsChanged(state, unionId));
   const a = device(t, gw, { auth });
-  a.relay.connect();
+  await auth.sync();
   await a.online();
+  await a.settings.addDirectory();
+  a.settings.setPreferred(true);
+  await until(() => gw.devices.get(a.settings.deviceId).preferred);
+  assert.deepEqual(gw.devices.get(a.settings.deviceId).allowedRoots, [a.root]);
+  assert.equal(fs.readFileSync(path.join(a.store, 'helper-config.json'), 'utf8').includes(first), false);
   const closed = once(gw.devices.get(a.settings.deviceId).ws, 'close');
-  a.relay.stop('user_logout');
   auth.clear();
+  assert.deepEqual(a.settings.grants(), []);
   const [code, why] = await closed;
   assert.equal(code, 1000);
   assert.equal(why.toString(), 'user_logout');
   assert.equal(all, 0);
+  sid = randomUUID();
+  let hello;
+  gw.beforeAck = d => { hello = { roots: d.allowedRoots, preferred: d.preferred }; };
   await auth.sync();
-  a.relay.connect();
   await a.online();
+  assert.deepEqual(hello, { roots: [], preferred: false });
+  assert.deepEqual(gw.devices.get(a.settings.deviceId).allowedRoots, []);
+  assert.equal((await gw.call('desktop_read_file', { path: path.join(a.root, 'notes') })).error.code, 'NO_ALLOWED_ROOTS');
   await auth.revokeAll();
   await until(() => fs.existsSync(file + '.revoked'));
   assert.equal(all, 1);
@@ -276,6 +289,10 @@ test('real auth invalidates the saved credential and binds revocation to the act
   assert.equal(auth.token(), undefined);
   await new DesktopAuth('https://example.com', file, vault, io, () => { }).sync();
   assert.equal(minted, 2);
+  sid = first;
+  await auth.sync();
+  await a.online();
+  assert.deepEqual(hello, { roots: [a.root], preferred: true });
 });
 
 
@@ -421,6 +438,7 @@ test('a paused device keeps its grants across restart and never retries until re
   await until(() => d.relay.canRetry);
   d.settings.setPaused(true);
   const saved = new HelperSettings(d.store, async () => undefined, () => restarted.settingsChanged());
+  saved.bindAccount('account-a');
   const restarted = new DesktopRelay({ origin: gw.origin, loopbackTest: true, appVersion: '0.3.0', settings: saved,
     auth: { token: () => gw.token, refresh: async () => false, markRevoked() {} }, status() {} });
   t.after(() => restarted.stop('app_quit'));

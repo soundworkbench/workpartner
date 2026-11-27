@@ -124,6 +124,20 @@ test('Cookie 未变时也会清除切号或失去会话的旧凭据', async t =>
   assert.equal(existsSync(file), false);
 });
 
+test('a replacement cookie disconnects the old account even when revalidation is unavailable', async t => {
+  const { client, vault, state } = fixture(t);
+  const auth = client();
+  await auth.sync();
+  auth.cookieChanged(state.cookie);
+  assert.ok(auth.token());
+  state.cookie = 'next-login';
+  vault.isEncryptionAvailable = () => false;
+  auth.cookieChanged(state.cookie);
+  assert.equal(auth.token(), undefined);
+  await auth.sync();
+  assert.equal(auth.token(), undefined);
+});
+
 test('both logout actions reach the gateway logout page when cookie cleanup fails', async () => {
   const { logoutDesktop } = await import('../dist/main/logout.js');
   const origin = 'https://example.org', preview = 'preview.example.org';

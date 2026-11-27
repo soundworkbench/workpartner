@@ -34,7 +34,9 @@ function showRoots(roots) {
 function updateControls() {
   for (const control of document.querySelectorAll('button, input')) control.disabled = busy || !state;
   if (!state || busy) return;
-  byId('add').disabled = state.allowedRoots.length >= 32;
+  byId('add').disabled = !state.canRevoke || state.allowedRoots.length >= 32;
+  byId('addFirst').disabled = byId('add').disabled;
+  byId('preferred').disabled = !state.canRevoke;
   byId('logoutAll').disabled = !state.canRevoke;
   byId('pause').disabled = state.connection === 'revoked';
 }
