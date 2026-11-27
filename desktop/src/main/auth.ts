@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 
 const day = 86_400_000;
@@ -12,6 +13,37 @@ type Transport = {
   authorize(url: string): Promise<{ status: number; location?: string }>;
   fetch(url: string, options: RequestInit): Promise<Response>;
 };
+
+// Leave the pending marker in place after a failed write or rename. Startup
+// checks both names, including an empty file left by an interrupted write.
+function persistRevocation(file: string, binding: string) {
+  const pending = file + '.pending';
+  const fd = openSync(pending, 'w', 0o600);
+  try {
+    writeFileSync(fd, 'v1.' + binding + '.' + hash('revoked\n' + binding));
+    fsyncSync(fd);
+  } finally { closeSync(fd); }
+  renameSync(pending, file);
+  if (process.platform !== 'win32') {
+    const dir = openSync(dirname(file), 'r');
+    try { fsyncSync(dir); } finally { closeSync(dir); }
+  }
+}
+
+function blocksSession(file: string, cookie: string, identity: string) {
+  let marker: string;
+  try { marker = readFileSync(file, 'utf8'); }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+  // Accept only canonical SHA-256 digests. Older clients stored the cookie digest.
+  let binding = marker;
+  if (marker.startsWith('v1.')) {
+    const fields = marker.split('.');
+    if (fields.length !== 3 || fields[2] !== hash('revoked\n' + fields[1])) return true;
+    binding = fields[1];
+  }
+  const digest = Buffer.from(binding, 'base64url');
+  return digest.length !== 32 || digest.toString('base64url') !== binding || binding === cookie || binding === identity;
+}
 
 export class DesktopAuth {
   private epoch = 0;
@@ -31,14 +63,17 @@ export class DesktopAuth {
     ++this.epoch;
     this.nextCheck = 0;
     this.current = undefined;
-    this.changed('revoked');
     this.revokedBinding = this.binding;
     this.revokeStorageFailed = false;
     try {
-      if (this.binding) writeFileSync(this.file + '.revoked', this.binding, { mode: 0o600 });
-    } catch { this.revokeStorageFailed = true; }
-    try { rmSync(this.file, { force: true }); }
-    catch { this.revokeStorageFailed = true; }
+      persistRevocation(this.file + '.revoked', this.binding ?? '');
+      rmSync(this.file, { force: true });
+    } catch {
+      // If even the pending file could not be created, keep the old credential.
+      // On restart it must be validated by the gateway, never exchanged via PKCE.
+      this.revokeStorageFailed = true;
+    }
+    this.changed('revoked');
     this.revokedStatus();
   }
 
@@ -68,14 +103,23 @@ export class DesktopAuth {
     if (!response.ok) throw new Error('退出所有桌面设备失败');
   }
 
-  clear() {
+  private invalidate() {
     ++this.epoch;
     this.nextCheck = 0;
     this.current = this.binding = this.revokedBinding = undefined;
+    this.revokeStorageFailed = false;
     this.changed('cleared');
-    rmSync(this.file + '.revoked', { force: true });
-    rmSync(this.file, { force: true });
-    this.status('尚未登录');
+  }
+
+  clear() {
+    this.invalidate();
+    let cleaned = true;
+    for (const file of [this.file, this.file + '.revoked', this.file + '.revoked.pending']) {
+      try { rmSync(file, { force: true }); }
+      catch { cleaned = false; }
+    }
+    this.status(cleaned ? '尚未登录' : '已退出，本机凭据文件清理失败');
+    return cleaned;
   }
 
   sync() {
@@ -117,14 +161,13 @@ export class DesktopAuth {
       this.revokedStatus();
       return;
     }
-    if (existsSync(revoked)) {
-      const marker = readFileSync(revoked, 'utf8');
-      // Older clients recorded just the cookie binding.
-      if (marker === binding || marker === identityBinding) {
-        this.changed('revoked');
-        this.status('桌面登录已失效，请退出后重新登录');
-        return;
-      }
+    if ([revoked, revoked + '.pending'].some(file => blocksSession(file, binding, identityBinding))) {
+      this.current = undefined;
+      this.nextCheck = 0;
+      this.revokedBinding = identityBinding;
+      this.changed('revoked');
+      this.revokedStatus();
+      return;
     }
     let saved: Saved | undefined;
     try {

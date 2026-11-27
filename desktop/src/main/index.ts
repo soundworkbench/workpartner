@@ -66,7 +66,9 @@ function start() {
   };
   const filename = (name: string) => join(app.getPath('userData'), name);
   function closePreviews() {
-    for (const child of win.getChildWindows()) child.close();
+    for (const child of win.getChildWindows()) {
+      try { child.close(); } catch { /* A preview may already be closing. */ }
+    }
   }
   async function clearCookies(url: string) {
     for (const cookie of await store.cookies.get({ url })) {
@@ -141,17 +143,22 @@ function start() {
   });
   powerMonitor.on('unlock-screen', () => relay.wake());
   app.on('before-quit', () => relay.stop('app_quit'));
-  store.cookies.on('changed', (_event, cookie, _cause, removed) => {
+  store.cookies.on('changed', (_event, cookie, cause, removed) => {
+    void handleCookieChange(cookie, cause, removed).catch(() => { /* The next session check retries. */ });
+  });
+  async function handleCookieChange(cookie: Electron.Cookie, cause: string, removed: boolean) {
     const domain = cookie.domain?.replace(/^\./, '');
     if (cookie.name !== 'wp_sid' || !domain || !(new URL(origin).hostname === domain ||
       (cookie.domain?.startsWith('.') && new URL(origin).hostname.endsWith('.' + domain)))) return;
-    if (removed) {
+    // Cookie replacement also emits a removal. Check the replacement's
+    // binding in sync() so rewriting the same cookie preserves revocation.
+    if (removed && cause !== 'overwrite') {
       auth.clear();
       closePreviews();
       void clearCookies('https://' + brand.previewHost).catch(() => {});
     }
     sync();
-  });
+  }
   if (testMode) {
     store.setPermissionCheckHandler(() => false);
     store.setPermissionRequestHandler((_wc, _permission, done) => done(false));

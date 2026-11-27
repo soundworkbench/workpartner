@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import fs, { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
@@ -159,18 +160,94 @@ test('successful cookie cleanup honors relogin and reports an unconfirmed revoke
   }
 });
 
-test('revocation survives a marker write failure for the lifetime of the active login', async t => {
-  const { mkdirSync } = await import('node:fs');
+test('failed marker commits keep the old token and block reissue across restart', async t => {
   const { file, state, client } = fixture(t);
   const auth = client();
   await auth.sync();
-  mkdirSync(file + '.revoked');
-  auth.markRevoked();
-  assert.equal(auth.token(), undefined);
-  assert.equal(existsSync(file), false);
-  const count = state.calls.length;
-  await auth.sync();
-  assert.deepEqual(state.calls.slice(count), ['/_wp/me']);
+  const saved = readFileSync(file);
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === file + '.revoked') throw new Error('write failed');
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  try { auth.markRevoked(); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.deepEqual(readFileSync(file), saved);
   assert.equal(auth.token(), undefined);
   assert.match(state.message, /失效.*保存失败/);
+  const count = state.calls.length;
+  await auth.sync();
+  const next = client();
+  await next.sync();
+  assert.deepEqual(state.calls.slice(count), ['/_wp/me', '/_wp/me']);
+  assert.equal(next.token(), undefined);
+  state.cookie = 'new-session';
+  await next.sync();
+  assert.ok(next.token());
+});
+
+test('a failure to create any marker keeps the revoked credential on the refresh-only path', async t => {
+  const { file, state, client } = fixture(t);
+  const auth = client();
+  await auth.sync();
+  const open = fs.openSync;
+  t.mock.method(fs, 'openSync', (name, ...args) => {
+    if (name === file + '.revoked.pending') throw new Error('unwritable');
+    return open(name, ...args);
+  });
+  syncBuiltinESMExports();
+  try { auth.markRevoked(); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.ok(existsSync(file));
+  state.revoked = true;
+  state.calls.length = 0;
+  const next = client();
+  await next.sync();
+  await next.sync();
+  assert.deepEqual(state.calls, ['/_wp/me', '/_wp/api/desktop/refresh', '/_wp/me']);
+  assert.equal(next.token(), undefined);
+});
+
+test('empty and malformed revocation markers fail closed until logout', async t => {
+  const { file, state, client } = fixture(t);
+  for (const marker of ['', 'broken', 'a'.repeat(43), hash('other') + '\n', 'v1.' + hash('one') + '.' + hash('two')]) {
+    fs.writeFileSync(file + '.revoked', marker);
+    const auth = client();
+    await auth.sync();
+    assert.equal(auth.token(), undefined);
+    assert.match(state.message, /失效/);
+    auth.clear();
+  }
+  assert.ok(state.calls.every(call => call === '/_wp/me'));
+  await client().sync();
+  assert.ok(existsSync(file));
+});
+
+test('credential deletion failures preserve all local and all-device logout steps', async t => {
+  const { logoutDesktop } = await import('../dist/main/logout.js');
+  const { file, client } = fixture(t);
+  const origin = 'https://example.org', preview = 'preview.example.org';
+  for (const all of [false, true]) {
+    const events = [];
+    const auth = client();
+    await auth.sync();
+    assert.ok(auth.token());
+    t.mock.method(auth, 'revokeAll', async () => { events.push('revoke'); });
+    const remove = fs.rmSync;
+    t.mock.method(fs, 'rmSync', (name, options) => {
+      if (name === file) throw new Error('busy');
+      return remove(name, options);
+    });
+    syncBuiltinESMExports();
+    try {
+      const notice = await logoutDesktop(all, true, auth, () => {
+        assert.equal(auth.token(), undefined);
+        events.push('close');
+      }, async url => { events.push(url); }, origin, preview, url => events.push(url));
+      assert.deepEqual(events, [...(all ? ['revoke'] : []), 'close', origin, 'https://' + preview, origin + '/_wp/logout']);
+      assert.match(notice, /凭据文件清理失败/);
+      assert.ok(existsSync(file));
+    } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  }
 });
