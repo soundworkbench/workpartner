@@ -41,6 +41,9 @@ if (process.isMainFrame) {
       }
     });
   }
+  window.addEventListener('online', event => {
+    if (event.isTrusted && version) ipcRenderer.send('wp-online');
+  });
   window.addEventListener('offline', event => {
     if (event.isTrusted) ipcRenderer.send('wp-offline');
   });
