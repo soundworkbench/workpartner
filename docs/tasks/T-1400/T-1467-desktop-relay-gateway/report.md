@@ -84,3 +84,33 @@
 2. 契约未明确“网关以 desktop.enabled=false 启动后，运行中改为 true”是否必须热创建内部监听。当前沿用现有服务启动模式：首次开启需要重启网关；已启用的网关会实时拒绝被撤销准入的新握手，在工具调用前及每 60 秒复核在线连接。运行中关闭与移出名单无需重启。
 3. 并发握手期间为不同 deviceId 临时保留五设备名额，hello 超时/失败即释放；同 deviceId 重连不占新名额。正式在线表仍只在合法 hello 后写入。
 4. 第 4.3 节引用“第 10 节待拍板问题 3”是已定稿前的表述；按第 10 节已定事项仅接 Claude Code，无需改变契约内容。
+
+## 第 4 轮返工（2026-11-27）
+
+### 根因与修改文件
+
+1. **登录主机判断回归**：HTTP 入口改用 `allowedGatewayHost(host)` 后删掉了 `oldHost` 定义，但登录和回调仍引用该变量，触发 `ReferenceError`。在 `gateway/gateway.mjs` 恢复 `const oldHost = Boolean(legacy) && organization.server.legacyHosts.includes(host)`，保留 `allowedGatewayHost`。有旧版扩展且命中旧主机时沿用请求主机；其他允许的主机使用 `PUBLIC_HOST`，与 main 的登录行为一致。
+   - `tools/gateway-callback.test.mjs` 新增主机矩阵：公开主机、公开主机加 `:443`、网关内部 origin 主机、旧主机；覆盖有/无旧版扩展、默认/配置回调。断言授权 URL 的回调主机、登录会话及 next；无扩展时旧主机返回 403。
+2. **桌面令牌下发核查**：两项同时开启时已有下发路径，不存在所述条件导致的漏写。`gateway/services.mjs` 创建 `prepareNextFeishu` 时传入 `tokenFor: user => issueToken(SESSION_KEY, user)`；`prepare()` 的独立分支继续调用它。`feishu/next.mjs` 的 `createNextFeishuPreparation()` 在 `runtime.putFiles()` 中写入 `.zp-market-token`（0600），同时写 `.wp-feishu-cli.json`，其中 `identityFile` 为 `/data/.zp-market-token`。这是桌面 headersHelper 使用的同一文件、同一容器身份签名，且已有一天缓存和强制重写逻辑。审核仅看到前一分支的 `!features.feishuAuthorization`，漏看了后续的飞书准备分支。
+   - `gateway/tests/desktop-relay.test.mjs` 新增飞书授权 false/true 两个场景，均开启 desktop、关闭 marketSkills、不配置 dataTools。运行真实服务准备逻辑，由模拟容器卷的 `putFiles` 落盘；检查令牌文件及 0600 权限，读取落盘令牌请求真实内部 MCP handler，断言 initialize 返回 200 和桌面 MCP 服务信息。飞书场景同时检查 CLI 配置指向同一令牌文件。此测试无需监听端口。
+   - `gateway/services.mjs` 与 `feishu/next.mjs` 无需改动，marketSkills/dataTools 原行为保持不变。
+3. **设备空名**：原 `nameValid` 只有类型和长度上限检查，允许空串及纯空白。在 `gateway/desktop-relay.mjs` 增加 `name.trim().length > 0`，保留原始字符串最多 128 字符的上限，hello 和 state_update 共用此检查。
+   - `gateway/tests/desktop-relay.test.mjs` 使用现有内存 HTTP/WS 传输，验证空串、纯空白、129 字符在 hello/state_update 中均以 4004 / invalid_hello 拒绝且不保留设备；验证 1 字符、128 字符及两端带空格的有效名称可注册，返回名称去除首尾空白。
+
+本轮修改共五个文件：上述两个产品模块、两个测试文件，以及本报告。未改 `desktop/`，未新增依赖；新增主机使用中性测试域名，未引入实际组织信息或凭据。
+
+### 本地验证
+
+`systemd-run --scope -q -p MemoryMax=4G -- true` 返回 system scope bus `Operation not permitted`，按任务约定直接运行测试。以下无进程隔离测试仅增加 Node 的 `--experimental-test-isolation=none` 以显示逐项结果，未使用前轮的临时 preload 适配器。
+
+| 命令 | 结果 |
+| --- | --- |
+| `node --test tools/gateway.test.mjs gateway/tests/desktop-relay.test.mjs` | 已执行，未全过；受沙箱监听权限限制。原始进程隔离输出仅给出两个测试文件失败，逐项诊断见下两行。 |
+| `node --test --experimental-test-isolation=none tools/gateway.test.mjs` | 22 项：5 通过、17 失败（含父子测试计数）；失败均源于 `listen EPERM`，涉及回环及通配监听地址。不能宣称网关完整回归通过。 |
+| `node --test --experimental-test-isolation=none gateway/tests/desktop-relay.test.mjs` | 26 项：11 通过、15 失败；15 项均被回环监听 `EPERM` 阻断。新增设备名和令牌用例均通过。 |
+| `node --test --experimental-test-isolation=none --test-name-pattern='device names\|desktop with or without' gateway/tests/desktop-relay.test.mjs` | 新增用例及子测试合计 4/4 通过。 |
+| `node --test --experimental-test-isolation=none tools/gateway-callback.test.mjs` | 12/12 通过，包含新增主机矩阵和既有默认/配置回调、个人飞书授权、迁移归属及新用户开通用例。 |
+| `python3 -I image/tests/init-hooks.test.py` | 22/22 通过。 |
+| 四个修改后的 JS 模块 `node --check`；`git diff --check` | 通过。 |
+
+本地已完成可运行的验证；真实网络测试完整通过情况仍以 Actions 为准。

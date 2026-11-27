@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { fork } from 'node:child_process';
-import { Duplex } from 'node:stream';
+import { Duplex, Readable } from 'node:stream';
 import { runInNewContext } from 'node:vm';
 import { WebSocket } from 'ws';
 import { createDesktopAuth } from '../desktop-auth.mjs';
@@ -134,6 +134,62 @@ test('hello deadline, unsupported version, malformed and binary frames close 400
     assert.equal((await c.closed).code, 4004);
   }
   const c = await connect(f.wsUrl); c.send({ type: 'state_update', allowedRoots: Array(33).fill('/documents') }); assert.equal((await c.closed).code, 4004);
+});
+
+test('device names reject empty, whitespace-only and 129 characters in hello and state_update', async t => {
+  const f = memoryGateway(t, 'docker');
+  const devices = async () => data(await f.relay.call(person, { name: 'desktop_list_devices', arguments: {} })).devices;
+  for (const deviceName of ['', ' \t\n ', 'x'.repeat(129)]) {
+    const c = await f.connect({ skipHello: true });
+    c.send({ type: 'hello', protocolVersion: 1, deviceId: c.id, deviceName, platform: 'linux', arch: 'x64',
+      appVersion: '0.3.0', capabilities: ['fs.read'], allowedRoots: ['/documents'] });
+    assert.deepEqual(await c.closed, { code: 4004, reason: 'invalid_hello' });
+    assert.equal((await devices()).length, 0);
+    const ready = await f.connect();
+    ready.send({ type: 'state_update', deviceName });
+    assert.deepEqual(await ready.closed, { code: 4004, reason: 'invalid_hello' });
+    assert.equal((await devices()).length, 0);
+  }
+  for (const deviceName of ['x', 'x'.repeat(128), ' Test computer ']) {
+    const c = await f.connect({ hello: { deviceName } });
+    assert.equal(c.ack.type, 'hello_ack');
+    assert.equal((await devices())[0].device_name, deviceName.trim());
+    c.ws.close(); await c.closed;
+  }
+});
+
+test('desktop with or without feishuAuthorization publishes a container token accepted by internal MCP', async t => {
+  t.mock.method(http.Server.prototype, 'listen', function () { return this; });
+  for (const feishuAuthorization of [false, true]) {
+    await t.test(`feishuAuthorization=${feishuAuthorization}`, async t => {
+      const dir = directory(t), f = memoryGateway(t, 'docker');
+      const organization = { features: { feishuAuthorization, marketSkills: false }, desktop: { enabled: true },
+        runtime: { stateDirectory: dir, internalPort: 0, internalOrigin: 'http://gateway.example.test:3091', uid: 1001 },
+        server: { publicOrigin: 'https://gateway.example.test' }, identity: { callbackPath: '/_wp/callback' }, appearance: {} };
+      const runtime = { async putFiles(slug, files, options) {
+        const volume = path.join(dir, slug);
+        fs.mkdirSync(volume, { recursive: true, mode: options.directoryMode });
+        for (const file of files) fs.writeFileSync(path.join(volume, file.path), file.content, { mode: file.mode });
+      } };
+      const services = await createGatewayServices({ organization, runtime, desktopRelay: f.relay,
+        SESSION_KEY: key, users: () => [person], userFor: () => ({}), aionui: {} });
+      t.after(() => services.close());
+      const filename = path.join(dir, person.slug, '.zp-market-token');
+      assert.equal(fs.statSync(filename).mode & 0o777, 0o600);
+      const bearer = fs.readFileSync(filename, 'utf8').trim();
+      if (feishuAuthorization) {
+        const config = JSON.parse(fs.readFileSync(path.join(dir, person.slug, '.wp-feishu-cli.json'), 'utf8'));
+        assert.equal(config.identityFile, '/data/.zp-market-token');
+      }
+      const server = services.listen();
+      const req = Readable.from([Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }))]);
+      Object.assign(req, { method: 'POST', url: '/desktop-mcp', headers: { authorization: `Bearer ${bearer}` } });
+      let status, body;
+      await server.listeners('request')[0](req, { writeHead(value) { status = value; }, end(value) { body = JSON.parse(value); } });
+      assert.equal(status, 200);
+      assert.equal(body.result.serverInfo.name, 'workpartner-desktop');
+    });
+  }
 });
 
 test('same-user RPC, explicit cross-user isolation, offline latency and local list_devices', async t => {

@@ -12,7 +12,7 @@ import { organizationData } from '../gateway/organization/resolve.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 
-async function callbackFixture(t, { callbackPath, kind = 'docker', ownersFile, feishuAuthorization = true } = {}) {
+async function callbackFixture(t, { callbackPath, kind = 'docker', ownersFile, feishuAuthorization = true, legacy = false, legacyHosts = [] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-callback-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const org = structuredClone(organizationData({}));
@@ -20,6 +20,11 @@ async function callbackFixture(t, { callbackPath, kind = 'docker', ownersFile, f
   org.model.baseUrl = 'http://localhost/v1';
   for (const feature of Object.keys(org.features)) org.features[feature] = false;
   org.features.feishuAuthorization = feishuAuthorization;
+  org.legacyHosts = legacyHosts;
+  if (legacy) {
+    org.extensions.gatewayModule = './extension.mjs';
+    fs.writeFileSync(path.join(dir, 'extension.mjs'), 'export const createGatewayExtension = () => ({ handle: async () => false });');
+  }
   Object.assign(org.identity, { callbackPath, admission: 'unrestricted', appId: 'fixture-app', appSecretFile: path.join(dir, 'identity.secret') });
   Object.assign(org.runtime, { kind, uid: process.getuid(), migration: { ownersFile }, k8s: { keepRunningIntervalMs: 0 },
     sessionKeyFile: path.join(dir, 'session.key'), usersFile: path.join(dir, 'users.json'),
@@ -129,6 +134,34 @@ test('configured callback and default callback both issue login sessions and pre
     const invalid = await f.request(route + '?code=fixture&state=mismatch', { headers: { cookie: 'wp_state=expected|0|%2F' } });
     assert.match(invalid.body, /授权已过期或被取消/);
     assert.equal(invalid.headers['set-cookie'], undefined);
+  }
+});
+
+test('login preserves legacy callback hosts only with an extension and canonicalizes other allowed hosts', async t => {
+  for (const legacy of [false, true]) {
+    await t.test(`legacy extension=${legacy}`, async t => {
+      const oldHost = 'old.example.test:8443', callbackPath = '/_zp/callback';
+      const f = await callbackFixture(t, { callbackPath, legacy, legacyHosts: [oldHost] });
+      for (const host of [f.org.publicHost, `${f.org.publicHost}:443`, new URL(f.org.runtime.gatewayOrigin).host, oldHost]) {
+        for (const route of [callbackPath, '/_wp/callback']) {
+          const started = await f.request('/_wp/login?next=%2F_wp%2Fme', { headers: { host } });
+          if (host === oldHost && !legacy) {
+            assert.equal(started.status, 403);
+            assert.equal((await f.request(route, { headers: { host } })).status, 403);
+            continue;
+          }
+          assert.equal(started.status, 302, f.output());
+          const authorization = new URL(started.headers.location);
+          assert.equal(authorization.searchParams.get('redirect_uri'), `https://${host === oldHost ? oldHost : f.org.publicHost}${callbackPath}`);
+          const done = await f.request(route + '?code=fixture&state=' + authorization.searchParams.get('state'), {
+            headers: { host, cookie: started.headers['set-cookie'][0].split(';')[0] },
+          });
+          assert.equal(done.status, 302, f.output());
+          assert.equal(done.headers.location, '/_wp/me');
+          assert.match(done.headers['set-cookie'][0], /^wp_sid=/);
+        }
+      }
+    });
   }
 });
 

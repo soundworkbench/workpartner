@@ -318,6 +318,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/desktop-mcp") { res.writeHead(404); return res.end(); }
     if (!desktopAuth.isDesktopRoute(url) && migration.forward(req, res, null)) return;
     const host = String(req.headers.host || "").toLowerCase();
+    const oldHost = Boolean(legacy) && organization.server.legacyHosts.includes(host);
     if (preview?.isPreviewHost(host)) {
       const user = previewSessionUser(req, { key: SESSION_KEY, host: organization.server.previewHost, users });
       if (migration.forward(req, res, user)) return;

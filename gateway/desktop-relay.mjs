@@ -6,7 +6,7 @@ import { desktopTools, object, errors, failure, success, validArguments, prechec
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_FRAME = 1048576;
 const rootsValid = roots => Array.isArray(roots) && roots.length <= 32 && roots.every(root => typeof root === 'string' && root.length > 0 && root.length <= 1024 && !root.includes('\0'));
-const nameValid = name => typeof name === 'string' && name.length <= 128;
+const nameValid = name => typeof name === 'string' && name.trim().length > 0 && name.length <= 128;
 const cleanName = name => name.replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim().slice(0, 128) || 'WorkPartner Desktop';
 
 export function rejectUpgrade(socket, status, headers = {}) {
