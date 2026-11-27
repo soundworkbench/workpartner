@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; connect-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>本机访问</title>
+  <link rel="stylesheet" href="settings.css">
+  <script defer src="settings.js"></script>
+</head>
+<body>
+  <main aria-label="本机访问">
+    <section class="card device">
+      <svg class="icon-box" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="13" rx="2"/><path d="M2 20h20"/></svg>
+      <div class="identity">
+        <div id="nameView" class="row"><h1 id="deviceName">本机设备</h1><span id="preferredBadge" class="badge violet" hidden>首选设备</span><button id="edit">编辑</button></div>
+        <form id="nameForm" class="row" hidden>
+          <input id="nameInput" type="text" aria-label="设备名称" maxlength="128" required autocomplete="off">
+          <button type="submit" class="primary">保存</button><button id="cancel" type="button">取消</button>
+        </form>
+        <div class="row metadata"><span id="connection" class="badge" role="status">正在获取状态…</span><span id="platform"></span></div>
+        <p id="detail" hidden></p>
+      </div>
+      <button id="pause">暂停本机助手</button>
+    </section>
+    <section class="card">
+      <div class="section-head split">
+        <div><div class="row"><h2>授权目录（白名单）</h2><span class="badge">只读</span><span id="count" class="badge">0 / 32</span></div>
+        <p>网页对话里的 AI 只能浏览、搜索和读取已授权文件夹中的文件。</p></div>
+        <button id="add" class="primary">添加目录</button>
+      </div>
+      <div id="empty" class="empty" hidden>
+        <svg class="icon-box" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11H3z"/></svg>
+        <strong>AI 目前不能访问本机任何文件</strong>
+        <p>白名单默认为空。添加文件夹后，AI 才能在对话中只读查看。</p>
+        <button id="addFirst" class="primary">添加第一个目录</button>
+      </div>
+      <ul id="roots" aria-label="已授权的目录"></ul>
+    </section>
+    <section class="card padded split">
+      <div><label for="preferred"><strong>设为首选设备</strong></label>
+      <p id="preferenceHint">多台电脑同时在线时，AI 优先访问首选设备。未设置首选时，使用最近活跃的设备。</p></div>
+      <input id="preferred" type="checkbox" role="switch" aria-describedby="preferenceHint">
+    </section>
+    <details class="card protection" open>
+      <summary>哪些文件永远不会被读取</summary>
+      <div class="rules">
+        <p><strong>环境变量与密钥</strong><br><code>.env</code>、<code>.env.*</code>、<code>*.pem</code>、<code>*.key</code> 等密钥文件。</p>
+        <p><strong>账号凭据与配置</strong><br><code>.ssh</code>、<code>.aws</code>、<code>.gnupg</code>、<code>.kube</code>、<code>.npmrc</code> 等敏感路径。</p>
+        <p><strong>系统与浏览器数据</strong><br>受保护的系统目录、钥匙串、浏览器配置和桌面客户端自身的数据目录。</p>
+        <p><strong>文件和链接限制</strong><br>仅读取 20 MiB 以内的 UTF-8 文本；指向授权目录外的符号链接也会被拦截。</p>
+      </div>
+    </details>
+  </main>
+  <footer>
+    <p id="feedback" role="alert"></p><p id="notice" role="status"></p>
+    <div class="row"><button id="logout">退出当前设备</button><button id="logoutAll" class="danger">退出所有桌面设备…</button></div>
+  </footer>
+</body>
+</html>

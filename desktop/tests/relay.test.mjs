@@ -326,3 +326,42 @@ test('a new connection with the same saved identity replaces the old one', async
   assert.equal(gw.attempts.length, 2);
   assert.equal(gw.call('desktop_list_devices').data.count, 1);
 });
+
+test('a paused device keeps its grants across restart and never retries until resumed', async t => {
+  const gw = await mockGateway(t), d = device(t, gw);
+  await d.settings.addDirectory();
+  await d.online();
+  gw.devices.get(d.settings.deviceId).ws.terminate();
+  await until(() => d.relay.canRetry);
+  d.settings.setPaused(true);
+  const saved = new HelperSettings(d.store, async () => undefined, () => restarted.settingsChanged());
+  const restarted = new DesktopRelay({ origin: gw.origin, loopbackTest: true, appVersion: '0.3.0', settings: saved,
+    auth: { token: () => gw.token, refresh: async () => false, markRevoked() {} }, status() {} });
+  t.after(() => restarted.stop('app_quit'));
+  assert.equal(saved.snapshot().paused, true);
+  assert.deepEqual(saved.snapshot().allowedRoots, [d.root]);
+  for (const relay of [d.relay, restarted]) {
+    relay.wake();
+    relay.connect();
+    relay.settingsChanged();
+    assert.equal(relay.connection, 'paused');
+  }
+  await delay(1300);
+  assert.equal(gw.attempts.length, 1);
+  saved.setPaused(false);
+  await until(() => restarted.connection === 'connected');
+  assert.equal(gw.attempts.length, 2);
+  assert.deepEqual(gw.devices.get(saved.deviceId).allowedRoots, [d.root]);
+});
+
+test('each preferred toggle sends a state_update over the existing connection', async t => {
+  const gw = await mockGateway(t), d = device(t, gw);
+  d.relay.connect();
+  await d.online();
+  const peer = gw.devices.get(d.settings.deviceId);
+  for (const preferred of [true, false]) {
+    d.settings.setPreferred(preferred);
+    await until(() => peer.preferred === preferred);
+    assert.equal(gw.attempts.length, 1);
+  }
+});

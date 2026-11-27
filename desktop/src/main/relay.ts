@@ -16,6 +16,8 @@ type Incoming = Record<string, unknown>;
 function object(v: unknown): v is Incoming { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 function positive(v: unknown): v is number { return typeof v === 'number' && Number.isSafeInteger(v) && v > 0; }
 
+export type Connection = 'connected' | 'connecting' | 'offline' | 'revoked' | 'paused';
+
 export class DesktopRelay {
   private url: URL;
   private ws?: WebSocket;
@@ -37,6 +39,8 @@ export class DesktopRelay {
   private run: RunTool;
   private audit: ReturnType<typeof createAudit>;
   state = '尚未登录';
+  connection: Connection = 'offline';
+  get canRetry() { return !!this.waiting && !this.oldGateway; }
   constructor(private opts: Options) {
     this.url = new URL('/_wp/desktop/ws', opts.origin);
     if (this.url.protocol === 'https:') this.url.protocol = 'wss:';
@@ -45,7 +49,11 @@ export class DesktopRelay {
     this.run = opts.run || createToolRunner();
     this.audit = createAudit(opts.settings.userData);
   }
-  private status(text: string) { this.state = text; this.opts.status(text); }
+  private status(text: string, connection: Connection = 'offline') {
+    this.state = text;
+    this.connection = connection;
+    this.opts.status(text);
+  }
   private abortAll() {
     for (const job of this.inflight.values()) job.abort();
     this.inflight.clear();
@@ -72,16 +80,17 @@ export class DesktopRelay {
       this.attempt = 0;
       this.attemptedRefresh = this.terminal = this.oldGateway = false;
       this.status('尚未登录');
-    } else if (reason === 'helper_paused' && !this.terminal) this.status('本机助手已暂停');
+    } else if (reason === 'helper_paused' && !this.terminal) this.status('本机助手已暂停', 'paused');
     if (reason === 'app_quit') this.terminal = true;
     return closed;
   }
-  private halt(text: string) { this.terminal = true; this.status(text); }
+  private halt(text: string, connection: Connection = 'offline') { this.terminal = true; this.status(text, connection); }
   private schedule(old = false) {
     if (this.terminal || this.opts.settings.snapshot().paused || !this.opts.auth.token()) return;
     this.oldGateway = old;
-    this.status(old ? '当前网关暂不支持本机助手' : '本机助手已断开，等待重连');
-    this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); }, old ? 600000 : retryDelay(this.attempt++));
+    const delay = old ? 600000 : retryDelay(this.attempt++);
+    this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); }, delay);
+    this.status(old ? '当前网关暂不支持本机助手' : '本机助手已断开，等待重连（约 ' + Math.ceil(delay / 1000) + ' 秒）');
   }
   wake() {
     if (!this.waiting || this.oldGateway) return;
@@ -92,24 +101,25 @@ export class DesktopRelay {
   }
   credentialsRevoked() {
     this.stop('user_logout');
-    this.halt('桌面登录已失效，请退出后重新登录');
+    this.halt('桌面登录已失效，请退出后重新登录', 'revoked');
   }
   private async refresh(epoch: number) {
     if (!this.attemptedRefresh) {
       this.refreshing = this.attemptedRefresh = true;
+      this.status('正在更新桌面凭据', 'connecting');
       let renewed = false;
       try { renewed = await this.opts.auth.refresh(); } catch { /* Failure invalidates this session. */ }
       if (this.epoch !== epoch) return;
       this.refreshing = false;
       if (renewed) { this.connect(); return; }
     }
-    this.halt('桌面登录已失效，请退出后重新登录');
+    this.halt('桌面登录已失效，请退出后重新登录', 'revoked');
     this.opts.auth.markRevoked();
   }
   private disconnected(code: number, reason: string, http: number, resetDuringUpgrade: boolean) {
     this.resetConnection();
     if (http === 401 || (code === 4001 && reason === 'token_expired')) { void this.refresh(this.epoch); return; }
-    if (code === 4001) { this.halt('桌面登录已失效，请退出后重新登录'); this.opts.auth.markRevoked(); return; }
+    if (code === 4001) { this.halt('桌面登录已失效，请退出后重新登录', 'revoked'); this.opts.auth.markRevoked(); return; }
     if (code === 1000) { this.halt('本机助手已断开'); return; }
     if (code === 4002) { this.halt('本机助手已由新连接接替'); return; }
     if (http === 403 || code === 4003) { this.halt('本机助手未开通'); return; }
@@ -122,8 +132,8 @@ export class DesktopRelay {
     const { settings, auth, appVersion } = this.opts;
     const token = auth.token();
     if (!token || this.terminal || this.refreshing || this.waiting || this.ws) return;
-    if (settings.snapshot().paused) { this.status('本机助手已暂停'); return; }
-    this.status('本机助手连接中');
+    if (settings.snapshot().paused) { this.status('本机助手已暂停', 'paused'); return; }
+    this.status('本机助手连接中', 'connecting');
     const ws = new WebSocket(this.url, { headers: { Authorization: 'Bearer ' + token, 'X-WP-Protocol-Version': '1',
       'X-WP-Device-Id': settings.deviceId, 'X-WP-Platform': process.platform, 'X-WP-App-Version': appVersion },
       maxPayload: maxBytes, handshakeTimeout: 10000, perMessageDeflate: false, followRedirects: false });
@@ -173,7 +183,7 @@ export class DesktopRelay {
         this.frameLimit = Math.min(maxBytes, msg.maxFrameBytes);
         this.concurrency = Math.min(4, msg.maxConcurrency);
         this.lastActive = -Infinity;
-        this.status('本机助手已连接');
+        this.status('本机助手已连接', 'connected');
         this.healthy = setTimeout(() => { this.attempt = 0; this.attemptedRefresh = false; }, 10000);
         this.settingsChanged();
       } else if (msg.type === 'rpc_req') void this.request(ws, msg);
@@ -189,6 +199,7 @@ export class DesktopRelay {
     }
     this.roots = allowedRoots;
     if (this.ready) this.ws?.send(JSON.stringify({ type: 'state_update', deviceName, allowedRoots, preferred }));
+    else if (this.connection === 'paused' && !this.opts.auth.token()) this.status('尚未登录');
     else this.connect();
   }
   active() {
