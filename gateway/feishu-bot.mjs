@@ -77,8 +77,9 @@ function readJson(req) {
   });
 }
 
-export function createFeishuBot({ organization, organizationData, authenticate, runtime }) {
-  const pending = new Map(), restarting = new Map(), writes = new Map(), subAgentSupport = new Map();
+export function createFeishuBot({ organization, organizationData, authenticate, runtime, now = Date.now, cacheEnabled = false }) {
+  // 两个前端都会在页面打开时请求，网关集中缓存让所有人受益，也避免改前端后打开菜单再多等一次 exec。
+  const pending = new Map(), restarting = new Map(), writes = new Map(), subAgentSupport = new Map(), cache = new Map(), versions = new Map();
   const origin = organization.server.publicOrigin || `https://${organization.server.publicHost}`;
   function policy(sub = false) {
     try {
@@ -91,24 +92,55 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
     && !user.slug.includes('\n') && user.unionId && listed(user));
   const botCommand = (user, ...args) => executeFeishuBot(runtime, organization.runtime.uid, user.slug, ...args);
   const command = (user, script, args, options) => execute(runtime, organization.runtime.uid, user.slug, script, args, options);
-  function info(user, refresh) {
+  const invalidate = slug => { cache.delete(slug); versions.set(slug, (versions.get(slug) || 0) + 1); pending.delete(slug); };
+  const present = data => {
+    const supported = Array.isArray(data.agents);
+    subAgentSupport.set(data.__slug || '', supported);
+    const agents = supported ? [...data.agents].sort((a, b) => createdAt(a) - createdAt(b)).flatMap(publicAgent) : [];
+    return { bots: data.bots.flatMap(publicBot), agents, supported,
+      count: supported ? data.agents.filter(a => a?.kind === 'sub').length : 0,
+      limit: Number.isInteger(data.limit) && data.limit >= 0 ? Math.min(5, data.limit) : 5 };
+  };
+  // 缓存只保留后续展示、排序和容量判断所需字段；权限名单每次请求仍从最新配置读取。
+  const pick = (value, fields) => object(value)
+    ? Object.fromEntries(fields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) : value;
+  const cacheInfo = data => ({
+    bots: data.bots.map(bot => pick(bot, ['appId', 'agentId', 'name', 'avatar', 'online', 'activate', 'lastEventAt', 'error'])),
+    ...(Array.isArray(data.agents) ? { agents: data.agents.map(agent => pick(agent, ['id', 'name', 'kind', 'setup', 'appId', 'createdAt'])) } : {}),
+    ...(Object.hasOwn(data, 'limit') ? { limit: data.limit } : {}),
+  });
+  function info(user, refresh = false) {
+    const explicitRefresh = refresh;
+    if (!cacheEnabled) refresh = true;
+    const cached = cache.get(user.slug);
+    const age = cached ? now() - cached.at : Infinity;
+    if (!refresh && cached && age <= 60000) return Promise.resolve(present({ ...cached.data, __slug: user.slug }));
+    if (!refresh && cached && age < 300000) {
+      if (!pending.has(user.slug)) info(user, true).catch(() => {});
+      return Promise.resolve(present({ ...cached.data, __slug: user.slug }));
+    }
+    if (refresh && pending.has(user.slug)) return pending.get(user.slug).then(data => present({ ...data, __slug: user.slug }));
+    if (refresh) pending.delete(user.slug);
     if (!pending.has(user.slug)) {
-      const task = botCommand(user, 'info', ...(refresh ? ['--refresh'] : [])).then(data => {
+      const version = versions.get(user.slug) || 0;
+      const task = botCommand(user, 'info', ...(refresh && (cacheEnabled || explicitRefresh) ? ['--refresh'] : [])).then(data => {
         if (!Array.isArray(data.bots)) throw fail(503);
         const supported = Array.isArray(data.agents);
+        const result = { data: cacheInfo(data), at: now() };
+        if ((versions.get(user.slug) || 0) === version) {
+          cache.set(user.slug, result);
+          while (cache.size > 500) cache.delete(cache.keys().next().value);
+        }
         subAgentSupport.set(user.slug, supported);
-        const agents = supported ? [...data.agents].sort((a, b) => createdAt(a) - createdAt(b)).flatMap(publicAgent) : [];
-        return { bots: data.bots.flatMap(publicBot), agents, supported,
-          count: supported ? data.agents.filter(a => a?.kind === 'sub').length : 0,
-          limit: Number.isInteger(data.limit) && data.limit >= 0 ? Math.min(5, data.limit) : 5 };
+        return result.data;
       });
       pending.set(user.slug, task);
       task.finally(() => { if (pending.get(user.slug) === task) pending.delete(user.slug); }).catch(() => {});
     }
-    return pending.get(user.slug);
+    return pending.get(user.slug).then(data => present({ ...data, __slug: user.slug }));
   }
   function serial(user, action) {
-    const task = (writes.get(user.slug) || Promise.resolve()).catch(() => {}).then(action).then(value => { pending.delete(user.slug); return value; });
+    const task = (writes.get(user.slug) || Promise.resolve()).catch(() => {}).then(action).then(value => { invalidate(user.slug); return value; });
     writes.set(user.slug, task);
     task.finally(() => { if (writes.get(user.slug) === task) writes.delete(user.slug); }).catch(() => {});
     return task;
@@ -116,7 +148,7 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
   function reconnect(user, id = 'main') {
     const key = user.slug + ':' + id;
     if (!restarting.has(key)) {
-      const task = botCommand(user, 'restart', ...(id === 'main' ? [] : ['--agent', id])).then(() => { pending.delete(user.slug); });
+      const task = botCommand(user, 'restart', ...(id === 'main' ? [] : ['--agent', id])).then(() => { invalidate(user.slug); });
       restarting.set(key, task);
       task.finally(() => restarting.delete(key)).catch(() => {});
     }
@@ -177,7 +209,7 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
             if (!current.supported) throw fail(503);
             if (current.count >= current.limit) throw fail(409, 'limit_reached');
             const result = await command(user, 'wp-agent', ['create'], { stdin: JSON.stringify({ name }) });
-            pending.delete(user.slug);
+            invalidate(user.slug);
             const agent = publicAgent(result.agent)[0];
             if (!agent || agent.kind !== 'sub') throw fail(503);
             let setup = 'preparing';
@@ -188,10 +220,10 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
           if (action === 'setup') {
             const state = await setup(user, id);
             if (!['none', 'expired', 'failed'].includes(state.status)) return state;
-            await start(user, id); pending.delete(user.slug); return { status: 'preparing' };
+            await start(user, id); invalidate(user.slug); return { status: 'preparing' };
           }
           const result = await command(user, 'wp-agent', [action, id], name === undefined ? {} : { stdin: JSON.stringify({ name }) });
-          pending.delete(user.slug);
+          invalidate(user.slug);
           if (action === 'delete') return { ok: true };
           const agent = publicAgent(result.agent)[0];
           if (!agent || agent.id !== id || agent.kind !== 'sub') throw fail(503);
