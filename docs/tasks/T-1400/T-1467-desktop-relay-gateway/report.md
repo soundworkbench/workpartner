@@ -114,3 +114,18 @@
 | 四个修改后的 JS 模块 `node --check`；`git diff --check` | 通过。 |
 
 本地已完成可运行的验证；真实网络测试完整通过情况仍以 Actions 为准。
+
+## 第 5 轮返工（2026-11-27）
+
+### 修改
+
+- `gateway/services.mjs`：内部监听器只解析一次请求 URL，并把解析失败限制为 400；按原顺序调用桌面 MCP、adoption、飞书 token、data tools 和扩展处理器。任一处理器抛错时记录路由名与错误码，返回无错误详情的 500；响应已开始发送时安全结束或销毁连接，避免异步异常形成未处理拒绝。
+- `gateway/tests/desktop-relay.test.mjs`：增加原始 socket 畸形请求目标回归测试，允许 Node HTTP 解析器直接返回 400 或断开；随后验证处理器异常返回 500、正常请求继续返回 200，并检查进程级处理仍可继续。
+- `gateway/gateway.mjs`：复核主服务 `upgrade` 分支，`new URL(req.url, 'http://gateway')` 已在现有 `try` 内，无需改动。
+
+### 验证
+
+- `node --check gateway/services.mjs gateway/tests/desktop-relay.test.mjs gateway/gateway.mjs`：通过。
+- `git diff --check`：通过。
+- `node --test --experimental-test-isolation=none --test-name-pattern='device names|desktop with or without feishuAuthorization' gateway/tests/desktop-relay.test.mjs`：4/4 通过。
+- 新增真实 socket 回归：本地沙箱执行时因监听 `0.0.0.0` 被拒绝（`listen EPERM`），无法完成网络测试；应在 Actions 的可监听环境执行。另用进程内 handler smoke 检查了畸形 URL 400、处理器异常 500 及后续 200。

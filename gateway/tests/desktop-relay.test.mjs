@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,6 +29,34 @@ function token(user = person, extra = {}) {
 }
 function directory(t) { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-relay-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true })); return dir; }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function rawRequest(port, payload) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1');
+    const chunks = [];
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString());
+    };
+    socket.on('connect', () => socket.end(payload));
+    socket.on('data', chunk => chunks.push(chunk));
+    socket.on('end', finish);
+    socket.on('close', finish);
+    socket.setTimeout(2000, () => { socket.destroy(); finish(); });
+    socket.on('error', error => { if (error.code === 'ECONNRESET') finish(); else reject(error); });
+  });
+}
+function requestStatus(port, path) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port, path }, response => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
 function inbox(ws) {
   const queue = [], waiting = [];
   ws.on('message', bytes => { const message = JSON.parse(bytes); const receive = waiting.shift(); if (receive) receive(message); else queue.push(message); });
@@ -190,6 +219,31 @@ test('desktop with or without feishuAuthorization publishes a container token ac
       assert.equal(body.result.serverInfo.name, 'workpartner-desktop');
     });
   }
+});
+
+test('internal listener contains malformed URLs and processor failures', async t => {
+  const dir = directory(t);
+  const organization = {
+    features: {},
+    runtime: { stateDirectory: dir, secureDirectory: dir, internalPort: 0, uid: 1001 },
+    server: { publicHost: '127.0.0.1', publicOrigin: 'http://127.0.0.1' },
+  };
+  const extension = { internal: async (req, res, url) => {
+    if (url.pathname === '/ok') { res.writeHead(200); res.end('ok'); return true; }
+    if (url.pathname === '/boom') throw Object.assign(new Error('fixture detail must stay private'), { code: 'E_FIXTURE' });
+    return false;
+  } };
+  const services = await createGatewayServices({ organization, runtime: {}, SESSION_KEY: key, users: () => [], userFor: () => ({}), aionui: {} });
+  const internal = services.listen(extension);
+  await once(internal, 'listening');
+  t.after(() => services.close());
+  const warnings = t.mock.method(console, 'warn');
+  const malformed = await rawRequest(internal.address().port, 'GET //[ HTTP/1.1\r\nHost: x\r\n\r\n');
+  assert.ok(malformed === '' || /^HTTP\/1\.[01] 400(?:\s|$)/.test(malformed), malformed);
+  assert.equal(await requestStatus(internal.address().port, '/boom'), 500);
+  assert.equal(await requestStatus(internal.address().port, '/ok'), 200);
+  assert.equal(await requestStatus(internal.address().port, '/ok'), 200);
+  assert.ok(warnings.mock.calls.some(call => call.arguments[0] === '[internal] extension.internal E_FIXTURE'));
 });
 
 test('same-user RPC, explicit cross-user isolation, offline latency and local list_devices', async t => {

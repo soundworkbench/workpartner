@@ -113,12 +113,38 @@ export async function createGatewayServices({ organization, runtime: personalRun
       // This listener is internal-only; token services authenticate signed identities,
       // while adoption preparation requires a loopback peer and current ownership.
       internal = http.createServer(async (req, res) => {
-        if (await desktopMcp?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
-        if (await prepareInternal(req, res)) return;
-        if (req.url === '/token' && feishu) return feishu.token(req, res);
-        if (await dataTools?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
-        if (await extension?.internal?.(req, res, new URL(req.url, 'http://gateway.internal'))) return;
-        res.writeHead(404); res.end();
+        let url;
+        try {
+          url = new URL(req.url, 'http://gateway.internal');
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9_.:-]+$/.test(error.code) ? error.code : 'ERR_INVALID_URL';
+          console.warn(`[internal] url ${code}`);
+          try { if (!res.destroyed && !res.writableEnded) { res.writeHead(400); res.end(); } } catch { try { res.destroy?.(); } catch {} }
+          return;
+        }
+        let route = 'desktopMcp';
+        try {
+          if (await desktopMcp?.(req, res, url)) return;
+          route = 'prepareInternal';
+          if (await prepareInternal(req, res)) return;
+          if (req.url === '/token' && feishu) {
+            route = 'feishu.token';
+            return await feishu.token(req, res);
+          }
+          route = 'dataTools';
+          if (await dataTools?.(req, res, url)) return;
+          route = 'extension.internal';
+          if (await extension?.internal?.(req, res, url)) return;
+          res.writeHead(404); res.end();
+        } catch (error) {
+          const code = typeof error?.code === 'string' && /^[A-Za-z0-9_.:-]+$/.test(error.code) ? error.code : 'ERR_INTERNAL';
+          console.warn(`[internal] ${route} ${code}`);
+          try {
+            if (res.destroyed || res.writableEnded) return;
+            if (!res.headersSent) res.writeHead(500);
+            res.end();
+          } catch { try { res.destroy?.(); } catch {} }
+        }
       });
       return internal.listen(runtime.internalPort, '0.0.0.0');
     },
