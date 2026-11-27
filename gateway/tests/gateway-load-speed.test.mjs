@@ -224,9 +224,13 @@ test('real gateway response chain handles compression, caching and broken upstre
     assert.equal(first.status, 200); assert.equal(first.headers['content-encoding'], encoding);
     assert.deepEqual(decode(first.body), raw); assert.equal(first.headers['content-length'], undefined);
     assert.equal(first.headers['cache-control'], 'private, max-age=31536000, immutable');
+    const forwarded = hits;
     const second = await request(undefined, { 'accept-encoding': encoding, 'if-none-match': first.headers.etag });
     assert.equal(second.status, 304); assert.equal(second.body.length, 0); assert.match(second.headers.vary, /accept-encoding/);
     assert.equal(second.headers['cache-control'], first.headers['cache-control']);
+    assert.equal(hits, forwarded, 'a cached conditional request must not reach the upstream');
+    assert.equal(second.headers['content-encoding'], undefined);
+    assert.equal(second.headers['content-length'], undefined);
   });
   const exclusions = [
     ['Range', {}, { range: 'bytes=0-100' }], ['206', { status: 206 }],
@@ -254,7 +258,9 @@ test('real gateway response chain handles compression, caching and broken upstre
     const old = process.env.WP_GATEWAY_COMPRESS; process.env.WP_GATEWAY_COMPRESS = '0';
     try {
       spec = {}; const first = await request(undefined, { 'accept-encoding': 'br' }); assert.deepEqual(first.body, raw); assert.equal(first.headers['content-encoding'], undefined);
-      assert.equal((await request(undefined, { 'accept-encoding': 'br', 'if-none-match': first.headers.etag })).status, 304);
+      const forwarded = hits;
+      const second = await request(undefined, { 'accept-encoding': 'br', 'if-none-match': first.headers.etag });
+      assert.equal(second.status, 304); assert.equal(hits, forwarded); assert.equal(second.headers['content-encoding'], undefined);
     } finally { if (old === undefined) delete process.env.WP_GATEWAY_COMPRESS; else process.env.WP_GATEWAY_COMPRESS = old; }
   });
   for (const headers of [{ 'content-type': 'image/png' }, { 'content-length': '10' }, { 'cache-control': 'no-transform' }]) await t.test(`incompressible resource 304 ${JSON.stringify(headers)}`, async () => {
@@ -263,8 +269,12 @@ test('real gateway response chain handles compression, caching and broken upstre
     assert.equal(second.status, 304); assert.equal(second.body.length, 0); assert.equal(second.headers.etag, first.headers.etag);
   });
   for (const route of ['/assets/index-AbCd1234.js', '/assets/favicon.svg', '/', '/index.html']) await t.test(`unmarked path remains no-cache: ${route}`, async () => {
-    spec = {}; const first = await request(route); assert.equal(first.headers['cache-control'], 'no-cache');
-    assert.equal((await request(route, { 'if-none-match': first.headers.etag })).status, 304);
+    spec = {}; const first = await request(route, { 'accept-encoding': 'br' }); assert.equal(first.headers['cache-control'], 'no-cache');
+    assert.equal(first.headers['content-encoding'], 'br');
+    const forwarded = hits;
+    const second = await request(route, { 'accept-encoding': 'br', 'if-none-match': first.headers.etag });
+    assert.equal(second.status, 304); assert.equal(hits, forwarded);
+    assert.equal(second.headers['content-encoding'], undefined); assert.equal(second.headers['content-length'], undefined);
   });
   await t.test('upstream private policy survives marked asset 200 and 304', async () => {
     spec = { headers: { 'cache-control': 'private, no-store' } }; const first = await request();
@@ -309,7 +319,12 @@ test('real gateway response chain handles compression, caching and broken upstre
     } finally { titleFetch = fetchOriginal; }
   });
   await t.test('upstream error destroys compressed response instead of hanging', async () => {
-    spec = { error: true }; const response = await request(undefined, { 'accept-encoding': 'br' });
+    spec = {}; const first = await request(undefined, { 'accept-encoding': 'br' });
+    const forwarded = hits;
+    spec = { error: true };
+    const cached = await request(undefined, { 'accept-encoding': 'br', 'if-none-match': first.headers.etag });
+    assert.equal(cached.status, 304); assert.equal(hits, forwarded);
+    const response = await request(undefined, { 'accept-encoding': 'br' });
     assert.equal(response.destroyed, true); assert.equal(response.error, 'upstream interrupted');
   });
   assert.ok(hits > 0);

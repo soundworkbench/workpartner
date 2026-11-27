@@ -924,7 +924,7 @@ for (const [index, person] of people.entries()) {
   const mac = crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
   let status, body;
   await handle({ method: 'GET', url: '/_wp/preview/client.js', headers: { host: 'workspace.example.test', cookie: 'wp_sid=' + data + '.' + mac } },
-    { writeHead(code) { status = code; }, end(value) { body = value ?? ''; } });
+    { writeHead(code) { status = code; }, end(value) { body = Buffer.isBuffer(value) ? value.toString('utf8') : (value ?? ''); } });
   assert.equal(status, 200);
   if (${enabled} && index === 0) { assert.ok(body.startsWith(baselines[index] + '\\n;')); assert.ok(body.includes('installMyKey'));
     if (${feedbackEnabled}) assert.ok(body.indexOf('installMyKey') > body.indexOf('installFeedback')); }
@@ -972,7 +972,7 @@ for (const [index, person] of people.entries()) {
   const mac = crypto.createHmac('sha256', 'fixture-session-key').update(data).digest('base64url');
   let status, body;
   await handle({ method: 'GET', url: '/_wp/preview/client.js', headers: { host: 'workspace.example.test', cookie: 'wp_sid=' + data + '.' + mac } },
-    { writeHead(code) { status = code; }, end(value) { body = value ?? ''; } });
+    { writeHead(code) { status = code; }, end(value) { body = Buffer.isBuffer(value) ? value.toString('utf8') : (value ?? ''); } });
   assert.equal(status, 200);
   if (${enabled} && index === 0) { assert.ok(body.startsWith(baselines[index] + '\\n;')); assert.ok(body.includes('installFeishuBot'));
     if (${feedbackEnabled}) assert.ok(body.indexOf('installFeishuBot') > body.indexOf('installFeedback')); }

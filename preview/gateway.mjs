@@ -147,7 +147,7 @@ export function createPreview({ publicHost, previewHost = "", key, users, sessio
     if (!url.pathname.startsWith("/_wp/preview/")) return false;
     if (!previewHost && url.pathname === "/_wp/preview/client.js") {
       const user = sessionUser(req)?.user;
-      clientResponse(req, res, "// Workspace preview is disabled." + (extraClient?.(user) || ""), { "content-type": "text/javascript" }, { compress: Boolean(user) }); return true;
+      clientResponse(req, res, "// Workspace preview is disabled." + (extraClient?.(user) || ""), { "content-type": "text/javascript" }, { compress: Boolean(user), cache: extraClient?.cacheable?.(user) ?? true }); return true;
     }
     if (!previewHost) { reject(res, 503, "工作区预览还未启用，请联系管理员。"); return true; }
     if (host !== publicHost || req.method !== "GET" || (req.headers.origin && req.headers.origin !== mainOrigin)) {
@@ -159,7 +159,7 @@ export function createPreview({ publicHost, previewHost = "", key, users, sessio
     }
     const { user, expires } = identity;
     if (url.pathname === "/_wp/preview/client.js") {
-      clientResponse(req, res, `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost, scope: scope(user) })});` + (extraClient?.(user) || ""), { "content-type": "text/javascript; charset=utf-8", "x-content-type-options": "nosniff" });
+      clientResponse(req, res, `(${installPreviewClient.toString()})(${JSON.stringify({ previewHost, scope: scope(user) })});` + (extraClient?.(user) || ""), { "content-type": "text/javascript; charset=utf-8", "x-content-type-options": "nosniff" }, { cache: extraClient?.cacheable?.(user) ?? true });
       return true;
     }
     if (url.pathname === "/_wp/preview/open") {
