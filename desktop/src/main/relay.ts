@@ -8,6 +8,7 @@ import type { ToolData } from './helper-tools.js';
 const maxBytes = 1048576;
 const maxBufferedBytes = 4 * maxBytes;
 const slowRetryMs = 600000;
+const deviceLimitStatus = '在线桌面设备已达上限（5 台），稍后重试';
 const steps = [1000, 2000, 4000, 8000, 15000, 30000];
 export const retryDelay = (attempt: number, random = Math.random) =>
   Math.round(steps[Math.min(attempt, steps.length - 1)] * (0.8 + random() * 0.4));
@@ -32,6 +33,7 @@ export class DesktopRelay {
   private epoch = 0;
   private waiting?: NodeJS.Timeout;
   private slowRetry = false;
+  private retryNotBefore = 0;
   private watchdog?: NodeJS.Timeout;
   private healthy?: NodeJS.Timeout;
   private lastActive = -Infinity;
@@ -80,6 +82,7 @@ export class DesktopRelay {
     if (ws?.readyState === WebSocket.OPEN) ws.close(1000, reason);
     else if (ws?.readyState === WebSocket.CONNECTING) ws.terminate();
     if (reason === 'user_logout') {
+      this.retryNotBefore = 0;
       this.attempt = 0;
       this.attemptedRefresh = this.terminal = false;
       this.status('尚未登录');
@@ -88,16 +91,16 @@ export class DesktopRelay {
     return closed;
   }
   private halt(text: string, connection: Connection = 'offline') { this.terminal = true; this.status(text, connection); }
-  private schedule(slowStatus?: string) {
+  private schedule(slowStatus?: string, slowDelay = slowRetryMs) {
     if (this.terminal || this.opts.settings.snapshot().paused || !this.opts.auth.token()) return;
     this.slowRetry = slowStatus !== undefined;
-    const delay = this.slowRetry ? slowRetryMs : retryDelay(this.attempt++);
+    const delay = this.slowRetry ? slowDelay : retryDelay(this.attempt++);
     this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); }, delay);
     const text = slowStatus ?? '本机助手已断开，等待重连';
     this.status(text + '（约 ' + Math.ceil(delay / 1000) + ' 秒）', 'offline');
   }
   wake() {
-    if (this.terminal || this.refreshing || this.opts.settings.snapshot().paused) return;
+    if (this.terminal || this.refreshing || this.opts.settings.snapshot().paused || Date.now() < this.retryNotBefore) return;
     clearTimeout(this.waiting);
     this.waiting = undefined;
     const stale = this.ws;
@@ -143,7 +146,11 @@ export class DesktopRelay {
     if (code === 4002) { this.halt('本机助手已由新连接接替'); return; }
     if (http === 403 || code === 4003) { this.halt('本机助手未开通'); return; }
     if (code === 4004 && reason === 'unsupported_protocol') { this.halt('本机助手协议不兼容，请升级桌面客户端'); return; }
-    if (http === 429) { this.schedule('在线桌面设备已达上限（5 台），稍后重试'); return; }
+    if (http === 429) {
+      this.retryNotBefore = Date.now() + slowRetryMs;
+      this.schedule(deviceLimitStatus);
+      return;
+    }
     if (code === 1009) console.warn('[desktop] 中继帧超过大小上限');
     if (!this.negotiated && [404,405,426,501].includes(http)) {
       this.schedule(http === 426 ? '本机助手协议不兼容，请升级桌面客户端' : '当前网关暂不支持本机助手');
@@ -154,6 +161,8 @@ export class DesktopRelay {
     const token = auth.token();
     if (!token || this.terminal || this.refreshing || this.waiting || this.ws) return;
     if (settings.snapshot().paused) { this.status('本机助手已暂停', 'paused'); return; }
+    const remaining = this.retryNotBefore - Date.now();
+    if (remaining > 0) { this.schedule(deviceLimitStatus, remaining); return; }
     this.status('本机助手连接中', 'connecting');
     const ws = new WebSocket(this.url, { headers: { Authorization: 'Bearer ' + token, 'X-WP-Protocol-Version': '1',
       'X-WP-Device-Id': settings.deviceId, 'X-WP-Platform': process.platform, 'X-WP-App-Version': appVersion },

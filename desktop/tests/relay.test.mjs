@@ -12,9 +12,9 @@ import { DesktopAuth } from '../dist/main/auth.js';
 import { mockGateway } from './mock-gateway.mjs';
 
 async function until(f, ms = 3500) {
-  const end = Date.now() + ms;
+  const end = performance.now() + ms;
   while (!f()) {
-    if (Date.now() >= end) assert.fail('condition timed out');
+    if (performance.now() >= end) assert.fail('condition timed out');
     await delay(10);
   }
 }
@@ -197,7 +197,7 @@ test('upgrade failures, expired token refresh budget and legacy gateway probing'
     assert.equal(gw.attempts.length, count);
     gw.reject = 0;
     a.relay.wake();
-    if (status === 403) {
+    if (status === 403 || status === 429) {
       await delay(20);
       assert.equal(gw.attempts.length, count);
     } else await a.online();
@@ -379,7 +379,7 @@ test('handshake resets back off normally both before and after negotiation', asy
 
 test('confirmed unsupported handshakes and device limits retry after ten minutes', async t => {
   const gw = await mockGateway(t);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   for (const [status, text] of [[404, '暂不支持'], [426, '升级'], [429, '上限']]) {
     const d = device(t, gw);
     gw.reject = status;
@@ -390,7 +390,15 @@ test('confirmed unsupported handshakes and device limits retry after ten minutes
     assert.match(d.relay.state, /600 秒/);
     const count = gw.attempts.length;
     gw.reject = 0;
-    t.mock.timers.tick(599999);
+    t.mock.timers.tick(300000);
+    if (status === 429) {
+      d.relay.wake();
+      d.settings.setPaused(true);
+      d.settings.setPaused(false);
+      d.relay.wake();
+    }
+    t.mock.timers.tick(299999);
+    if (status === 429) d.relay.wake();
     await delay(15);
     assert.equal(gw.attempts.length, count);
     t.mock.timers.tick(1);
