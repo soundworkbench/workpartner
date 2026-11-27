@@ -190,6 +190,7 @@ export function nextEnvironment(data, environment = {}) {
     WORKPARTNER_MODEL_CONFIG: JSON.stringify(config),
     ...(quickModel ? { QUICK_LINE_MODEL: quickModel } : {}),
     PARTNER_GATEWAY_ORIGIN: data.runtime.gatewayOrigin,
+    PARTNER_INTERNAL_ORIGIN: data.runtime.internalOrigin,
     PARTNER_CODEX_MODEL: defaults.codex,
     PARTNER_BRIDGE_MODEL: defaults.claude,
     CLAUDE_CODE_SUBAGENT_MODEL: environment.CLAUDE_CODE_SUBAGENT_MODEL || defaults.haiku,

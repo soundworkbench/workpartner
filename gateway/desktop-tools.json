@@ -1,0 +1,154 @@
+[
+  {
+    "name": "desktop_list_devices",
+    "description": "列出当前账号在线的桌面设备及其已授权目录，用于确认桌面端在线状态或获取目标 `device_id`。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "desktop_list_dir",
+    "description": "列出本机白名单目录内的文件与子目录。",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "本机目录的绝对路径，必须位于用户授权的目录白名单内。"
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "可选，多台设备在线时指定目标设备 ID。"
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "default": 1,
+          "description": "遍历深度，1 表示仅列当前目录直接子项，最大 3。"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 100,
+          "description": "最多返回的条目数，最大 200。"
+        },
+        "include_hidden": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否包含隐藏文件/目录（仍受敏感黑名单过滤）。"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "desktop_read_file",
+    "description": "按行区间读取本机白名单目录内的 UTF-8 文本文件（拒绝二进制文件）。",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "本机文件的绝对路径，必须位于用户授权的目录白名单内。"
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "可选，多台设备在线时指定目标设备 ID。"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "起始行号（从 1 开始，含）。"
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "结束行号（从 1 开始，含）；省略则读至文件末尾或达到 max_bytes 上限。"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "default": 65536,
+          "description": "单次最多返回的文本字节数，上限 262144（256 KiB）。"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "desktop_search_files",
+    "description": "在本机白名单目录内按文件名/通配符或纯文本内容搜索文件。",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "可选，限定搜索的根目录（必须在白名单内）；省略则搜索全部白名单目录。"
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "可选，多台设备在线时指定目标设备 ID。"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "name",
+            "content"
+          ],
+          "default": "name",
+          "description": "name 按文件名/相对路径匹配；content 按文本内容匹配。"
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "搜索词。mode=name 支持 * 与 ? 通配符或子串匹配；mode=content 为纯文本字面匹配（不支持任意正则）。"
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 5
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+]

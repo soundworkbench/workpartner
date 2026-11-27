@@ -3,6 +3,7 @@
 // 容器停了就启动；旧版后端 的一次性口令在这里换成登录 cookie，浏览器只和网关打交道。
 import { gatewayExtension } from './optional-modules.mjs';
 import { createGatewayServices } from './services.mjs';
+import { createDesktopRelay, rejectUpgrade } from './desktop-relay.mjs';
 import { resolveOrganization, organizationData, nextModelConfig } from "./organization/resolve.mjs";
 import http from "node:http";
 import net from "node:net";
@@ -119,10 +120,16 @@ const sharedSkills = sharedStore && createSharedSkillsHandler({
   execute: executeSkill,
 });
 const dataTools = createDataTools({ organization, authenticate: req => tokenUser(req, SESSION_KEY, users()), sessionAuthenticate: req => userFor(req).user });
+const allowedGatewayHost = host => host === PUBLIC_HOST || host === `${PUBLIC_HOST}:443`
+  || (Boolean(legacy) && organization.server.legacyHosts.includes(host)) || host === new URL(organization.runtime.gatewayOrigin).host;
+const desktopAuth = createDesktopAuth({ organization, organizationData, users, sessionAuthenticate: sessionOf,
+  keyFor: modelKeyFor, keyFile: modelKeyFile, sessionKey: SESSION_KEY, onRevoke: unionId => desktopRelay?.revoke(unionId) });
+const desktopRelay = organizationData().desktop?.enabled === true
+  ? createDesktopRelay({ desktopAuth, migration, allowedHost: allowedGatewayHost }) : undefined;
 let feedback, myKey, voice, feishuBot; // Preview callbacks run per request after feature initialization.
 const services = await createGatewayServices({ extraClient: user => (user ? guidHideGuardClient() : '') + (feedback?.clientFor(user) || '') + (myKey?.clientFor(user) || '')
   + (voice?.clientFor(user) || '')
-  + (feishuBot?.clientFor(user) || ''), dataTools, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
+  + (feishuBot?.clientFor(user) || ''), dataTools, desktopRelay, organizationData, organization, runtime, legacyRuntime, SESSION_KEY, users, userFor, cookieOf, aionui, legacy, migration });
 const { prepareNextFeishu, preview, feishu, feishuSettings } = services;
 services.listen(legacy);
 aionui.startKeepRunning(users, organization.runtime.k8s?.keepRunningIntervalMs);
@@ -146,9 +153,6 @@ myKey = organization.features.myKey === true ? createMyKey({ organization, organ
   authenticate: req => userFor(req).user, sessionAuthenticate: sessionOf, keyFor: modelKeyFor,
   runtime, restarted: slug => aionui.forget(slug), keyFile: modelKeyFile,
 }) : undefined;
-
-const desktopAuth = createDesktopAuth({ organization, organizationData, users, sessionAuthenticate: sessionOf,
-  keyFor: modelKeyFor, keyFile: modelKeyFile, sessionKey: SESSION_KEY });
 
 feishuBot = createFeishuBot({ organization, organizationData,
   authenticate: req => userFor(req).user, runtime,
@@ -311,6 +315,7 @@ function welcomeNew(res, who) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `https://${PUBLIC_HOST}`);
+    if (url.pathname === "/desktop-mcp") { res.writeHead(404); return res.end(); }
     if (!desktopAuth.isDesktopRoute(url) && migration.forward(req, res, null)) return;
     const host = String(req.headers.host || "").toLowerCase();
     if (preview?.isPreviewHost(host)) {
@@ -322,8 +327,7 @@ const server = http.createServer(async (req, res) => {
     if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) {
       res.writeHead(403); return res.end();
     }
-    const oldHost = Boolean(legacy) && organization.server.legacyHosts.includes(host);
-    if (host !== PUBLIC_HOST && host !== `${PUBLIC_HOST}:443` && !oldHost && host !== new URL(organization.runtime.gatewayOrigin).host) {
+    if (!allowedGatewayHost(host)) {
       res.writeHead(403); return res.end();
     }
     if (await desktopAuth(req, res, url)) return;
@@ -426,6 +430,10 @@ server.on("upgrade", async (req, socket, head) => {
       return await preview.upgrade(req, socket, head);
     }
     if (req.headers.origin && preview?.isPreviewHost(new URL(req.headers.origin).host)) return socket.destroy();
+    if (new URL(req.url, 'http://gateway').pathname === '/_wp/desktop/ws') {
+      if (!desktopRelay) return rejectUpgrade(socket, 404);
+      return desktopRelay.upgrade(req, socket, head);
+    }
     if (migration.forward(req, socket, userFor(req).user || (req.headers.authorization && tokenUser(req, SESSION_KEY, users())), head)) return;
     if (legacy?.upgrade?.(req, socket, head)) return;
     const r = await resolve(req);
@@ -442,5 +450,21 @@ server.on("upgrade", async (req, socket, head) => {
     socket.destroy();
   }
 });
+
+// Give connected assistants a bounded shutdown notification before the process exits.
+if (desktopRelay) {
+  let stopping = false;
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    desktopRelay.close();
+    aionui.close();
+    server.close();
+    void services.close().catch(() => {});
+    setTimeout(() => process.exit(0), 1500).unref();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+}
 
 server.listen(PORT, "0.0.0.0", () => console.log(`工作伙伴网关 :${PORT}`));

@@ -22,4 +22,7 @@
 
 <!-- workpartner:skills:begin -->
 <!-- workpartner:skills:end -->
+仅在用户明确要求访问本机文件时调用 `desktop_*` 工具。
+可先调用 `desktop_list_devices` 查看在线设备与授权目录。
+收到离线或未授权报错时直接告知用户，不循环重试。
 <!-- workpartner:company-instructions:end -->
