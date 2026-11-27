@@ -3,7 +3,7 @@ import { executeFeishuBot } from './feishu-bot.mjs';
 // Feishu creation runs as the owner inside their container. No host paths or credentials cross this API.
 const PREFIX = '/_wp/aionui/feishu';
 const SCRIPT = '/opt/workpartner/bin/feishu-onboard.py';
-const STATES = new Set(['unconnected', 'preparing', 'waiting', 'connected', 'needs_restart', 'restarting', 'restart_failed', 'needs_identity', 'expired', 'failed']);
+const STATES = new Set(['unconnected', 'preparing', 'starting', 'waiting', 'connected', 'needs_restart', 'restarting', 'restart_failed', 'needs_identity', 'expired', 'failed']);
 
 /** Execute the fixed worker as the personal container owner. */
 export function feishuExecutor(runtime, uid) {
@@ -24,10 +24,10 @@ export function createFeishuOnboarding({ authenticate, runtime, uid = 1001, orig
   const restarting = new Map(), starting = new Map(), reported = new Set(), restartFailures = new Set(), cache = new Map(), versions = new Map();
   const stable = new Set(['none', 'unconnected', 'connected', 'restart_failed', 'needs_identity', 'expired', 'failed']);
   const forget = slug => { cache.delete(slug); versions.set(slug, (versions.get(slug) || 0) + 1); };
-  const remember = (slug, value, version = versions.get(slug) || 0) => { if (stable.has(value.status) && (versions.get(slug) || 0) === version) { cache.set(slug, { at: now(), value }); while (cache.size > 500) cache.delete(cache.keys().next().value); } else if (!stable.has(value.status)) cache.delete(slug); return value; };
-  async function status(user, retry = false) {
+  const remember = (slug, value, version = versions.get(slug) || 0) => { if (stable.has(value.status) && (versions.get(slug) || 0) === version) { cache.set(slug, { at: now(), value }); while (cache.size > 500) cache.delete(cache.keys().next().value); } else if (!stable.has(value.status) && (versions.get(slug) || 0) === version) cache.delete(slug); return value; };
+  async function status(user, retry = false, refresh = false) {
     const hit = cache.get(user.slug);
-    if (!retry && hit && now() - hit.at <= 60000) return hit.value;
+    if (!retry && !refresh && hit && now() - hit.at <= 60000) return hit.value;
     const version = versions.get(user.slug) || 0;
     let value = await execute(user, 'status');
     if (!STATES.has(value.status)) throw new Error('invalid worker state');
@@ -61,7 +61,7 @@ export function createFeishuOnboarding({ authenticate, runtime, uid = 1001, orig
     }
     // Explicit allowlist prevents future worker fields from accidentally exposing config or paths.
     return remember(user.slug, { status: value.status, ...(value.expiresAt ? { expiresAt: value.expiresAt } : {}),
-      ...(value.status === 'waiting' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value.qr) ? { qr: value.qr } : {}) });
+      ...(value.status === 'waiting' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value.qr) ? { qr: value.qr } : {}) }, version);
   }
   const json = (res, code, body) => {
     res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -81,8 +81,9 @@ export function createFeishuOnboarding({ authenticate, runtime, uid = 1001, orig
     if (start && (req.headers.origin !== origin || !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || ''))) {
       json(res, 403, { error: 'same_origin_required' }); return true;
     }
+    if (start) forget(user.slug);
     try {
-      let value = await status(user, start);
+      let value = await status(user, start, url.searchParams.get('refresh') === '1');
       if (start && ['unconnected', 'expired', 'failed'].includes(value.status)) {
         forget(user.slug);
         if (!starting.has(user.slug)) {
@@ -97,6 +98,8 @@ export function createFeishuOnboarding({ authenticate, runtime, uid = 1001, orig
     } catch (error) {
       log(`飞书开通 ${user.slug}：容器命令未完成，请管理员核对`);
       json(res, 503, { error: 'temporarily_unavailable' });
+    } finally {
+      if (start) forget(user.slug);
     }
     return true;
   };

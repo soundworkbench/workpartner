@@ -1,47 +1,66 @@
-import { Readable } from 'node:stream';
+import http from 'node:http';
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { performance } from 'node:perf_hooks';
-import { createFeishuBot } from '../../gateway/feishu-bot.mjs';
-import { createFeishuOnboarding } from '../../gateway/feishu-onboarding.mjs';
-import { clientResponse } from '../../gateway/client-response.mjs';
-import { aionuiResponseHeaders } from '../../gateway/aionui.mjs';
 import { brotliDecompressSync } from 'node:zlib';
+import { gatewayFixture, memoryTransport } from './gateway-fixture.mjs';
 
-const user = { slug: 'perf-user', unionId: 'perf-union', backend: 'aionui' };
-let calls = 0, now = 0;
-const runtime = { exec: async () => { calls++; await new Promise(r => setTimeout(r, 300)); return { exitCode: 0, stdout: JSON.stringify({ ok: true, bots: [] }), logs: JSON.stringify({ status: 'connected' }) }; } };
-const org = { server: { publicOrigin: 'https://perf.test' }, runtime: { uid: 1001 }, features: { feishuBot: true } };
-const bot = createFeishuBot({ organization: org, organizationData: () => ({ features: { feishuBot: true }, feishuBot: { allow: ['*'] } }), authenticate: () => user, runtime, now: () => now, cacheEnabled: true });
-const onboard = createFeishuOnboarding({ authenticate: () => user, runtime, origin: 'https://perf.test', now: () => now });
-async function request(handler, route, headers = {}, method = 'GET') {
-  const req = Readable.from(method === 'POST' ? [Buffer.from('{}')] : []); req.method = method; req.headers = method === 'POST' ? { cookie: 'perf-user', origin: 'https://perf.test', 'content-type': 'application/json', ...headers } : { cookie: 'perf-user', ...headers };
-  let status, responseHeaders, body = '';
-  await handler(req, { writeHead: (s, h) => { status = s; responseHeaders = h; }, end: b => { body = b || ''; } }, new URL(route, 'https://perf.test'));
-  return { status, headers: responseHeaders, body };
+const js = Buffer.from('export const data = ' + JSON.stringify(Array.from({ length: 18000 }, (_, i) => `asset-item-${i}`)) + ';\n');
+const body = Buffer.alloc(500 * 1024, ' '); js.copy(body);
+const upstream = http.createServer((req, res) => {
+  if (req.url === '/login') { res.writeHead(200, { 'set-cookie': ['session=synthetic'] }); return res.end('{}'); }
+  const html = req.url === '/index.html';
+  const data = html ? Buffer.from('<!doctype html><title>Gateway fixture</title>' + ' '.repeat(2048)) : body;
+  res.writeHead(200, { 'content-type': html ? 'text/html' : 'application/javascript', 'content-length': data.length });
+  res.end(data);
+});
+const args = process.argv.slice(2), noListen = args.includes('--no-listen');
+const baselineRoot = args.find(arg => arg !== '--no-listen');
+const servers = new Map();
+const restoreTransport = noListen ? memoryTransport(servers) : () => {};
+async function start(server, port) {
+  if (noListen) { servers.set(port, server); server.address = () => ({ port }); }
+  else { server.listen(0, '127.0.0.1'); await once(server, 'listening'); }
 }
-const elapsed = async fn => { const start = performance.now(); const value = await fn(); return { value, ms: Math.round(performance.now() - start) }; };
-const botRuns = [];
-for (let i = 0; i < 3; i++) botRuns.push(await elapsed(() => request(bot, '/_wp/feishu-bot/bots')));
-const botExecs = calls;
-now = 61000; const stale = await elapsed(() => request(bot, '/_wp/feishu-bot/bots')); await new Promise(r => setTimeout(r, 20));
-const staleExecs = calls - botExecs;
-const beforeWrite = calls;
-await request(bot, '/_wp/feishu-bot/reconnect', {}, 'POST');
-const afterWrite = await elapsed(() => request(bot, '/_wp/feishu-bot/bots'));
-const writeExecs = calls - beforeWrite - 1;
-const beforeStatus = calls;
-const statusRuns = [await elapsed(() => request(onboard, '/_wp/aionui/feishu/status')), await elapsed(() => request(onboard, '/_wp/aionui/feishu/status'))];
-const statusExecs = calls - beforeStatus;
-const body = Buffer.from('x'.repeat(500 * 1024));
-const response = await new Promise(resolve => { const chunks = []; const req = { method: 'GET', headers: { 'accept-encoding': 'br, gzip' } }; const res = { writeHead: (status, headers) => resolve({ status, headers, chunks }), end: data => { if (data) chunks.push(Buffer.from(data)); } }; clientResponse(req, res, body, { 'content-type': 'application/javascript' }); });
-const compressed = response.headers['content-encoding'] ? response.headers['content-length'] : body.length;
-let clientEtag;
-await new Promise(resolve => clientResponse({ method: 'GET', headers: {} }, { writeHead: (_s, h) => { clientEtag = h.etag; }, end: resolve }, 'client', { 'content-type': 'text/javascript' }));
-const clientSecond = await new Promise(resolve => clientResponse({ method: 'GET', headers: { 'if-none-match': clientEtag } }, { writeHead: s => resolve(s), end: () => {} }, 'client', { 'content-type': 'text/javascript' }));
-console.log('指标\t现状期望值\t本次结果');
-console.log(`/_wp/feishu-bot/bots exec\t3→1\t${botExecs}（连续三次耗时 ${botRuns.map(r => r.ms).join('/')}ms）`);
-console.log(`写操作后再次取 bots\t重新 exec 1 次\t${writeExecs}（${afterWrite.ms}ms）`);
-console.log(`bots 60秒后后台刷新\t立即返回旧值、后台1次\t${stale.ms}ms，exec=${staleExecs}`);
-console.log(`/status 连续两次 exec\t1\t${statusExecs}（${statusRuns.map(r => r.ms).join('/')}ms）`);
-console.log(`assets/*.imm.js cache-control\tpublic, max-age=31536000, immutable\t${aionuiResponseHeaders({}, '"e"', 200, '/assets/app-AbCd1234.imm.js')['cache-control']}`);
-console.log(`client.js 第二次\t304\t${clientSecond}`);
-console.log(`500KB JS br 传输字节\t明显小于原文\t${compressed}（原文 ${body.length}）`);
+let fixture;
+try {
+  await start(upstream, 1);
+  fixture = await gatewayFixture({ address: { host: '127.0.0.1', port: upstream.address().port }, delay: 300,
+    ...(baselineRoot ? { root: baselineRoot } : {}) });
+  await start(fixture.server, 2);
+  const request = (route, headers = {}, method = 'GET') => new Promise((resolve, reject) => {
+    const start = performance.now();
+    const req = http.request({ host: '127.0.0.1', port: fixture.server.address().port, path: route, method,
+      headers: { host: 'perf.test', cookie: fixture.cookie, ...headers } }, res => {
+      const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('error', reject);
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks), ms: Math.round(performance.now() - start) }));
+    });
+    req.on('error', reject); req.end(method === 'POST' ? '{}' : undefined);
+  });
+  const rows = [];
+  for (const route of ['/_wp/feishu-bot/bots', '/_wp/aionui/feishu/status']) {
+    const before = fixture.calls.length, results = [];
+    for (let i = 0; i < 3; i++) { const result = await request(route); assert.equal(result.status, 200); results.push(result.ms); }
+    rows.push([`${route} 连续三次`, 'exec 3→1，后两次 <30ms', `exec=${fixture.calls.length - before}，${results.join('/')}ms`]);
+  }
+  await request('/_wp/feishu-bot/reconnect', { origin: 'https://perf.test', 'content-type': 'application/json' }, 'POST');
+  const before = fixture.calls.length, afterWrite = await request('/_wp/feishu-bot/bots');
+  rows.push(['写后再次 bots', 'exec=1', `exec=${fixture.calls.length - before}，${afterWrite.ms}ms`]);
+  const fields = result => `status=${result.status}; cache-control=${result.headers['cache-control'] || '-'}; content-encoding=${result.headers['content-encoding'] || '-'}; etag=${result.headers.etag || '-'}; vary=${result.headers.vary || '-'}; bytes=${result.body.length}`;
+  for (const route of ['/assets/index-AbCd1234.imm.js', '/assets/index-AbCd1234.js', '/index.html', '/_wp/preview/client.js']) {
+    const first = await request(route, { 'accept-encoding': 'br, gzip' });
+    assert.equal(first.status, 200);
+    const second = await request(route, { 'accept-encoding': 'br, gzip', 'if-none-match': first.headers.etag || '' });
+    rows.push([route, '200（标记文件 immutable，其他 no-cache）', fields(first)]);
+    rows.push([`${route} 条件请求`, '304，无正文', fields(second)]);
+    if (route.includes('.imm.') && first.headers['content-encoding'] === 'br') {
+      assert.deepEqual(brotliDecompressSync(first.body), body);
+      rows.push(['500KB JS br 传输字节', '小于 512000', `${first.body.length}（原文 ${body.length}）`]);
+    }
+  }
+  if (noListen) console.log('无端口传输替身：真实网关处理链；耗时不代表 HTTP 网络性能。');
+  console.log('指标\t现状期望值\t本次结果');
+  for (const row of rows) console.log(row.join('\t'));
+} finally {
+  restoreTransport(); fixture?.close(); upstream.closeAllConnections(); upstream.close();
+}

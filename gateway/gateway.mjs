@@ -6,13 +6,14 @@ import { createGatewayServices } from './services.mjs';
 import { resolveOrganization, organizationData, nextModelConfig } from "./organization/resolve.mjs";
 import http from "node:http";
 import net from "node:net";
+import { pipeline } from "node:stream";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { createRuntime, createLegacyRuntime } from "./runtime/index.mjs";
 import { createMigration, previewSessionUser } from "./migration.mjs";
 import { tokenUser } from "./market-auth.mjs";
 import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } from "./onboard.mjs";
-import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, immutableAsset, upgradeHead } from "./aionui.mjs";
+import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
 import { clientResponse } from './client-response.mjs';
 import { compressible, compressor, encodedEtag, encodingFor, mergeVary } from './compress.mjs';
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
@@ -204,27 +205,21 @@ async function resolve(req) {
 }
 
 function proxy(req, res, r, body, retried) {
-  // 静态文件：浏览器带的 If-None-Match 与按镜像 ID + 路径算出的 ETag 相同，网关直接答 304，不转发。
   const etag = r.etag?.(req);
   const requestedEncoding = encodingFor(req);
-  const staticCompression = requestedEncoding && !!etag;
-  const requestEtag = staticCompression ? encodedEtag(etag, requestedEncoding) : etag;
-  if (etagMatches(req, requestEtag)) {
-    res.writeHead(304, { etag: requestEtag, "cache-control": immutableAsset(req.url.split('?')[0]) ? "public, max-age=31536000, immutable" : "no-cache" });
-    return res.end();
-  }
   const titleCreate = r.backend === "aionui" && req.method === "POST" && /^\/api\/conversations(?:\?|$)/.test(req.url);
   const headers = r.headers(req, r.cookie);
   if (titleCreate) headers["accept-encoding"] = "identity";
   const up = http.request({ ...r.up.address, path: req.url, method: req.method,
     headers }, async (ur) => {
+    ur.on('error', () => r.lost());
     if (ur.statusCode === 401 && !retried) {
       ur.resume();
       r.cookie = await r.relogin();
       return proxy(req, res, r, body, true);
     }
-    const responseHeaders = r.responseHeaders(ur.headers, etag, ur.statusCode, req.url.split('?')[0]);
-    const useCompression = compressible(responseHeaders, ur.statusCode, req, requestedEncoding);
+    const responseHeaders = r.responseHeaders(ur.headers, etag, ur.statusCode, req.url.split('?')[0], req.method);
+    const useCompression = compressible(ur.headers, ur.statusCode, req, requestedEncoding);
     const responseEtag = encodedEtag(responseHeaders.etag, useCompression ? requestedEncoding : null);
     if (responseEtag) responseHeaders.etag = responseEtag;
     if (useCompression) {
@@ -232,16 +227,25 @@ function proxy(req, res, r, body, retried) {
       responseHeaders['content-encoding'] = requestedEncoding;
       responseHeaders.vary = mergeVary(responseHeaders.vary, 'accept-encoding');
     }
+    // 上游首部决定能否压缩及缓存策略，不能仅凭 Accept-Encoding 猜测表示的 ETag。
+    if (ur.statusCode === 200 && ['GET', 'HEAD'].includes(req.method) && !req.headers.range && etagMatches(req, responseEtag)) {
+      const conditionalHeaders = { ...responseHeaders };
+      delete conditionalHeaders['content-length'];
+      res.writeHead(304, conditionalHeaders);
+      ur.resume();
+      return res.end();
+    }
     res.writeHead(ur.statusCode, responseHeaders);
     if (titleCreate && ur.statusCode >= 200 && ur.statusCode < 300) {
       const parts = []; let size = 0;
       ur.on("data", chunk => { size += chunk.length; if (size <= 65536) parts.push(chunk); });
       ur.on("end", () => { if (size <= 65536) chatTitles.created(r, Buffer.concat(parts).toString()); });
     }
-    if (useCompression) ur.pipe(compressor(requestedEncoding)).pipe(res);
-    else ur.pipe(res);
+    const finished = error => { if (error) { r.lost(); res.destroy(error); } };
+    if (useCompression) pipeline(ur, compressor(requestedEncoding), res, finished);
+    else pipeline(ur, res, finished);
   });
-  up.on("error", () => { r.lost(); if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。"); });
+  up.on("error", () => { r.lost(); if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。"); else res.destroy(); });
   up.end(body);
 }
 
@@ -358,7 +362,7 @@ const server = http.createServer(async (req, res) => {
       const body = "// Workspace preview is disabled." + (userFor(req).user ? guidHideGuardClient() : '') + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || "")
         + (voice?.clientFor(userFor(req).user) || "")
         + (feishuBot?.clientFor(userFor(req).user) || "");
-      return clientResponse(req, res, body, { "content-type": "text/javascript" });
+      return clientResponse(req, res, body, { "content-type": "text/javascript" }, { compress: Boolean(userFor(req).user) });
     }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
