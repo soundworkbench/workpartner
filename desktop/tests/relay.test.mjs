@@ -213,14 +213,21 @@ test('upgrade failures, expired token refresh budget and legacy gateway probing'
   a.relay.connect();
   await a.online();
   gw.devices.get(a.settings.deviceId).ws.close(4001, 'token_expired');
-  await until(() => a.state.revoked === 1);
+  await until(() => a.relay.canRetry);
+  assert.equal(a.relay.connection, 'offline');
+  assert.equal(a.state.revoked, 0);
   assert.equal(a.state.refreshes, 1);
-  const b = device(t, gw);
+  await a.relay.stop('app_quit');
+  const b = device(t, gw, { renew: () => { throw new Error('network unavailable'); } });
   b.relay.connect();
   await b.online();
   gw.devices.get(b.settings.deviceId).ws.close(4001, 'token_expired');
-  await until(() => b.state.revoked === 1);
+  await until(() => b.relay.canRetry);
+  assert.equal(b.relay.connection, 'offline');
+  assert.equal(b.state.revoked, 0);
   assert.equal(b.state.refreshes, 1);
+  await b.online();
+  assert.equal(b.state.revoked, 0);
 });
 test('real auth isolates account grants across logout, login and subsequent revocation', async t => {
   const gw = await mockGateway(t);

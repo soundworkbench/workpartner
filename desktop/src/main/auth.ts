@@ -1,5 +1,6 @@
+import { retryDelay } from './retry-delay.js';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
-import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 
@@ -49,6 +50,8 @@ export class DesktopAuth {
   private epoch = 0;
   private queue = Promise.resolve();
   private nextCheck = 0;
+  private retryTimer?: NodeJS.Timeout;
+  private retryAttempt = 0;
   private current?: string;
   private binding?: string;
   private sessionBinding?: string;
@@ -60,7 +63,14 @@ export class DesktopAuth {
 
   token() { return this.current; }
 
+  private resetRetry() {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.retryAttempt = 0;
+  }
+
   markRevoked() {
+    this.resetRetry();
     ++this.epoch;
     this.nextCheck = 0;
     this.current = undefined;
@@ -105,6 +115,7 @@ export class DesktopAuth {
   }
 
   private invalidate() {
+    this.resetRetry();
     ++this.epoch;
     this.nextCheck = 0;
     this.current = this.binding = this.sessionBinding = undefined;
@@ -121,7 +132,9 @@ export class DesktopAuth {
   clear({ sessionEnded = true } = {}) {
     // The logout button can run before the gateway cookie is actually gone.
     // Keep revocation evidence if cookie removal or logout navigation fails.
-    const keepOldToken = !sessionEnded && this.revokeStorageFailed && !!this.revokedBinding;
+    // At startup any saved token is refresh-only until verified. It may be
+    // the sole durable evidence left by a failure to create either marker.
+    const keepOldToken = !sessionEnded && !this.current;
     let notified = true;
     try { this.invalidate(); } catch { notified = false; }
     const files = keepOldToken ? [] : [this.file];
@@ -144,7 +157,15 @@ export class DesktopAuth {
     this.queue = this.queue.then(async () => {
       if (epoch === this.epoch) await this.check(epoch);
     }).catch(() => {
-      if (epoch === this.epoch) this.status('桌面凭据暂不可用，稍后重试');
+      if (epoch !== this.epoch) return;
+      this.status('桌面凭据暂不可用，稍后重试');
+      // A saved credential may need revalidation before a relay exists.
+      if (!this.retryTimer && existsSync(this.file)) {
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = undefined;
+          void this.sync();
+        }, retryDelay(this.retryAttempt++)).unref();
+      }
     });
     return this.queue;
   }
@@ -154,7 +175,8 @@ export class DesktopAuth {
     if (me.status === 401) return null;
     if (!me.ok) throw new Error('网关暂不可用');
     const { union_id } = await me.json();
-    return typeof union_id === 'string' && union_id.length ? union_id : null;
+    if (typeof union_id !== 'string' || !union_id.length) throw new Error('网关未确认会话身份');
+    return union_id;
   }
 
   private async check(epoch: number) {
@@ -190,6 +212,9 @@ export class DesktopAuth {
     let saved: Saved | undefined;
     try {
       saved = JSON.parse(this.vault.decryptString(readFileSync(this.file)));
+      if (!saved || typeof saved.binding !== 'string' || !saved.binding ||
+          typeof saved.union_id !== 'string' || !saved.union_id ||
+          typeof saved.access_token !== 'string' || !saved.access_token) throw new Error('本机凭据无效');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -241,8 +266,8 @@ export class DesktopAuth {
       await this.sessionUser() === unionId && await this.io.cookie() === sid;
     if (epoch !== this.epoch) return;
     if (!sameIdentity) {
-      this.clear();
-      const message = '会话身份与桌面凭据不一致，已丢弃凭据';
+      this.invalidate();
+      const message = '会话身份与桌面凭据不一致，已拒绝此次签发';
       this.warn(message);
       this.status(message);
       return;
@@ -251,6 +276,7 @@ export class DesktopAuth {
     const encrypted = this.vault.encryptString(JSON.stringify({ binding, union_id: unionId, access_token: value.access_token, expires_at: value.expires_at }));
     writeFileSync(this.file + '.tmp', encrypted, { mode: 0o600 });
     renameSync(this.file + '.tmp', this.file);
+    this.resetRetry();
     this.nextCheck = now + Math.min(day, (Date.parse(value.expires_at) - now) / 2);
     const changed = this.current !== value.access_token;
     if (!this.current) this.status('已登录（已获取桌面凭据）');

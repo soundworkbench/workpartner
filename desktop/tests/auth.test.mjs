@@ -23,11 +23,12 @@ function fixture(t) {
       return Buffer.concat([decipher.update(value.subarray(16)), decipher.final()]).toString();
     }
   };
-  const state = { cookie: 'session-one', me: 'first-user', tokenUser: 'first-user', warnings: [], calls: [], message: '', denied: false, wrongState: false, revoked: false };
+  const state = { cookie: 'session-one', me: 'first-user', tokenUser: 'first-user', warnings: [], calls: [], message: '', denied: false, wrongState: false, revoked: false, authorizations: 0 };
   let query;
   const io = {
     cookie: async () => state.cookie,
     async authorize(url) {
+      state.authorizations++;
       query = new URL(url).searchParams;
       const cb = new URL(query.get('redirect_uri'));
       cb.searchParams.set('state', state.wrongState ? 'other' : query.get('state'));
@@ -103,8 +104,12 @@ test('换证和刷新只保存当前会话用户的令牌', async t => {
   await client().sync();
   assert.equal(JSON.parse(vault.decryptString(readFileSync(file))).union_id, state.me);
   state.tokenUser = 'other';
-  await client().sync();
-  assert.equal(existsSync(file), false);
+  const next = client();
+  await next.sync();
+  assert.equal(next.token(), undefined);
+  assert.ok(existsSync(file));
+  await next.sync();
+  assert.equal(state.calls.at(-1), '/_wp/api/desktop/refresh');
 });
 test('Cookie 未变时也会清除切号或失去会话的旧凭据', async t => {
   const { file, state, client } = fixture(t);
@@ -283,3 +288,112 @@ test('credential deletion failures preserve all local and all-device logout step
     } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
   }
 });
+
+for (const failure of ['timeout', 'network', 503]) {
+  test('refresh preserves credentials during ' + failure, async t => {
+    const { file, io, state, client } = fixture(t);
+    const auth = client();
+    await auth.sync();
+    const saved = readFileSync(file), token = auth.token(), fetch = io.fetch;
+    io.fetch = (url, options) => {
+      if (!url.endsWith('/refresh')) return fetch(url, options);
+      if (failure === 'timeout') throw new DOMException('timeout', 'TimeoutError');
+      if (failure === 'network') throw new TypeError('offline');
+      return new Response(null, { status: failure });
+    };
+    await assert.rejects(auth.refresh());
+    assert.deepEqual(readFileSync(file), saved);
+    assert.equal(auth.token(), token);
+    assert.equal(existsSync(file + '.revoked') || existsSync(file + '.revoked.pending'), false);
+    io.fetch = fetch;
+    assert.ok(await auth.refresh());
+    assert.equal(state.authorizations, 1);
+  });
+}
+
+for (const status of [401, 403]) {
+  test('refresh denial ' + status + ' records revocation', async t => {
+    const { file, io, state, client } = fixture(t);
+    const auth = client();
+    await auth.sync();
+    const fetch = io.fetch;
+    io.fetch = (url, options) => url.endsWith('/refresh') ? new Response(null, { status }) : fetch(url, options);
+    assert.equal(await auth.refresh(), false);
+    assert.equal(auth.token(), undefined);
+    assert.ok(existsSync(file + '.revoked'));
+    assert.equal(existsSync(file), false);
+    await client().sync();
+    assert.equal(state.authorizations, 1);
+  });
+}
+
+test('cold-start revalidation backs off and retries with the saved token', async t => {
+  const { file, io, state, client } = fixture(t);
+  await client().sync();
+  const auth = client(), fetch = io.fetch, saved = readFileSync(file);
+  let attempts = 0;
+  io.fetch = (url, options) => url.endsWith('/refresh') && ++attempts === 1 ?
+    new Response(null, { status: 503 }) : fetch(url, options);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await auth.sync();
+  assert.equal(auth.token(), undefined);
+  assert.deepEqual(readFileSync(file), saved);
+  assert.match(state.message, /稍后重试/);
+  t.mock.timers.tick(1200);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(auth.token());
+  assert.equal(attempts, 2);
+  assert.equal(state.authorizations, 1);
+});
+
+for (const stage of ['same process', 'before startup check', 'during startup check', 'after offline startup check']) {
+  test('logout retains the only revalidation evidence ' + stage, async t => {
+    const { logoutDesktop } = await import('../dist/main/logout.js');
+    const { file, io, state, client } = fixture(t);
+    let auth = client();
+    await auth.sync();
+    const saved = readFileSync(file), open = fs.openSync;
+    t.mock.method(fs, 'openSync', (name, ...args) => {
+      if (name === file + '.revoked.pending') throw new Error('read only');
+      return open(name, ...args);
+    });
+    syncBuiltinESMExports();
+    try { auth.markRevoked(); }
+    finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.equal(existsSync(file + '.revoked.pending') || existsSync(file + '.revoked'), false);
+    if (stage !== 'same process') auth = client();
+    const fetch = io.fetch;
+    let checking, finish;
+    if (stage === 'during startup check') {
+      const started = new Promise(resolve => {
+        io.fetch = (url, options) => {
+          if (!url.endsWith('/refresh')) return fetch(url, options);
+          resolve();
+          return new Promise(done => { finish = done; });
+        };
+      });
+      checking = auth.sync();
+      await started;
+    } else if (stage === 'after offline startup check') {
+      io.fetch = (url, options) => url.endsWith('/refresh') ? new Response(null, { status: 503 }) : fetch(url, options);
+      await auth.sync();
+    }
+    await logoutDesktop(false, true, auth, () => {}, async () => { throw Error('cookie busy'); },
+      'https://example.org', 'preview.example.org', () => {});
+    if (checking) { finish(new Response(null, { status: 503 })); await checking; }
+    assert.deepEqual(readFileSync(file), saved);
+    assert.equal(auth.token(), undefined);
+    state.revoked = true;
+    state.calls.length = 0;
+    io.fetch = fetch;
+    const next = client();
+    await next.sync();
+    assert.deepEqual(state.calls, ['/_wp/me', '/_wp/api/desktop/refresh']);
+    assert.equal(state.authorizations, 1);
+    assert.equal(next.token(), undefined);
+    assert.ok(existsSync(file + '.revoked'));
+    state.cookie = undefined;
+    await next.sync();
+    assert.equal(existsSync(file + '.revoked'), false);
+  });
+}

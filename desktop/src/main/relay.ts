@@ -1,3 +1,5 @@
+import { retryDelay } from './retry-delay.js';
+export { retryDelay } from './retry-delay.js';
 import WebSocket from 'ws';
 import type { HelperSettings } from './helper-settings.js';
 import { createToolRunner, type RunTool } from './helper-runner.js';
@@ -9,9 +11,6 @@ const maxBytes = 1048576;
 const maxBufferedBytes = 4 * maxBytes;
 const slowRetryMs = 600000;
 const deviceLimitStatus = '在线桌面设备已达上限（5 台），稍后重试';
-const steps = [1000, 2000, 4000, 8000, 15000, 30000];
-export const retryDelay = (attempt: number, random = Math.random) =>
-  Math.round(steps[Math.min(attempt, steps.length - 1)] * (0.8 + random() * 0.4));
 type Auth = { token(): string | undefined; refresh(): Promise<boolean>; markRevoked(): void };
 type Options = { origin: string; appVersion: string; settings: HelperSettings; auth: Auth;
   status: (text: string, connection: Connection) => void; loopbackTest?: boolean; run?: RunTool };
@@ -126,12 +125,15 @@ export class DesktopRelay {
       this.refreshing = this.attemptedRefresh = true;
       this.status('正在更新桌面凭据', 'connecting');
       let renewed = false;
-      try { renewed = await this.opts.auth.refresh(); } catch { /* Failure invalidates this session. */ }
+      try { renewed = await this.opts.auth.refresh(); } catch { /* The gateway could not verify the credential. */ }
       if (this.epoch !== epoch) return;
       this.refreshing = false;
       if (renewed) { this.connect(); return; }
     }
-    this.revoke();
+    // Only an explicit refresh denial (reported by auth) or a revocation
+    // close is terminal. A second expiry gets the ordinary reconnect delay.
+    this.attemptedRefresh = false;
+    this.schedule();
   }
   private revoke() {
     this.halt('桌面登录已失效，请退出后重新登录', 'revoked');
