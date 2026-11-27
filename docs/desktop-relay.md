@@ -629,7 +629,7 @@
 4. **存在性防探测**：
    - 若请求路径经词法规范化已不在任何白名单目录内，或命中敏感黑名单，**无论该路径在磁盘上是否存在**，一律返回 `PATH_NOT_ALLOWED` / `SENSITIVE_PATH_BLOCKED`，不得返回 `PATH_NOT_FOUND`。
 5. **永久敏感黑名单（即使所在父目录在白名单内也强制拒绝）**：
-   - 密钥与凭据目录/文件：路径任一段匹配 `.ssh`、`.aws`、`.gnupg`、`.kube`、`.git-credentials`、`.npmrc`、`.pypirc`、`.netrc`、`.docker/config.json`，以及文件名匹配 `.env`、`.env.*`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`*.jks`、`*.kdbx`（大小写不敏感）。
+   - 密钥与凭据目录/文件：路径任一段匹配 `.ssh`、`.aws`、`.gnupg`、`.kube`、`.git-credentials`、`.npmrc`、`.pypirc`、`.netrc`、`.docker/config.json`，以及路径任一段以 `.env` 开头（含 `.env.*`、`.envrc`、`.env_backup`）、文件名匹配 `*.pem`、`*.key`、`*.p12`、`*.pfx`、`*.jks`、`*.kdbx`（大小写不敏感）。
    - 浏览器与系统钥匙串敏感目录：macOS `~/Library/Keychains`、`~/Library/Cookies`、常见浏览器配置目录（Chrome/Edge/Brave/Safari/Firefox）；Windows `%LOCALAPPDATA%\Google\Chrome\User Data`、`%LOCALAPPDATA%\Microsoft\Edge\User Data`、`%APPDATA%\Mozilla\Firefox`。
    - 系统保留目录：POSIX `/System`、`/Library`、`/etc`、`/private/etc`、`/private/var`、`/proc`、`/sys`、`/dev`；Windows `C:\Windows`、`C:\Program Files`、`C:\Program Files (x86)`、`C:\ProgramData`。
    - 客户端自身目录：运行时动态获取的 `app.getPath('userData')`（保护本机 `desktop-token.enc`、`device-id`、`helper-config.json` 与审计日志）。
@@ -732,7 +732,7 @@
   - 持久化 `device_id` 生成、读取、重启不变、权限 `0600`；
   - 白名单默认空（调用返回 `NO_ALLOWED_ROOTS`）、拒绝添加根目录与自身 `userData` 目录；
   - 路径防逃逸：`../` 穿越、相似前缀目录（`/a/doc` vs `/a/docs`）、指向白名单外的符号链接、循环符号链接、Windows UNC/相对驱动器路径全部拦截；
-  - 永久敏感黑名单：`.ssh`、`.env`、`.env.local`、`*.pem`、`*.key`、系统目录、客户端自身 `userData` 目录全部返回 `SENSITIVE_PATH_BLOCKED`；
+  - 永久敏感黑名单：`.ssh`、`.env`、`.env.local`、`.envrc`、`*.pem`、`*.key`、系统目录、客户端自身 `userData` 目录全部返回 `SENSITIVE_PATH_BLOCKED`；
   - `desktop_list_dir` 深度/条数上限与 `skipped_count`；
   - `desktop_read_file` 行区间读取、256 KiB 截断、UTF-8 边界安全、二进制拒绝、20 MiB 超大文件拒绝；
   - `desktop_search_files` 文件名 glob 与纯文本内容搜索、100 条截断、10s 超时返回部分结果、无 ReDoS；
@@ -777,5 +777,5 @@
 1. **多设备未传 `device_id`**：自动路由至首选设备，无首选时取最近活跃设备（`lastActiveAt` 最新）；返回结果标注实际命中的设备名与在线总数。AI 可用 `desktop_list_devices` + `device_id` 显式切换。
 2. **`allowedRoots` 上报**：上报至网关在线内存，不落盘、不写日志；`desktop_list_devices` 返回给本人容器的 AI，网关可做浅层越界预检，桌面端仍做最终完整校验。
 3. **容器侧接入**：阶段 2 仅接入 Claude Code（`headersHelper` 按需读取令牌文件，不导出到环境变量）；Codex 待确认动态 Header 支持后再补。
-4. **`.env` 黑名单**：阶段 2 拦截 `.env` 及所有 `.env.*`，不做豁免。
+4. **`.env` 黑名单**：阶段 2 拦截路径任一段以 `.env` 开头的文件或目录（含 `.env.*`、`.envrc` 等），不做豁免。
 5. **退出登录**：默认只退出当前设备（断开本机 WSS、清理本地凭据与 Cookie）；另提供「退出所有桌面设备」，调用 `POST /_wp/api/desktop/revoke-all`。
