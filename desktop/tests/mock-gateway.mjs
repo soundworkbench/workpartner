@@ -13,6 +13,7 @@ export async function mockGateway(t) {
       url: req.url, headers: Object.keys(req.headers), version: req.headers['x-wp-protocol-version'],
       id: req.headers['x-wp-device-id'], platform: req.headers['x-wp-platform'], app: req.headers['x-wp-app-version']
     });
+    if (mock.resetHandshake) { socket.destroy(); return; }
     const status = mock.reject || (req.url !== '/_wp/desktop/ws' ? 404 :
       req.headers.authorization !== 'Bearer ' + token ? 401 : req.headers['x-wp-protocol-version'] !== '1' ? 426 :
         !/^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/.test(req.headers['x-wp-device-id']) ? 400 : 0);

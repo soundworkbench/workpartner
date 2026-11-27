@@ -9,6 +9,7 @@ import { deepTarget } from './links.js';
 import { createTray } from './tray.js';
 import { HelperSettings } from './helper-settings.js';
 import { DesktopRelay } from './relay.js';
+import { logoutDesktop } from './logout.js';
 import { DesktopAuth } from './auth.js';
 import { authorize, permissions } from './session.js';
 
@@ -73,16 +74,8 @@ function start() {
   async function logout(all: boolean) {
     if (loggingOut) return;
     loggingOut = true;
-    let revokeFailed = false;
     try {
-      if (all) {
-        try { await auth.revokeAll(); } catch { revokeFailed = true; }
-      }
-      auth.clear();
-      closePreviews();
-      await Promise.all([clearCookies(origin), clearCookies('https://' + brand.previewHost)]);
-      open?.(origin + '/_wp/logout');
-      if (revokeFailed) tray.status('本机已退出，其他桌面设备的退出未确认');
+      await logoutDesktop(all, auth, closePreviews, clearCookies, origin, brand.previewHost, url => open?.(url), tray.status);
     } catch { tray.status('退出登录未完成，请重试'); }
     finally { loggingOut = false; }
   }

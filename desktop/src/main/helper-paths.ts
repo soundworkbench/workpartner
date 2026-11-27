@@ -1,7 +1,19 @@
-import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fail } from './helper-errors.js';
+import { checkWindowsAttributes, pinWindowsPath } from './helper-windows.js';
+
+export type RootGrant = { path: string; dev: string; ino: string };
+function inspect(path: string) {
+  const stat = lstatSync(path, { bigint: true });
+  checkWindowsAttributes(path);
+  if (!stat.ino) fail('PATH_NOT_ALLOWED');
+  return stat;
+}
+function same(left: BigIntStats, right: BigIntStats) {
+  return left.dev === right.dev && left.ino === right.ino && left.isSymbolicLink() === right.isSymbolicLink();
+}
 
 const windows = process.platform === 'win32';
 const real = realpathSync.native;
@@ -22,10 +34,13 @@ function absolute(input: unknown): string {
   return path.normalize(input);
 }
 
-const protectedSegment = /^(?:\.ssh|\.aws|\.gnupg|\.kube|\.git-credentials|\.npmrc|\.pypirc|\.netrc|\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx|jks|kdbx))$/is;
+const protectedSegment = /^(?:\.ssh|\.aws|\.gnupg|\.kube|\.git-credentials|\.npmrc|\.pypirc|\.netrc|\.env.*|.*\.(?:pem|key|p12|pfx|jks|kdbx))$/is;
 export class PathPolicy {
   private protectedDirs: string[];
-  constructor(readonly roots: readonly string[], userData: string) {
+  readonly grants: readonly RootGrant[];
+  constructor(grants: readonly RootGrant[], userData: string) {
+    // An explicit nested grant has its own pinned identity.
+    this.grants = [...grants].sort((a, b) => b.path.length - a.path.length);
     const home = homedir();
     const systemDrive = process.env.SystemDrive || 'C:';
     const local = process.env.LOCALAPPDATA || path.join(home, 'AppData/Local');
@@ -59,41 +74,59 @@ export class PathPolicy {
 
   selectedDirectory(input: string) {
     const selected = this.validateRoot(input);
-    const target = real(selected);
-    this.validateRoot(target);
-    if (!statSync(target).isDirectory()) fail('NOT_A_DIRECTORY');
-    return target;
+    const unpin = windows ? pinWindowsPath(selected) : undefined;
+    try {
+      const target = this.validateRoot(real(selected));
+      const st = inspect(target);
+      if (!st.isDirectory()) fail('NOT_A_DIRECTORY');
+      if (path.relative(target, real(selected)) !== '' || !same(st, inspect(target))) fail('PATH_NOT_ALLOWED');
+      return { path: target, dev: String(st.dev), ino: String(st.ino) };
+    } finally { unpin?.(); }
   }
 
-  // Inspect each link destination before following it, including intermediate links.
-  resolve(input: unknown, allowLinks = true): string {
+  // Capture every component, including a permitted POSIX link and its destination.
+  resolve(input: unknown, allowLinks = true) {
     const target = absolute(input);
+    const observed = new Map<string, BigIntStats>();
+    const observe = (path: string) => {
+      const st = inspect(path);
+      const previous = observed.get(path);
+      if (previous && !same(previous, st)) fail('PATH_NOT_ALLOWED');
+      observed.set(path, st);
+      return st;
+    };
     let links = 0;
     const walk = (candidate: string): string => {
       this.sensitive(candidate);
-      const root = this.roots.find(dir => contains(dir, candidate));
-      if (!root) fail('PATH_NOT_ALLOWED');
-      const canonicalRoot = real(root);
-      this.sensitive(canonicalRoot);
-      // A previously granted root must never silently retarget to another directory.
-      if (path.relative(root, canonicalRoot) !== '') fail('PATH_NOT_ALLOWED');
-      let current = canonicalRoot;
-      const parts = path.relative(root, candidate).split(path.sep).filter(Boolean);
-      for (const part of parts) {
+      const grant = this.grants.find(g => contains(g.path, candidate));
+      if (!grant) fail('PATH_NOT_ALLOWED');
+      let current = grant.path;
+      const root = observe(current);
+      if (!root.isDirectory() || String(root.dev) !== grant.dev || String(root.ino) !== grant.ino ||
+          path.relative(current, real(current)) !== '') fail('PATH_NOT_ALLOWED');
+      for (const part of path.relative(current, candidate).split(path.sep).filter(Boolean)) {
         current = path.join(current, part);
         this.sensitive(current);
-        if (lstatSync(current).isSymbolicLink()) {
-          if (!allowLinks || ++links > 40) fail('PATH_NOT_ALLOWED');
+        if (observe(current).isSymbolicLink()) {
+          if (!allowLinks || path.relative(current, candidate) !== '' || ++links > 40) fail('PATH_NOT_ALLOWED');
           current = walk(absolute(path.resolve(path.dirname(current), readlinkSync(current))));
         }
       }
-      const actual = real(current);
-      this.sensitive(actual);
-      if (path.relative(current, actual) !== '' || !this.roots.some(dir => contains(dir, actual))) fail('PATH_NOT_ALLOWED');
-      return actual;
+      return current;
     };
     const resolved = walk(target);
-    if (path.relative(resolved, real(target)) !== '') fail('PATH_NOT_ALLOWED');
-    return resolved;
+    const stat = observed.get(resolved)!;
+    // Node has no openat. Sampling names cannot rule out an ancestor moving away
+    // and back between checks. Bind I/O to the verified object and recheck the
+    // original chain before using its data.
+    const verify = (opened?: BigIntStats) => {
+      if (opened && !same(opened, stat)) fail('PATH_NOT_ALLOWED');
+      for (const [name, before] of observed) {
+        if (!same(before, inspect(name))) fail('PATH_NOT_ALLOWED');
+      }
+      if (path.relative(resolved, real(target)) !== '') fail('PATH_NOT_ALLOWED');
+    };
+    verify();
+    return { path: resolved, stat, sourceStat: observed.get(target) ?? stat, verify };
   }
 }

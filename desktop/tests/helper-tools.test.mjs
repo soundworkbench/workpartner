@@ -19,7 +19,7 @@ function fixture(t) {
   const settings = () => new HelperSettings(store, async () => state.choice, () => state.changes++);
   const config = settings();
   function run(name, args, progress, deadline = Date.now() + 10000) {
-    return executeTool('desktop_' + name, args, config.snapshot().allowedRoots, store, deadline, progress);
+    return executeTool('desktop_' + name, args, config.grants(), store, deadline, progress);
   }
   return { base, root, outside, store, state, settings, config, run };
 }
@@ -75,6 +75,14 @@ test('links are checked at every hop, never traversed by listing or search', asy
   fs.writeFileSync(path.join(root, 'ok'), 'visible');
   fs.writeFileSync(path.join(outside, 'private'), 'outside');
   fs.mkdirSync(path.join(root, '.ssh'));
+  if (process.platform === 'win32') {
+    const junction = path.join(root, 'junction');
+    fs.symlinkSync(outside, junction, 'junction');
+    assert.throws(() => run('read_file', { path: path.join(junction, 'private') }), code('PATH_NOT_ALLOWED'));
+    assert.ok(!run('list_dir', { path: root }).entries.some(e => e.name === 'junction'));
+    assert.deepEqual(run('search_files', { query: 'private' }).matches, []);
+    return;
+  }
   const symlink = (name, target) => fs.symlinkSync(target, path.join(root, name));
   symlink('good', 'ok');
   symlink('outside', path.join(outside, 'private'));
@@ -200,4 +208,126 @@ test('binary files count towards 50 MiB and files over 2 MiB are skipped', async
   assert.ok(result.truncated);
   assert.ok(result.scanned_files === 25 || result.scanned_files === 26);
   assert.deepEqual(result.matches, []);
+});
+
+test('env-prefixed files and directories are filtered from every tool', async t => {
+  const { root, config, run } = fixture(t);
+  await config.addDirectory();
+  fs.mkdirSync(path.join(root, '.EnV_backup'));
+  const files = ['.envrc', '.ENV_backup_file', '.EnV_backup/notes'];
+  for (const file of files) {
+    const target = path.join(root, file);
+    fs.writeFileSync(target, 'sample');
+    assert.throws(() => run('read_file', { path: target }), code('SENSITIVE_PATH_BLOCKED'));
+  }
+  const listing = run('list_dir', { path: root, include_hidden: true, max_depth: 3 });
+  assert.deepEqual(listing.entries, []);
+  assert.equal(listing.skipped_count, 3);
+  for (const [mode, query] of [['name', '*'], ['content', 'sample']]) {
+    assert.deepEqual(run('search_files', { mode, query }).matches, []);
+    assert.throws(() => run('search_files', { path: path.join(root, '.EnV_backup'), mode, query }), code('SENSITIVE_PATH_BLOCKED'));
+  }
+});
+
+test('multi-link files cannot supply contents to reads or search', async t => {
+  const { root, outside, config, run } = fixture(t);
+  await config.addDirectory();
+  const file = path.join(root, 'notes');
+  fs.writeFileSync(file, 'sample');
+  fs.linkSync(file, path.join(outside, 'other-name'));
+  assert.throws(() => run('read_file', { path: file }), code('PATH_NOT_ALLOWED'));
+  assert.deepEqual(run('search_files', { mode: 'content', query: 'sample' }).matches, []);
+});
+
+test('persisted identities reject a replaced root after restart and path-only grants require selection', async t => {
+  const { root, store, config, settings } = fixture(t);
+  await config.addDirectory();
+  fs.renameSync(root, root + '-previous');
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(root, 'notes'), 'sample');
+  const restored = settings();
+  assert.deepEqual(restored.grants(), config.grants());
+  for (const [tool, args] of [
+    ['list_dir', { path: root }], ['read_file', { path: path.join(root, 'notes') }], ['search_files', { query: '*' }]
+  ]) {
+    assert.throws(() => executeTool('desktop_' + tool, args, restored.grants(), store, Date.now() + 1000), code('PATH_NOT_ALLOWED'));
+  }
+  fs.writeFileSync(path.join(store, 'helper-config.json'), JSON.stringify({ preferred: true, allowedRoots: [root] }));
+  const legacy = settings();
+  assert.deepEqual(legacy.grants(), []);
+  assert.ok(legacy.snapshot().preferred);
+  await legacy.addDirectory();
+  assert.notDeepEqual(legacy.grants(), config.grants());
+});
+
+test('open file and directory operations recheck ancestor identities before consuming data', async t => {
+  const { syncBuiltinESMExports } = await import('node:module');
+  const { root, config, run } = fixture(t);
+  await config.addDirectory();
+  const parent = path.join(root, 'parent'), dir = path.join(parent, 'inner'), file = path.join(dir, 'notes');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, 'sample');
+  const lstat = fs.lstatSync, openFile = fs.openSync, openDir = fs.opendirSync;
+  for (const [tool, args] of [['read_file', { path: file }], ['list_dir', { path: dir }], ['search_files', { path: dir, query: '*' }]]) {
+    let opened = false;
+    const method = tool === 'read_file' ? 'openSync' : 'opendirSync';
+    t.mock.method(fs, method, (...args) => {
+      const handle = (method === 'openSync' ? openFile : openDir)(...args);
+      opened = true;
+      return handle;
+    });
+    t.mock.method(fs, 'lstatSync', (name, options) => {
+      const stat = lstat(name, options);
+      if (opened && name === parent) stat.ino += 1n;
+      return stat;
+    });
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => run(tool, args), code('PATH_NOT_ALLOWED'));
+      assert.ok(opened);
+    } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  }
+});
+
+test('a mismatched open file identity fails verification', async t => {
+  const { syncBuiltinESMExports } = await import('node:module');
+  const { root, config, run } = fixture(t);
+  await config.addDirectory();
+  const file = path.join(root, 'notes');
+  fs.writeFileSync(file, 'sample');
+  const fstat = fs.fstatSync;
+  t.mock.method(fs, 'fstatSync', (...args) => {
+    const stat = fstat(...args);
+    stat.ino += 1n;
+    return stat;
+  });
+  syncBuiltinESMExports();
+  try { assert.throws(() => run('read_file', { path: file }), code('PATH_NOT_ALLOWED')); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test('Windows rejects reparse attributes on pinned handles and releases the entire chain', async () => {
+  const { pinWindowsPath } = await import('../dist/main/helper-windows.js');
+  for (const attributes of [0x10, 0x410, 0x400, 0xffffffff]) {
+    const paths = [], closed = [];
+    const kernel = {
+      open(name, _access, share, _security, _disposition, flags) {
+        paths.push(name);
+        assert.equal(share, 1);
+        assert.ok(flags & 0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+        return paths.length;
+      },
+      info(handle, kind, buffer) {
+        assert.equal(kind, 9);
+        buffer.writeUInt32LE(handle === 3 ? attributes : 0x10);
+        return 1;
+      },
+      close: handle => closed.push(handle)
+    };
+    const acquire = () => pinWindowsPath('D:\\shared\\notes', kernel);
+    if (attributes === 0x10) acquire()();
+    else assert.throws(acquire, code('PATH_NOT_ALLOWED'));
+    assert.equal(paths.length, 3);
+    assert.deepEqual(closed, [3, 2, 1]);
+  }
 });

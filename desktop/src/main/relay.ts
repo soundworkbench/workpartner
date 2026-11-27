@@ -6,6 +6,8 @@ import { errorCode, wireError, type ErrorCode } from './helper-errors.js';
 import type { ToolData } from './helper-tools.js';
 
 const maxBytes = 1048576;
+const maxBufferedBytes = 4 * maxBytes;
+const slowRetryMs = 600000;
 const steps = [1000, 2000, 4000, 8000, 15000, 30000];
 export const retryDelay = (attempt: number, random = Math.random) =>
   Math.round(steps[Math.min(attempt, steps.length - 1)] * (0.8 + random() * 0.4));
@@ -21,7 +23,7 @@ export class DesktopRelay {
   private ws?: WebSocket;
   private ready = false;
   private terminal = false;
-  private oldGateway = false;
+  private negotiated = false;
   private attemptedRefresh = false;
   private refreshing = false;
   private attempt = 0;
@@ -70,23 +72,28 @@ export class DesktopRelay {
     else if (ws?.readyState === WebSocket.CONNECTING) ws.terminate();
     if (reason === 'user_logout') {
       this.attempt = 0;
-      this.attemptedRefresh = this.terminal = this.oldGateway = false;
+      this.attemptedRefresh = this.terminal = false;
       this.status('尚未登录');
     } else if (reason === 'helper_paused' && !this.terminal) this.status('本机助手已暂停');
     if (reason === 'app_quit') this.terminal = true;
     return closed;
   }
   private halt(text: string) { this.terminal = true; this.status(text); }
-  private schedule(old = false) {
+  private schedule(slowStatus?: string) {
     if (this.terminal || this.opts.settings.snapshot().paused || !this.opts.auth.token()) return;
-    this.oldGateway = old;
-    this.status(old ? '当前网关暂不支持本机助手' : '本机助手已断开，等待重连');
-    this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); }, old ? 600000 : retryDelay(this.attempt++));
+    this.status(slowStatus ?? '本机助手已断开，等待重连');
+    this.waiting = setTimeout(() => { this.waiting = undefined; this.connect(); },
+      slowStatus ? slowRetryMs : retryDelay(this.attempt++));
   }
   wake() {
-    if (!this.waiting || this.oldGateway) return;
+    if (this.terminal || this.refreshing || this.opts.settings.snapshot().paused) return;
     clearTimeout(this.waiting);
     this.waiting = undefined;
+    const stale = this.ws;
+    if (stale) {
+      this.resetConnection();
+      stale.terminate();
+    }
     this.attempt = 0;
     this.connect();
   }
@@ -103,20 +110,26 @@ export class DesktopRelay {
       this.refreshing = false;
       if (renewed) { this.connect(); return; }
     }
-    this.halt('桌面登录已失效，请退出后重新登录');
-    this.opts.auth.markRevoked();
+    this.revoke();
   }
-  private disconnected(code: number, reason: string, http: number, resetDuringUpgrade: boolean) {
+  private revoke() {
+    this.halt('桌面登录已失效，请退出后重新登录');
+    try { this.opts.auth.markRevoked(); }
+    catch { this.status('桌面登录已失效，本机撤销记录保存失败'); }
+  }
+  private disconnected(code: number, reason: string, http: number) {
     this.resetConnection();
     if (http === 401 || (code === 4001 && reason === 'token_expired')) { void this.refresh(this.epoch); return; }
-    if (code === 4001) { this.halt('桌面登录已失效，请退出后重新登录'); this.opts.auth.markRevoked(); return; }
+    if (code === 4001) { this.revoke(); return; }
     if (code === 1000) { this.halt('本机助手已断开'); return; }
     if (code === 4002) { this.halt('本机助手已由新连接接替'); return; }
     if (http === 403 || code === 4003) { this.halt('本机助手未开通'); return; }
-    if (http === 426 || (code === 4004 && reason === 'unsupported_protocol')) { this.halt('本机助手协议不兼容，请升级桌面客户端'); return; }
-    if (http === 429) { this.halt('在线桌面设备已达上限（5 台）'); return; }
+    if (code === 4004 && reason === 'unsupported_protocol') { this.halt('本机助手协议不兼容，请升级桌面客户端'); return; }
+    if (http === 429) { this.schedule('在线桌面设备已达上限（5 台），稍后重试'); return; }
     if (code === 1009) console.warn('[desktop] 中继帧超过大小上限');
-    this.schedule([404,405,501].includes(http) || resetDuringUpgrade);
+    if (!this.negotiated && [404,405,426,501].includes(http)) {
+      this.schedule(http === 426 ? '本机助手协议不兼容，请升级桌面客户端' : '当前网关暂不支持本机助手');
+    } else this.schedule();
   }
   connect() {
     const { settings, auth, appVersion } = this.opts;
@@ -126,17 +139,16 @@ export class DesktopRelay {
     this.status('本机助手连接中');
     const ws = new WebSocket(this.url, { headers: { Authorization: 'Bearer ' + token, 'X-WP-Protocol-Version': '1',
       'X-WP-Device-Id': settings.deviceId, 'X-WP-Platform': process.platform, 'X-WP-App-Version': appVersion },
-      maxPayload: maxBytes, handshakeTimeout: 10000, perMessageDeflate: false, followRedirects: false });
+      maxPayload: maxBytes, handshakeTimeout: 10000, perMessageDeflate: false, autoPong: false, followRedirects: false });
     this.ws = ws;
     this.frameLimit = maxBytes;
-    let http = 0, opened = false, resetDuringUpgrade = false, receivedOversize = false;
+    let http = 0, receivedOversize = false;
     ws.on('unexpected-response', (_req, res) => { http = res.statusCode || 0; res.destroy(); ws.terminate(); });
     ws.on('error', (e: NodeJS.ErrnoException) => {
-      resetDuringUpgrade = !opened && e.code === 'ECONNRESET';
       receivedOversize = e.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH';
     });
     ws.on('close', (code, reason) => {
-      if (this.ws === ws) this.disconnected(receivedOversize ? 1009 : code, reason.toString(), http, resetDuringUpgrade);
+      if (this.ws === ws) this.disconnected(receivedOversize ? 1009 : code, reason.toString(), http);
     });
     const watch = (ms: number) => {
       clearTimeout(this.watchdog);
@@ -144,14 +156,16 @@ export class DesktopRelay {
     };
     ws.on('open', () => {
       if (this.ws !== ws) return;
-      opened = true;
       const { deviceName, allowedRoots, preferred } = settings.snapshot();
       this.roots = allowedRoots;
-      ws.send(JSON.stringify({ type: 'hello', protocolVersion: 1, deviceId: settings.deviceId, deviceName, allowedRoots, preferred,
+      this.send(ws, JSON.stringify({ type: 'hello', protocolVersion: 1, deviceId: settings.deviceId, deviceName, allowedRoots, preferred,
         appVersion, platform: process.platform, arch: process.arch, capabilities: ['fs.read'] }));
       watch(5000);
     });
-    ws.on('ping', () => { if (this.ws === ws && this.ready) watch(65000); });
+    ws.on('ping', data => {
+      this.send(ws, data);
+      if (this.ws === ws && this.ready) watch(65000);
+    });
     ws.on('message', (raw, binary) => {
       if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
       if (binary) { ws.close(4004, 'invalid_frame'); return; }
@@ -169,7 +183,7 @@ export class DesktopRelay {
         if (!positive(msg.maxFrameBytes) || !positive(msg.maxConcurrency) || !positive(msg.heartbeatSec) ||
             !positive(msg.heartbeatTimeoutSec) || !positive(msg.serverTime)) { ws.close(4004, 'invalid_hello'); return; }
         this.ready = true;
-        this.oldGateway = false;
+        this.negotiated = true;
         this.frameLimit = Math.min(maxBytes, msg.maxFrameBytes);
         this.concurrency = Math.min(4, msg.maxConcurrency);
         this.lastActive = -Infinity;
@@ -181,6 +195,16 @@ export class DesktopRelay {
       watch(65000);
     });
   }
+  private send(ws: WebSocket | undefined, frame: string | Buffer) {
+    if (!ws || ws !== this.ws || ws.readyState !== WebSocket.OPEN) return;
+    // A masked client frame adds at most 14 bytes. Include queued control frames.
+    if (ws.bufferedAmount + Buffer.byteLength(frame) + 14 > maxBufferedBytes) {
+      ws.terminate();
+      return;
+    }
+    if (typeof frame === 'string') ws.send(frame);
+    else ws.pong(frame);
+  }
   settingsChanged() {
     const { paused, deviceName, allowedRoots, preferred } = this.opts.settings.snapshot();
     if (paused) { this.stop('helper_paused'); return; }
@@ -188,13 +212,13 @@ export class DesktopRelay {
       for (const job of this.inflight.values()) job.abort('PATH_NOT_ALLOWED');
     }
     this.roots = allowedRoots;
-    if (this.ready) this.ws?.send(JSON.stringify({ type: 'state_update', deviceName, allowedRoots, preferred }));
+    if (this.ready) this.send(this.ws, JSON.stringify({ type: 'state_update', deviceName, allowedRoots, preferred }));
     else this.connect();
   }
   active() {
     if (!this.ready || Date.now() - this.lastActive < 10000) return;
     this.lastActive = Date.now();
-    this.ws?.send('{"type":"state_update","active":true}');
+    this.send(this.ws, '{"type":"state_update","active":true}');
   }
   private async request(ws: WebSocket, msg: Incoming) {
     const reqId = msg.reqId;
@@ -208,12 +232,12 @@ export class DesktopRelay {
     let code: ErrorCode | undefined, data: ToolData | undefined, returnedBytes = 0;
     let controller: AbortController | undefined;
     try {
-      if (msg.method !== 'tools/call' || !positive(msg.timeoutMs) || !name || !object(params.arguments)) code = 'INVALID_PARAMS';
-      else if (this.inflight.size >= this.concurrency) code = 'CONCURRENCY_LIMIT_EXCEEDED';
+      if (this.inflight.size >= this.concurrency) code = 'CONCURRENCY_LIMIT_EXCEEDED';
+      else if (msg.method !== 'tools/call' || !positive(msg.timeoutMs) || !name || !object(params.arguments)) code = 'INVALID_PARAMS';
       else {
         controller = new AbortController();
         this.inflight.set(reqId, controller);
-        data = await this.run({ name, args, roots: [...this.roots], userData: this.opts.settings.userData,
+        data = await this.run({ name, args, roots: this.opts.settings.grants(), userData: this.opts.settings.userData,
           timeout: Math.min(10000, msg.timeoutMs) }, controller.signal);
       }
     } catch (e) { code = errorCode(e); }
@@ -234,7 +258,7 @@ export class DesktopRelay {
     catch { code = 'INTERNAL_ERROR'; }
     if (cancelled) return;
     if (code) frame = JSON.stringify({ type: 'rpc_res', reqId, ok: false, error: wireError(code) });
-    if (Buffer.byteLength(frame) <= this.frameLimit) ws.send(frame);
+    if (Buffer.byteLength(frame) <= this.frameLimit) this.send(ws, frame);
     else ws.close(1009, 'message_too_big');
   }
 }

@@ -19,6 +19,8 @@ export class DesktopAuth {
   private nextCheck = 0;
   private current?: string;
   private binding?: string;
+  private revokedBinding?: string;
+  private revokeStorageFailed = false;
   constructor(private origin: string, private file: string, private vault: Vault, private io: Transport,
     private status: (text: string) => void, private warn: (text: string) => void = console.warn,
     private changed: (state: 'available' | 'cleared' | 'revoked') => void = () => {}, private deviceName = hostname) {}
@@ -30,9 +32,18 @@ export class DesktopAuth {
     this.nextCheck = 0;
     this.current = undefined;
     this.changed('revoked');
-    if (this.binding) writeFileSync(this.file + '.revoked', this.binding, { mode: 0o600 });
-    rmSync(this.file, { force: true });
-    this.status('桌面登录已失效，请退出后重新登录');
+    this.revokedBinding = this.binding;
+    this.revokeStorageFailed = false;
+    try {
+      if (this.binding) writeFileSync(this.file + '.revoked', this.binding, { mode: 0o600 });
+    } catch { this.revokeStorageFailed = true; }
+    try { rmSync(this.file, { force: true }); }
+    catch { this.revokeStorageFailed = true; }
+    this.revokedStatus();
+  }
+
+  private revokedStatus() {
+    this.status(this.revokeStorageFailed ? '桌面登录已失效，本机撤销记录保存失败' : '桌面登录已失效，请退出后重新登录');
   }
 
   async refresh() {
@@ -60,7 +71,7 @@ export class DesktopAuth {
   clear() {
     ++this.epoch;
     this.nextCheck = 0;
-    this.current = this.binding = undefined;
+    this.current = this.binding = this.revokedBinding = undefined;
     this.changed('cleared');
     rmSync(this.file + '.revoked', { force: true });
     rmSync(this.file, { force: true });
@@ -102,6 +113,10 @@ export class DesktopAuth {
       this.changed('cleared');
     }
     this.binding = identityBinding;
+    if (this.revokedBinding === identityBinding) {
+      this.revokedStatus();
+      return;
+    }
     if (existsSync(revoked)) {
       const marker = readFileSync(revoked, 'utf8');
       // Older clients recorded just the cookie binding.

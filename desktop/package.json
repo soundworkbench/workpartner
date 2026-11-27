@@ -25,6 +25,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "koffi": "2.16.4",
     "ws": "^8.18.3"
   }
 }

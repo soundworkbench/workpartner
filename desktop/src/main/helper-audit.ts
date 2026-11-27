@@ -9,9 +9,14 @@ type Event = { reqId: string; tool: string; args: Record<string, unknown>; code?
   durationMs: number; returnedBytes: number; truncated: boolean };
 export function createAudit(userData: string, now = Date.now) {
   const dir = join(userData, 'logs');
-  let lastDay = '';
+  let lastDay = '', nextConcurrencyAudit = -Infinity;
   return (event: Event) => {
-    const ts = new Date(now()).toISOString(), day = ts.slice(0, 10);
+    const time = now();
+    if (event.code === 'CONCURRENCY_LIMIT_EXCEEDED') {
+      if (time < nextConcurrencyAudit) return;
+      nextConcurrencyAudit = time + 1000;
+    }
+    const ts = new Date(time).toISOString(), day = ts.slice(0, 10);
     mkdirSync(dir, { mode: 0o700, recursive: true });
     if (lastDay !== day) {
       const oldest = new Date(now() - 29 * 86400000).toISOString().slice(0,10);

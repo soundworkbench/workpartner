@@ -122,3 +122,37 @@ test('Cookie 未变时也会清除切号或失去会话的旧凭据', async t =>
   await auth.sync();
   assert.equal(existsSync(file), false);
 });
+
+test('both logout actions reach the gateway logout page when cookie cleanup fails', async () => {
+  const { logoutDesktop } = await import('../dist/main/logout.js');
+  const origin = 'https://example.org', preview = 'preview.example.org';
+  for (const all of [false, true]) {
+    for (const failingOrigin of [origin, 'https://' + preview]) {
+      const calls = [];
+      await logoutDesktop(all, {
+        revokeAll: async () => { calls.push('revoke'); },
+        clear: () => calls.push('clear')
+      }, () => calls.push('close'), async url => {
+        calls.push(url);
+        if (url === failingOrigin) throw new Error();
+      }, origin, preview, url => calls.push(url), assert.fail);
+      assert.deepEqual(calls, [...(all ? ['revoke'] : []), 'clear', 'close', origin, 'https://' + preview, origin + '/_wp/logout']);
+    }
+  }
+});
+
+test('revocation survives a marker write failure for the lifetime of the active login', async t => {
+  const { mkdirSync } = await import('node:fs');
+  const { file, state, client } = fixture(t);
+  const auth = client();
+  await auth.sync();
+  mkdirSync(file + '.revoked');
+  auth.markRevoked();
+  assert.equal(auth.token(), undefined);
+  assert.equal(existsSync(file), false);
+  const count = state.calls.length;
+  await auth.sync();
+  assert.deepEqual(state.calls.slice(count), ['/_wp/me']);
+  assert.equal(auth.token(), undefined);
+  assert.match(state.message, /失效.*保存失败/);
+});

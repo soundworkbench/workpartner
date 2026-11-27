@@ -125,8 +125,11 @@ test('actual local deadline, frame overflow, four in-flight calls, cancellation 
   const peer = gw.devices.get(other.settings.deviceId);
   const jobs = Array.from({ length: 4 }, () => gw.request(peer, 'desktop_search_files', { query: 'x' }, 15000, 300));
   await until(() => active.size === 4);
-  const denied = await gw.request(peer, 'desktop_list_dir', {}).result;
-  assert.equal(denied.error.code, 'CONCURRENCY_LIMIT_EXCEEDED');
+  const denied = await Promise.all(Array.from({ length: 12 }, () => gw.request(peer, 'desktop_list_dir', {}).result));
+  assert.ok(denied.every(response => response.error.code === 'CONCURRENCY_LIMIT_EXCEEDED'));
+  const logs = path.join(other.store, 'logs');
+  const audit = fs.readFileSync(path.join(logs, fs.readdirSync(logs)[0]), 'utf8').trim().split('\n');
+  assert.equal(audit.filter(line => JSON.parse(line).errorCode === 'CONCURRENCY_LIMIT_EXCEEDED').length, 1);
   await Promise.all(jobs.map(async j => assert.equal((await j.result).error.code, 'TOOL_TIMEOUT')));
   await until(() => active.size === 0);
   assert.ok(jobs.every(j => !gw.replies.includes(j.reqId)));
@@ -188,10 +191,16 @@ test('upgrade failures, expired token refresh budget and legacy gateway probing'
     a.relay.connect();
     await until(() => a.relay.state.includes(text));
     const count = gw.attempts.length;
-    a.relay.wake();
     a.relay.connect();
     await delay(20);
     assert.equal(gw.attempts.length, count);
+    gw.reject = 0;
+    a.relay.wake();
+    if (status === 403) {
+      await delay(20);
+      assert.equal(gw.attempts.length, count);
+    } else await a.online();
+    await a.relay.stop('app_quit');
   }
   const a = device(t, gw, {
     renew: () => {
@@ -325,4 +334,77 @@ test('a new connection with the same saved identity replaces the old one', async
   first.relay.connect();
   assert.equal(gw.attempts.length, 2);
   assert.equal(gw.call('desktop_list_devices').data.count, 1);
+});
+
+test('handshake resets back off normally both before and after negotiation', async t => {
+  const gw = await mockGateway(t), d = device(t, gw);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  gw.resetHandshake = true;
+  d.relay.connect();
+  async function normalRetry(recover) {
+    await until(() => d.relay.state.includes('等待重连'));
+    const count = gw.attempts.length;
+    t.mock.timers.tick(799);
+    assert.equal(gw.attempts.length, count);
+    recover();
+    t.mock.timers.tick(30000);
+    await d.online();
+    assert.equal(gw.attempts.length, count + 1);
+  }
+  await normalRetry(() => { gw.resetHandshake = false; });
+  for (const rejection of ['reset', 404, 426]) {
+    gw.resetHandshake = rejection === 'reset';
+    gw.reject = gw.resetHandshake ? 0 : rejection;
+    d.relay.wake();
+    await normalRetry(() => { gw.resetHandshake = false; gw.reject = 0; });
+  }
+});
+
+test('confirmed unsupported handshakes and device limits retry after ten minutes', async t => {
+  const gw = await mockGateway(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const [status, text] of [[404, '暂不支持'], [426, '升级'], [429, '上限']]) {
+    const d = device(t, gw);
+    gw.reject = status;
+    d.relay.connect();
+    await until(() => d.relay.state.includes(text));
+    const count = gw.attempts.length;
+    gw.reject = 0;
+    t.mock.timers.tick(599999);
+    await delay(15);
+    assert.equal(gw.attempts.length, count);
+    t.mock.timers.tick(1);
+    await d.online();
+    await d.relay.stop('app_quit');
+  }
+});
+
+test('a backlogged connection drops its next frame and reconnects on normal backoff', async t => {
+  const gw = await mockGateway(t), d = device(t, gw, { run: async () => ({ content: 'x'.repeat(2048) }) });
+  d.relay.connect();
+  await d.online();
+  const peer = gw.devices.get(d.settings.deviceId);
+  // Model the transport's queued bytes deterministically, independent of OS socket buffers.
+  Object.defineProperty(d.relay.ws, 'bufferedAmount', { value: 4 * 1048576 - 1024 });
+  const req = gw.request(peer, 'desktop_read_file', {});
+  assert.equal((await req.result).error.code, 'DEVICE_DISCONNECTED');
+  assert.ok(!gw.replies.includes(req.reqId));
+  await until(() => d.relay.state.includes('等待重连'));
+  await d.online();
+  assert.equal(gw.attempts.length, 2);
+});
+
+test('a revocation persistence exception leaves the relay stopped and updates status', async t => {
+  const gw = await mockGateway(t);
+  const d = device(t, gw, { auth: {
+    token: () => gw.token, refresh: async () => false, markRevoked: () => { throw new Error(); }
+  } });
+  d.relay.connect();
+  await d.online();
+  gw.devices.get(d.settings.deviceId).ws.close(4001, 'token_revoked');
+  await until(() => d.state.status.includes('保存失败'));
+  d.relay.wake();
+  d.relay.connect();
+  await delay(20);
+  assert.equal(gw.attempts.length, 1);
 });
