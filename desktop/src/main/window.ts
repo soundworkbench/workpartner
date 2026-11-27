@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { testLog, testMode } from './test-mode.js';
-import { linkGesture, navigationPolicy } from './links.js';
+import { linkGesture, logTarget, navigationPolicy } from './links.js';
 import { desktopLog } from './protocol.js';
 
 export type Brand = { productName: string; displayName: string; appId: string; protocol: string; defaultGatewayUrl: string; previewHost: string; loginOrigins: string[] };
@@ -117,11 +117,7 @@ export function createWindow(brand: Brand, onGateway: () => void) {
       if (preview && (target === 'preview' || url.startsWith(origin + '/_wp/preview/authorize?'))) return;
       event.preventDefault();
       // Query strings can carry login codes, so only the origin and path are logged.
-      if (target !== 'preview') {
-        // A safety interstitial names its destination; only that origin is logged.
-        const next = URL.parse(URL.parse(url)?.searchParams.get('target') ?? '')?.origin;
-        desktopLog(app.getPath('userData'), '已拦截主窗口导航 ' + target + ' ' + url.split(/[?#]/)[0] + (next ? ' → ' + next : ''));
-      }
+      if (target !== 'preview') desktopLog(app.getPath('userData'), '已拦截主窗口导航 ' + target + ' ' + logTarget(url));
       if (!preview && target === 'preview') {
         if (clicked) openPreview(url);
         else console.warn('[desktop] 已拦截没有有效点击凭证的预览导航');

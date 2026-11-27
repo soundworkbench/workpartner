@@ -58,3 +58,13 @@ export function linkGesture(now = () => performance.now()) {
     }
   };
 }
+
+// Logs keep only origins and paths: query strings carry login codes and userinfo carries credentials.
+export function logTarget(raw: string) {
+  const url = URL.parse(raw);
+  if (!url) return '(无法解析的地址)';
+  const where = url.origin === 'null' ? url.protocol : url.origin + url.pathname;
+  // A safety interstitial names its destination; only that origin is logged.
+  const next = URL.parse(url.searchParams.get('target') ?? '')?.origin;
+  return where + (next && next !== 'null' ? ' → ' + next : '');
+}

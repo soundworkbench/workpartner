@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { deepTarget, linkKind, navigationPolicy } from '../dist/main/links.js';
+import { deepTarget, linkKind, logTarget, navigationPolicy } from '../dist/main/links.js';
 
 const origin = 'https://desk.example.org';
 const preview = 'preview.example.org';
@@ -104,4 +104,12 @@ test('发布构建不会从运行环境启用测试模式', async () => {
     "import { testMode } from './dist/main/test-mode.js'; process.exitCode = Number(testMode)"],
     { cwd: new URL('../', import.meta.url), env: { ...process.env, WP_DESKTOP_TEST: '1' } });
   assert.equal(child.status, 0);
+});
+
+test('导航日志不记录凭据、查询串和片段', () => {
+  assert.equal(logTarget('https://user:secret@evil.example.org/p?code=abc#frag'), 'https://evil.example.org/p');
+  assert.equal(logTarget('https://security.feishu.cn/link/safety?target=https%3A%2F%2Fa:b@x.example.org%2Fq%3Fcode%3D1'),
+    'https://security.feishu.cn/link/safety → https://x.example.org');
+  assert.equal(logTarget('javascript:alert(document.cookie)'), 'javascript:');
+  assert.equal(logTarget('not a url'), '(无法解析的地址)');
 });
