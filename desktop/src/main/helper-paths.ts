@@ -114,9 +114,16 @@ export class PathPolicy {
       const fd = handle.value;
       const st = fstatSync(fd, { bigint: true });
       if (!same(expected, st)) fail('PATH_NOT_ALLOWED');
-      // Darwin fdescfs cannot resolve children of /dev/fd/N. Its volume/object
-      // alias identifies the held inode. Unsupported filesystems fail closed.
-      return process.platform === 'darwin' ? '/.vol/' + st.dev + '/' + st.ino : '/proc/self/fd/' + fd;
+      if (process.platform !== 'darwin') return '/proc/self/fd/' + fd;
+      // Known limitation: Darwin /.vol aliases are path lookups. A same-user
+      // process able to modify the grant can race a lookup between checks.
+      // Such a process already has its own access to user-readable files.
+      const alias = '/.vol/' + st.dev + '/' + st.ino;
+      let aliasStat: BigIntStats;
+      try { aliasStat = lstatSync(alias, { bigint: true }); }
+      catch { fail('PATH_NOT_ALLOWED'); }
+      if (!same(st, aliasStat)) fail('PATH_NOT_ALLOWED');
+      return alias;
     }
     let links = 0;
     function verifyNames() {

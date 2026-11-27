@@ -446,3 +446,37 @@ test('running out of handle slots returns a limit error and releases partial acq
     assert.deepEqual([...handleSlots.slice(0, 2)], [0, 0]);
   } finally { handleSlots.fill(0); }
 });
+
+test('macOS rejects an unavailable or mismatched volume alias before child I/O', { skip: process.platform !== 'darwin' }, async t => {
+  const { syncBuiltinESMExports } = await import('node:module');
+  const { root, config, run } = fixture(t);
+  await config.addDirectory();
+  const file = path.join(root, 'notes');
+  fs.writeFileSync(file, 'sample');
+  for (const failure of ['unsupported', 'different inode']) {
+    const lstat = fs.lstatSync, open = fs.openSync;
+    let probes = 0, fileOpens = 0;
+    t.mock.method(fs, 'lstatSync', (name, options) => {
+      if (!name.startsWith('/.vol/')) return lstat(name, options);
+      probes++;
+      if (failure === 'unsupported') throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' });
+      const stat = lstat(name, options);
+      stat.ino += 1n;
+      return stat;
+    });
+    t.mock.method(fs, 'openSync', (name, ...args) => {
+      if (name !== root) fileOpens++;
+      return open(name, ...args);
+    });
+    const enumerate = t.mock.method(fs, 'opendirSync');
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => run('read_file', { path: file }), code('PATH_NOT_ALLOWED'));
+      assert.throws(() => run('list_dir', { path: root }), code('PATH_NOT_ALLOWED'));
+      assert.throws(() => run('search_files', { path: root, query: '*' }), code('PATH_NOT_ALLOWED'));
+      assert.equal(probes, 3);
+      assert.equal(fileOpens, 0);
+      assert.equal(enumerate.mock.callCount(), 0);
+    } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  }
+});
