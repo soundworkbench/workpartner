@@ -12,9 +12,12 @@
     "https://login.feishu.cn",
     "https://accounts.doubao.com",
     "https://www.feishu.cn",
+    "https://security.feishu.cn",
     "https://accounts.larksuite.com",
     "https://open.larksuite.com",
     "https://passport.larksuite.com",
-    "https://login.larksuite.com"
+    "https://login.larksuite.com",
+    "https://www.larksuite.com",
+    "https://security.larksuite.com"
   ]
 }
