@@ -32,7 +32,8 @@ export function aionuiEtag(imageId, req) {
 /** If-None-Match 是否命中这个 ETag（支持逗号分隔的多个值和 W/ 前缀）。 */
 export function etagMatches(req, etag) {
   const header = req.headers["if-none-match"];
-  return !!etag && !!header && String(header).split(",").some((v) => v.trim().replace(/^W\//, "") === etag);
+  const normalized = value => String(value).trim().replace(/^W\//, "");
+  return !!etag && !!header && String(header).split(",").some((v) => normalized(v) === normalized(etag));
 }
 
 /**
@@ -41,12 +42,17 @@ export function etagMatches(req, etag) {
  * 换品牌时原地改了其中几十个文件，文件名里的 hash 不变、内容随版本变。
  * AionUi 不认 If-Modified-Since、也不发 ETag，所以 200 的静态文件由网关补 ETag（etag 参数），之后的确认由网关用 304 直接答复。
  */
-export function aionuiResponseHeaders(upstream, etag, status = 200) {
+export function aionuiResponseHeaders(upstream, etag, status = 200, pathname = '') {
   const headers = { ...upstream };
   delete headers["set-cookie"];
   if (!headers["cache-control"]) headers["cache-control"] = "no-cache";
+  if (status === 200 && immutableAsset(pathname)) headers["cache-control"] = "public, max-age=31536000, immutable";
   if (etag && status === 200 && !headers.etag) headers.etag = etag;
   return headers;
+}
+
+export function immutableAsset(pathname) {
+  return /^\/assets\/[^/]+-[A-Za-z0-9_-]{8,}\.imm\.[A-Za-z0-9]+$/.test(pathname);
 }
 
 /** WebSocket 升级请求的首部文本，规则与普通请求相同。 */

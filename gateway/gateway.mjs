@@ -12,7 +12,9 @@ import { createRuntime, createLegacyRuntime } from "./runtime/index.mjs";
 import { createMigration, previewSessionUser } from "./migration.mjs";
 import { tokenUser } from "./market-auth.mjs";
 import { authorizeUrl, identify, provision, provisioning, readUsers, slugFor } from "./onboard.mjs";
-import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, upgradeHead } from "./aionui.mjs";
+import { createAionui, aionuiHeaders, aionuiResponseHeaders, aionuiEtag, etagMatches, immutableAsset, upgradeHead } from "./aionui.mjs";
+import { clientResponse } from './client-response.mjs';
+import { compressible, compressor, encodedEtag, encodingFor, mergeVary } from './compress.mjs';
 import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
 import { createChatTitles } from "./title.mjs";
 import { isNavigation, notReady, updatingText } from "./starting.mjs";
@@ -151,7 +153,7 @@ const desktopAuth = createDesktopAuth({ organization, organizationData, users, s
   keyFor: modelKeyFor, keyFile: modelKeyFile, sessionKey: SESSION_KEY });
 
 feishuBot = createFeishuBot({ organization, organizationData,
-  authenticate: req => userFor(req).user, runtime,
+  authenticate: req => userFor(req).user, runtime, cacheEnabled: true,
 });
 
 const feishuModel = createFeishuModel({ organization, organizationData,
@@ -204,8 +206,11 @@ async function resolve(req) {
 function proxy(req, res, r, body, retried) {
   // 静态文件：浏览器带的 If-None-Match 与按镜像 ID + 路径算出的 ETag 相同，网关直接答 304，不转发。
   const etag = r.etag?.(req);
-  if (etagMatches(req, etag)) {
-    res.writeHead(304, { etag, "cache-control": "no-cache" });
+  const requestedEncoding = encodingFor(req);
+  const staticCompression = requestedEncoding && !!etag;
+  const requestEtag = staticCompression ? encodedEtag(etag, requestedEncoding) : etag;
+  if (etagMatches(req, requestEtag)) {
+    res.writeHead(304, { etag: requestEtag, "cache-control": immutableAsset(req.url.split('?')[0]) ? "public, max-age=31536000, immutable" : "no-cache" });
     return res.end();
   }
   const titleCreate = r.backend === "aionui" && req.method === "POST" && /^\/api\/conversations(?:\?|$)/.test(req.url);
@@ -218,13 +223,23 @@ function proxy(req, res, r, body, retried) {
       r.cookie = await r.relogin();
       return proxy(req, res, r, body, true);
     }
-    res.writeHead(ur.statusCode, r.responseHeaders(ur.headers, etag, ur.statusCode));
+    const responseHeaders = r.responseHeaders(ur.headers, etag, ur.statusCode, req.url.split('?')[0]);
+    const useCompression = compressible(responseHeaders, ur.statusCode, req, requestedEncoding);
+    const responseEtag = encodedEtag(responseHeaders.etag, useCompression ? requestedEncoding : null);
+    if (responseEtag) responseHeaders.etag = responseEtag;
+    if (useCompression) {
+      delete responseHeaders['content-length'];
+      responseHeaders['content-encoding'] = requestedEncoding;
+      responseHeaders.vary = mergeVary(responseHeaders.vary, 'accept-encoding');
+    }
+    res.writeHead(ur.statusCode, responseHeaders);
     if (titleCreate && ur.statusCode >= 200 && ur.statusCode < 300) {
       const parts = []; let size = 0;
       ur.on("data", chunk => { size += chunk.length; if (size <= 65536) parts.push(chunk); });
       ur.on("end", () => { if (size <= 65536) chatTitles.created(r, Buffer.concat(parts).toString()); });
     }
-    ur.pipe(res);
+    if (useCompression) ur.pipe(compressor(requestedEncoding)).pipe(res);
+    else ur.pipe(res);
   });
   up.on("error", () => { r.lost(); if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。"); });
   up.end(body);
@@ -340,10 +355,10 @@ const server = http.createServer(async (req, res) => {
     if ((!user || migration.owns(user)) && await legacy?.handle(req, res, url)) return;
     if (await preview?.handle(req, res, url)) return;
     if (!preview && url.pathname === "/_wp/preview/client.js") {
-      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
-      return res.end("// Workspace preview is disabled." + (userFor(req).user ? guidHideGuardClient() : '') + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || "")
+      const body = "// Workspace preview is disabled." + (userFor(req).user ? guidHideGuardClient() : '') + (feedback?.clientFor(userFor(req).user) || "") + (myKey?.clientFor(userFor(req).user) || "")
         + (voice?.clientFor(userFor(req).user) || "")
-        + (feishuBot?.clientFor(userFor(req).user) || ""));
+        + (feishuBot?.clientFor(userFor(req).user) || "");
+      return clientResponse(req, res, body, { "content-type": "text/javascript" });
     }
     if (organization.features.feishuOnboarding && await feishuOnboarding(req, res, url)) return;
     if (url.pathname === "/_wp/feishu") return redirect(res, "/_wp/feishu/");
