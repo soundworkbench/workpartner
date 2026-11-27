@@ -148,7 +148,7 @@ test('POST start failure still invalidates, and late status reads cannot repopul
   f.state = 'needs_identity'; assert.equal((await f.get()).data.status, 'needs_identity');
 });
 
-for (const [policy, expected] of [[undefined, 'public, max-age=31536000, immutable'], ['public, max-age=60', 'public, max-age=31536000, immutable'], ['immutable', 'public, max-age=31536000, immutable'], ['private', 'private'], ['public, no-store', 'public, no-store'], ['no-cache', 'no-cache'], ['public, no-transform', 'public, no-transform']]) {
+for (const [policy, expected] of [[undefined, 'private, max-age=31536000, immutable'], ['public, max-age=60', 'private, max-age=31536000, immutable'], ['immutable', 'private, max-age=31536000, immutable'], ['private', 'private'], ['public, no-store', 'public, no-store'], ['no-cache', 'no-cache'], ['public, no-transform', 'public, no-transform']]) {
   test(`immutable respects upstream policy ${policy}`, () => {
     const headers = policy ? { 'cache-control': policy } : {};
     assert.equal(aionuiResponseHeaders(headers, '"x"', 200, '/assets/app-AbCd1234%2Eimm.js?q=1')['cache-control'], expected);
@@ -223,7 +223,7 @@ test('real gateway response chain handles compression, caching and broken upstre
     const first = await request(undefined, { 'accept-encoding': encoding });
     assert.equal(first.status, 200); assert.equal(first.headers['content-encoding'], encoding);
     assert.deepEqual(decode(first.body), raw); assert.equal(first.headers['content-length'], undefined);
-    assert.equal(first.headers['cache-control'], 'public, max-age=31536000, immutable');
+    assert.equal(first.headers['cache-control'], 'private, max-age=31536000, immutable');
     const second = await request(undefined, { 'accept-encoding': encoding, 'if-none-match': first.headers.etag });
     assert.equal(second.status, 304); assert.equal(second.body.length, 0); assert.match(second.headers.vary, /accept-encoding/);
     assert.equal(second.headers['cache-control'], first.headers['cache-control']);

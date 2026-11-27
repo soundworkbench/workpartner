@@ -50,7 +50,7 @@ export function aionuiResponseHeaders(upstream, etag, status = 200, pathname = '
   if (['GET', 'HEAD'].includes(method) && status === 200 && immutableAsset(pathname)
     && !/(?:^|,)\s*(?:private|no-store|no-transform)(?:\s*(?:=|,|$))/i.test(policy)
     && (!policy || /(?:^|,)\s*(?:public|immutable)\s*(?:,|$)/i.test(policy))) {
-    headers['cache-control'] = 'public, max-age=31536000, immutable';
+    headers['cache-control'] = 'private, max-age=31536000, immutable';
   }
   if (etag && status === 200 && !headers.etag) headers.etag = etag;
   return headers;

@@ -6,7 +6,6 @@ import { createGatewayServices } from './services.mjs';
 import { resolveOrganization, organizationData, nextModelConfig } from "./organization/resolve.mjs";
 import http from "node:http";
 import net from "node:net";
-import { pipeline } from "node:stream";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { createRuntime, createLegacyRuntime } from "./runtime/index.mjs";
@@ -20,6 +19,7 @@ import { createFeishuOnboarding } from "./feishu-onboarding.mjs";
 import { createChatTitles } from "./title.mjs";
 import { isNavigation, notReady, updatingText } from "./starting.mjs";
 import { guidHideGuardClient } from './guid-hide-guard-client.mjs';
+import { proxyPipeline } from './proxy-pipeline.mjs';
 
 import { createSharedSkillStore, createSharedSkillsHandler } from './market-shared.mjs';
 import { createMarketModelReview } from './market-model-review.mjs';
@@ -212,7 +212,6 @@ function proxy(req, res, r, body, retried) {
   if (titleCreate) headers["accept-encoding"] = "identity";
   const up = http.request({ ...r.up.address, path: req.url, method: req.method,
     headers }, async (ur) => {
-    ur.on('error', () => r.lost());
     if (ur.statusCode === 401 && !retried) {
       ur.resume();
       r.cookie = await r.relogin();
@@ -241,9 +240,7 @@ function proxy(req, res, r, body, retried) {
       ur.on("data", chunk => { size += chunk.length; if (size <= 65536) parts.push(chunk); });
       ur.on("end", () => { if (size <= 65536) chatTitles.created(r, Buffer.concat(parts).toString()); });
     }
-    const finished = error => { if (error) { r.lost(); res.destroy(error); } };
-    if (useCompression) pipeline(ur, compressor(requestedEncoding), res, finished);
-    else pipeline(ur, res, finished);
+    proxyPipeline(ur, res, { transform: useCompression ? compressor(requestedEncoding) : null, lost: r.lost });
   });
   up.on("error", () => { r.lost(); if (!res.headersSent) preparing(req, res, "正在准备你的工作伙伴", "马上就好，页面会自动刷新。"); else res.destroy(); });
   up.end(body);

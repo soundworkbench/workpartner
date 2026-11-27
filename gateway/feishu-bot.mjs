@@ -101,6 +101,14 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
       count: supported ? data.agents.filter(a => a?.kind === 'sub').length : 0,
       limit: Number.isInteger(data.limit) && data.limit >= 0 ? Math.min(5, data.limit) : 5 };
   };
+  // 缓存只保留后续展示、排序和容量判断所需字段；权限名单每次请求仍从最新配置读取。
+  const pick = (value, fields) => object(value)
+    ? Object.fromEntries(fields.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) : value;
+  const cacheInfo = data => ({
+    bots: data.bots.map(bot => pick(bot, ['appId', 'agentId', 'name', 'avatar', 'online', 'activate', 'lastEventAt', 'error'])),
+    ...(Array.isArray(data.agents) ? { agents: data.agents.map(agent => pick(agent, ['id', 'name', 'kind', 'setup', 'appId', 'createdAt'])) } : {}),
+    ...(Object.hasOwn(data, 'limit') ? { limit: data.limit } : {}),
+  });
   function info(user, refresh = false) {
     const explicitRefresh = refresh;
     if (!cacheEnabled) refresh = true;
@@ -118,13 +126,13 @@ export function createFeishuBot({ organization, organizationData, authenticate, 
       const task = botCommand(user, 'info', ...(refresh && (cacheEnabled || explicitRefresh) ? ['--refresh'] : [])).then(data => {
         if (!Array.isArray(data.bots)) throw fail(503);
         const supported = Array.isArray(data.agents);
-        const result = { data, at: now() };
+        const result = { data: cacheInfo(data), at: now() };
         if ((versions.get(user.slug) || 0) === version) {
           cache.set(user.slug, result);
           while (cache.size > 500) cache.delete(cache.keys().next().value);
         }
         subAgentSupport.set(user.slug, supported);
-        return data;
+        return result.data;
       });
       pending.set(user.slug, task);
       task.finally(() => { if (pending.get(user.slug) === task) pending.delete(user.slug); }).catch(() => {});
