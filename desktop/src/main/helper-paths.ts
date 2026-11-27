@@ -1,9 +1,12 @@
-import { lstatSync, readlinkSync, realpathSync, type BigIntStats } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, lstatSync, readlinkSync, realpathSync, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fail } from './helper-errors.js';
 import { checkWindowsAttributes, pinWindowsPath } from './helper-windows.js';
 
+export type CheckedPath = {
+  path: string; name: string; stat: BigIntStats; sourceStat: BigIntStats; verify(opened?: BigIntStats): void;
+};
 export type RootGrant = { path: string; dev: string; ino: string };
 function inspect(path: string) {
   const stat = lstatSync(path, { bigint: true });
@@ -12,7 +15,7 @@ function inspect(path: string) {
   return stat;
 }
 function same(left: BigIntStats, right: BigIntStats) {
-  return left.dev === right.dev && left.ino === right.ino && left.isSymbolicLink() === right.isSymbolicLink();
+  return left.dev === right.dev && left.ino === right.ino && (left.mode & BigInt(constants.S_IFMT)) === (right.mode & BigInt(constants.S_IFMT));
 }
 
 const windows = process.platform === 'win32';
@@ -84,49 +87,75 @@ export class PathPolicy {
     } finally { unpin?.(); }
   }
 
-  // Capture every component, including a permitted POSIX link and its destination.
-  resolve(input: unknown, allowLinks = true) {
+  // All I/O on a resolved name must finish inside visit, while the directory
+  // descriptors are live. A descriptor pins an object, not its location: POSIX
+  // still permits renames and in-place writes during an operation. Rechecking
+  // the chain detects observed moves, but does not provide a filesystem snapshot.
+  withResolved<T>(input: unknown, allowLinks: boolean, visit: (target: CheckedPath) => T): T {
     const target = absolute(input);
     const observed = new Map<string, BigIntStats>();
-    const observe = (path: string) => {
-      const st = inspect(path);
-      const previous = observed.get(path);
+    const held: number[] = [];
+    const observe = (name: string) => {
+      const st = inspect(name);
+      const previous = observed.get(name);
       if (previous && !same(previous, st)) fail('PATH_NOT_ALLOWED');
-      observed.set(path, st);
+      observed.set(name, st);
       return st;
     };
+    function pinDirectory(name: string, expected: BigIntStats) {
+      if (!expected.isDirectory()) fail('NOT_A_DIRECTORY');
+      if (windows) return name; // Windows operations pin names with non-delete-sharing handles.
+      const fd = openSync(name, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      held.push(fd);
+      const st = fstatSync(fd, { bigint: true });
+      if (!same(expected, st)) fail('PATH_NOT_ALLOWED');
+      // Darwin fdescfs cannot resolve children of /dev/fd/N. Its volume/object
+      // alias identifies the held inode. Unsupported filesystems fail closed.
+      return process.platform === 'darwin' ? '/.vol/' + st.dev + '/' + st.ino : '/proc/self/fd/' + fd;
+    }
     let links = 0;
-    const walk = (candidate: string): string => {
+    function verifyNames() {
+      for (const [name, before] of observed) {
+        if (!same(before, inspect(name))) fail('PATH_NOT_ALLOWED');
+      }
+    }
+    const walk = (candidate: string): Omit<CheckedPath, 'verify'> => {
       this.sensitive(candidate);
       const grant = this.grants.find(g => contains(g.path, candidate));
       if (!grant) fail('PATH_NOT_ALLOWED');
       let current = grant.path;
-      const root = observe(current);
-      if (!root.isDirectory() || String(root.dev) !== grant.dev || String(root.ino) !== grant.ino ||
+      let stat = observe(current);
+      if (!stat.isDirectory() || String(stat.dev) !== grant.dev || String(stat.ino) !== grant.ino ||
           path.relative(current, real(current)) !== '') fail('PATH_NOT_ALLOWED');
+      let name = pinDirectory(current, stat);
       for (const part of path.relative(current, candidate).split(path.sep).filter(Boolean)) {
         current = path.join(current, part);
+        name = path.join(name, part);
         this.sensitive(current);
-        if (observe(current).isSymbolicLink()) {
+        stat = observe(name);
+        if (stat.isSymbolicLink()) {
           if (!allowLinks || path.relative(current, candidate) !== '' || ++links > 40) fail('PATH_NOT_ALLOWED');
-          current = walk(absolute(path.resolve(path.dirname(current), readlinkSync(current))));
+          const dest = absolute(path.resolve(path.dirname(current), readlinkSync(name)));
+          return { ...walk(dest), sourceStat: stat };
         }
+        if (stat.isDirectory()) name = pinDirectory(name, stat);
+        else if (path.relative(current, candidate) !== '') fail('NOT_A_DIRECTORY');
       }
-      return current;
+      return { path: current, name, stat, sourceStat: stat };
     };
-    const resolved = walk(target);
-    const stat = observed.get(resolved)!;
-    // Node has no openat. Sampling names cannot rule out an ancestor moving away
-    // and back between checks. Bind I/O to the verified object and recheck the
-    // original chain before using its data.
-    const verify = (opened?: BigIntStats) => {
-      if (opened && !same(opened, stat)) fail('PATH_NOT_ALLOWED');
-      for (const [name, before] of observed) {
-        if (!same(before, inspect(name))) fail('PATH_NOT_ALLOWED');
-      }
-      if (path.relative(resolved, real(target)) !== '') fail('PATH_NOT_ALLOWED');
-    };
-    verify();
-    return { path: resolved, stat, sourceStat: observed.get(target) ?? stat, verify };
+    try {
+      const resolved = walk(target);
+      const verify = (opened?: BigIntStats) => {
+        if (opened && !same(opened, resolved.stat)) fail('PATH_NOT_ALLOWED');
+        verifyNames();
+        if (path.relative(resolved.path, real(target)) !== '') fail('PATH_NOT_ALLOWED');
+      };
+      verify();
+      const result = visit({ ...resolved, verify });
+      verify();
+      return result;
+    } finally {
+      for (const fd of held.reverse()) closeSync(fd);
+    }
   }
 }

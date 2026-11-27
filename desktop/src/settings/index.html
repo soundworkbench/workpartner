@@ -45,7 +45,7 @@
     <details class="card protection" open>
       <summary>哪些文件永远不会被读取</summary>
       <div class="rules">
-        <p><strong>环境变量与密钥</strong><br><code>.env</code>、<code>.env.*</code>、<code>*.pem</code>、<code>*.key</code> 等密钥文件。</p>
+        <p><strong>环境变量与密钥</strong><br>任一路径段以 <code>.env</code> 开头的都拦截。也会拦截 <code>*.pem</code>、<code>*.key</code> 等密钥文件。</p>
         <p><strong>账号凭据与配置</strong><br><code>.ssh</code>、<code>.aws</code>、<code>.gnupg</code>、<code>.kube</code>、<code>.npmrc</code> 等敏感路径。</p>
         <p><strong>系统与浏览器数据</strong><br>受保护的系统目录、钥匙串、浏览器配置和桌面客户端自身的数据目录。</p>
         <p><strong>文件和链接限制</strong><br>仅读取 20 MiB 以内的 UTF-8 文本；指向授权目录外的符号链接也会被拦截。</p>

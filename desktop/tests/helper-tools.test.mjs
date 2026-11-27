@@ -273,12 +273,12 @@ test('open file and directory operations recheck ancestor identities before cons
     const method = tool === 'read_file' ? 'openSync' : 'opendirSync';
     t.mock.method(fs, method, (...args) => {
       const handle = (method === 'openSync' ? openFile : openDir)(...args);
-      opened = true;
+      if (method === 'opendirSync' || path.basename(args[0]) === 'notes') opened = true;
       return handle;
     });
     t.mock.method(fs, 'lstatSync', (name, options) => {
       const stat = lstat(name, options);
-      if (opened && name === parent) stat.ino += 1n;
+      if (opened && path.basename(name) === 'parent') stat.ino += 1n;
       return stat;
     });
     syncBuiltinESMExports();
@@ -286,6 +286,43 @@ test('open file and directory operations recheck ancestor identities before cons
       assert.throws(() => run(tool, args), code('PATH_NOT_ALLOWED'));
       assert.ok(opened);
     } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  }
+});
+
+test('POSIX file reads and enumeration stay on the held directory during replacement', { skip: process.platform === 'win32' }, async t => {
+  const { syncBuiltinESMExports } = await import('node:module');
+  const { root, outside, config, run } = fixture(t);
+  await config.addDirectory();
+  const parent = path.join(root, 'parent'), held = path.join(root, 'held');
+  fs.mkdirSync(parent);
+  fs.writeFileSync(path.join(parent, 'notes'), 'inside');
+  fs.writeFileSync(path.join(outside, 'notes'), 'outside');
+  for (const [tool, method, args] of [
+    ['read_file', 'openSync', { path: path.join(parent, 'notes') }],
+    ['list_dir', 'opendirSync', { path: parent }]
+  ]) {
+    const original = fs[method];
+    const expected = fs.statSync(args.path, { bigint: true });
+    let replaced = false;
+    t.mock.method(fs, method, (name, ...rest) => {
+      if (method === 'openSync' && path.basename(name) !== 'notes') return original(name, ...rest);
+      // Interleave a directory replacement precisely between verification and I/O.
+      fs.renameSync(parent, held);
+      fs.symlinkSync(outside, parent, 'dir');
+      replaced = true;
+      const actual = fs.statSync(name, { bigint: true });
+      assert.deepEqual([actual.dev, actual.ino], [expected.dev, expected.ino]);
+      return original(name, ...rest);
+    });
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => run(tool, args), code('PATH_NOT_ALLOWED'));
+      assert.ok(replaced);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      if (replaced) { fs.unlinkSync(parent); fs.renameSync(held, parent); }
+    }
   }
 });
 
