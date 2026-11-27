@@ -327,13 +327,16 @@ exec ''' + shlex.quote(timeout) + ' --foreground --kill-after=0.2s 1s "$@"\n')
     def test_startup_continues_after_published_link_failure(self):
         self.exercise_startup(('aionui', 'bridge', 'relay'), 'bridge', published=True)
 
+    def test_mcp_failure_after_init_hooks_does_not_block_startup(self):
+        self.exercise_startup(('aionui', 'bridge', 'relay'), 'aionui', mcp_status=7)
+
     def test_entrypoint_term_stops_bridge(self):
         self.exercise_startup(('aionui', 'bridge', 'relay'), 'TERM')
 
     def test_bridge_supervisor_exit_is_restarted(self):
         self.exercise_startup(('aionui', 'bridge', 'relay'), 'supervisor')
 
-    def exercise_startup(self, services, exiting, published=False):
+    def exercise_startup(self, services, exiting, published=False, mcp_status=0):
         with tempfile.TemporaryDirectory(dir=self.root) as temporary:
             root = Path(temporary)
             data, app, ui, state = (root / name for name in ('data', 'app', 'ui', 'state'))
@@ -357,6 +360,7 @@ touch "$STATE/hooks"
 ''')
             service = '''#!/bin/bash
 [ -f "$STATE/hooks" ] || exit 92
+[ -f "$STATE/mcp-after-hooks" ] || exit 94
 touch "$STATE/$SERVICE-ready"
 echo $$ >> "$STATE/$SERVICE-pids"
 while [ ! -e "$STATE/$SERVICE-exit" ]; do sleep 0.02; done
@@ -364,12 +368,24 @@ exit 23
 '''
             self.write(ui / 'aionui-web', service.replace('$SERVICE', 'aionui'), 0o700)
             self.write(app / 'bin/cc-connect', service.replace('$SERVICE', 'bridge'), 0o700)
-            self.executable('node', '''if [[ "$1" == */resolve.mjs ]]; then
+            self.executable('node', '''case "$1" in
+*/organization/resolve.mjs)
   printf 'export PARTNER_MODEL_KEY_FILE=%q\\n' "$FIXTURE_DATA/model-key"
   echo 'export PARTNER_MODEL_KEY_ENV=ANTHROPIC_API_KEY ANTHROPIC_MODEL=fixture PARTNER_DEFAULT_EFFORT=medium PARTNER_CODEX_MODEL=fixture PARTNER_GATEWAY_ORIGIN=http://gateway.example.test'
-else
+  ;;
+*/bin/wp-mcp-start.mjs)
+  [ -f "$STATE/hooks" ] || exit 92
+  touch "$STATE/mcp-after-hooks"
+  exit "$MCP_STATUS"
+  ;;
+*/preview/workspace.mjs)
   exec bash "$RELAY"
-fi
+  ;;
+*)
+  touch "$STATE/unexpected-node-call"
+  exit 95
+  ;;
+esac
 ''')
             relay = self.write(root / 'relay', service.replace('$SERVICE', 'relay'), 0o700)
             self.write(app / 'bin/wp-feishu-bot.py', (ROOT / 'bin/wp-feishu-bot.py').read_text())
@@ -381,6 +397,7 @@ fi
             source = source.replace('/tmp/aionui', str(root / 'uploads')).replace('/data', str(data))
             script = self.write(root / 'start.sh', source)
             env = dict(self.env, STATE=str(state), FIXTURE_DATA=str(data), RELAY=str(relay),
+                       MCP_STATUS=str(mcp_status),
                        WP_CC_CONNECT_DIR=str(data / ".cc-connect"),
                        WP_CC_CONNECT_BIN=str(app / 'bin/cc-connect'),
                        PATH=str(app / "bin") + os.pathsep + self.env["PATH"])
@@ -395,6 +412,10 @@ fi
                                            stderr=subprocess.STDOUT, start_new_session=True)
                 try:
                     self.wait_for(lambda: all((state / (name + '-ready')).exists() for name in services), process)
+                    self.assertTrue((state / 'mcp-after-hooks').exists(), log.read_text())
+                    self.assertFalse((state / 'unexpected-node-call').exists(), log.read_text())
+                    if mcp_status:
+                        self.assertIn('Managed MCP setup unavailable; startup continues.', log.read_text())
                     self.wait_for(lambda: (state / 'auxiliary-exited').exists(), process)
                     time.sleep(0.1)
                     self.assertIsNone(process.poll(), log.read_text())
