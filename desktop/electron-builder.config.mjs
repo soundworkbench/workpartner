@@ -8,6 +8,7 @@ export default {
   appId: brand.appId, productName: brand.productName, extraMetadata: { productName: brand.productName },
   directories: { output: process.env.WP_DESKTOP_OUTPUT || 'release' },
   files: ['THIRD-PARTY-NOTICES.txt', 'dist/**', 'brand/default/brand.json', 'brand/default/resources/tray-windows.ico'],
+  asarUnpack: ['dist*/main/{helper-worker,helper-tools,helper-paths,helper-errors}.js'],
   protocols: [{ name: brand.displayName, schemes: [brand.protocol] }],
   toolsets: { nsis: '1.2.1' },
   npmRebuild: false, electronLanguages: ['en-US', 'zh-CN'],

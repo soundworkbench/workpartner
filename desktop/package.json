@@ -18,9 +18,13 @@
     "package": "npm run build && electron-builder --config electron-builder.config.mjs"
   },
   "devDependencies": {
+    "@types/node": "22.19.0",
+    "@types/ws": "^8.18.1",
     "electron": "45.5.0",
     "electron-builder": "26.18.0",
-    "typescript": "5.9.3",
-    "@types/node": "22.19.0"
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   }
 }

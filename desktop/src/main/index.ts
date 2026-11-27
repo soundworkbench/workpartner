@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Notification, powerMonitor, safeStorage, session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, Notification, powerMonitor, safeStorage, session } from 'electron';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { testMode, testLog } from './test-mode.js';
@@ -7,6 +7,8 @@ import { createWindow, type Brand } from './window.js';
 import { registerProtocol } from './protocol.js';
 import { deepTarget } from './links.js';
 import { createTray } from './tray.js';
+import { HelperSettings } from './helper-settings.js';
+import { DesktopRelay } from './relay.js';
 import { DesktopAuth } from './auth.js';
 import { authorize, permissions } from './session.js';
 
@@ -49,7 +51,9 @@ function start() {
   if (!testMode && app.isPackaged) {
     registerProtocol(brand.protocol, app.getPath('userData'), protocol => app.setAsDefaultProtocolClient(protocol));
   }
-  const { win, navigate, probe } = createWindow(brand, () => void auth.sync());
+  let loggingOut = false;
+  const sync = () => { if (!loggingOut && !quitting) void auth.sync(); };
+  const { win, navigate, probe } = createWindow(brand, sync);
   open = url => {
     if (!testMode) {
       if (win.isMinimized()) win.restore();
@@ -66,18 +70,46 @@ function start() {
       await store.cookies.remove(new URL(cookie.path || '/', url).href, cookie.name);
     }
   }
-  const tray = testMode ? { status: (value: string) => testLog(value), tray: undefined } : createTray(brand, () => open?.(), () => {
-    auth.clear();
-    closePreviews();
-    void Promise.all([clearCookies(origin), clearCookies('https://' + brand.previewHost)])
-      .finally(() => open?.(origin + '/_wp/logout')).catch(() => tray.status('退出登录未完成，请重试'));
-  });
+  async function logout(all: boolean) {
+    if (loggingOut) return;
+    loggingOut = true;
+    let revokeFailed = false;
+    try {
+      if (all) {
+        try { await auth.revokeAll(); } catch { revokeFailed = true; }
+      }
+      auth.clear();
+      closePreviews();
+      await Promise.all([clearCookies(origin), clearCookies('https://' + brand.previewHost)]);
+      open?.(origin + '/_wp/logout');
+      if (revokeFailed) tray.status('本机已退出，其他桌面设备的退出未确认');
+    } catch { tray.status('退出登录未完成，请重试'); }
+    finally { loggingOut = false; }
+  }
+  const tray = testMode ? { status: (value: string) => testLog(value), tray: undefined }
+    : createTray(brand, () => open?.(), () => void logout(false), () => void logout(true));
+  const settings: HelperSettings = new HelperSettings(app.getPath('userData'), async () => {
+    if (testMode) return;
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+    if (!canceled && filePaths.length === 1) return filePaths[0];
+  }, () => relay.settingsChanged());
   const auth = new DesktopAuth(origin, filename('desktop-token.enc'), safeStorage, {
     cookie: async () => (await store.cookies.get({ url: origin, name: 'wp_sid' }))[0]?.value,
     authorize: url => authorize(store, url),
     fetch: (url, options) => store.fetch(url, { credentials: 'omit', cache: 'no-store',
       redirect: 'error', signal: AbortSignal.timeout(15_000), ...options })
-  }, tray.status);
+  }, tray.status, undefined, state => {
+    if (state === 'available') { if (!quitting && !loggingOut) relay.connect(); }
+    else if (state === 'revoked') relay.credentialsRevoked();
+    else relay.stop('user_logout');
+  }, () => settings.snapshot().deviceName);
+  const relay: DesktopRelay = new DesktopRelay({ origin, settings, auth, appVersion: app.getVersion(), status: tray.status });
+  win.on('focus', () => relay.active());
+  win.webContents.ipc.on('wp-online', event => {
+    if (event.senderFrame === win.webContents.mainFrame) relay.wake();
+  });
+  powerMonitor.on('unlock-screen', () => relay.wake());
+  app.on('before-quit', () => relay.stop('app_quit'));
   store.cookies.on('changed', (_event, cookie, _cause, removed) => {
     const domain = cookie.domain?.replace(/^\./, '');
     if (cookie.name !== 'wp_sid' || !domain || !(new URL(origin).hostname === domain ||
@@ -87,7 +119,7 @@ function start() {
       closePreviews();
       void clearCookies('https://' + brand.previewHost).catch(() => {});
     }
-    void auth.sync();
+    sync();
   });
   if (testMode) {
     store.setPermissionCheckHandler(() => false);
@@ -118,8 +150,8 @@ function start() {
       if (Notification.isSupported()) new Notification({ title: brand.displayName, body: '工作伙伴仍在运行，可从系统托盘重新打开。' }).show();
     }
   });
-  const timer = setInterval(() => void auth.sync(), 5 * 60_000);
-  powerMonitor.on('resume', () => { void probe(); void auth.sync(); });
+  const timer = setInterval(sync, 5 * 60_000);
+  powerMonitor.on('resume', () => { void probe(); relay.wake(); sync(); });
   app.on('will-quit', () => { clearInterval(timer); tray.tray?.destroy(); });
   navigate(pending || origin + '/');
   if (!testMode && (pending || (!process.argv.includes('--hidden') && !app.getLoginItemSettings().wasOpenedAtLogin))) win.show();

@@ -17,12 +17,51 @@ export class DesktopAuth {
   private epoch = 0;
   private queue = Promise.resolve();
   private nextCheck = 0;
+  private current?: string;
+  private binding?: string;
   constructor(private origin: string, private file: string, private vault: Vault, private io: Transport,
-    private status: (text: string) => void, private warn: (text: string) => void = console.warn) {}
+    private status: (text: string) => void, private warn: (text: string) => void = console.warn,
+    private changed: (state: 'available' | 'cleared' | 'revoked') => void = () => {}, private deviceName = hostname) {}
+
+  token() { return this.current; }
+
+  markRevoked() {
+    ++this.epoch;
+    this.nextCheck = 0;
+    this.current = undefined;
+    this.changed('revoked');
+    if (this.binding) writeFileSync(this.file + '.revoked', this.binding, { mode: 0o600 });
+    rmSync(this.file, { force: true });
+    this.status('桌面登录已失效，请退出后重新登录');
+  }
+
+  async refresh() {
+    const epoch = this.epoch;
+    let renewed = false;
+    const work = this.queue.then(async () => {
+      if (epoch !== this.epoch || !this.current) return;
+      this.nextCheck = 0;
+      await this.check(epoch);
+      renewed = epoch === this.epoch && !!this.current && this.nextCheck > 0;
+    });
+    this.queue = work.catch(() => {});
+    await work;
+    return renewed;
+  }
+
+  async revokeAll() {
+    if (!this.current) throw new Error('本机没有可用的桌面凭据');
+    const response = await this.io.fetch(this.origin + '/_wp/api/desktop/revoke-all', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + this.current }
+    });
+    if (!response.ok) throw new Error('退出所有桌面设备失败');
+  }
 
   clear() {
     ++this.epoch;
     this.nextCheck = 0;
+    this.current = this.binding = undefined;
+    this.changed('cleared');
     rmSync(this.file + '.revoked', { force: true });
     rmSync(this.file, { force: true });
     this.status('尚未登录');
@@ -57,10 +96,17 @@ export class DesktopAuth {
     if (!unionId) { this.clear(); return; }
     const revoked = this.file + '.revoked';
     const identityBinding = hash(binding + '\n' + unionId);
+    if (this.binding && this.binding !== identityBinding) {
+      this.current = undefined;
+      this.nextCheck = 0;
+      this.changed('cleared');
+    }
+    this.binding = identityBinding;
     if (existsSync(revoked)) {
       const marker = readFileSync(revoked, 'utf8');
       // Older clients recorded just the cookie binding.
       if (marker === binding || marker === identityBinding) {
+        this.changed('revoked');
         this.status('桌面登录已失效，请退出后重新登录');
         return;
       }
@@ -105,14 +151,12 @@ export class DesktopAuth {
           cb.searchParams.get('state') !== state || !code) throw new Error('回调无效');
       response = await this.io.fetch(this.origin + '/_wp/api/desktop/token', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, code_verifier: verifier, redirect_uri: redirect, device_name: hostname() })
+        body: JSON.stringify({ code, code_verifier: verifier, redirect_uri: redirect, device_name: this.deviceName() })
       });
     }
     if (epoch !== this.epoch) return;
     if (saved && [401, 403].includes(response.status)) {
-      this.clear();
-      writeFileSync(revoked, identityBinding, { mode: 0o600 });
-      this.status('桌面登录已失效，请退出后重新登录');
+      this.markRevoked();
       return;
     }
     if (!response.ok) throw new Error('无法获取桌面凭据');
@@ -127,11 +171,14 @@ export class DesktopAuth {
       this.status(message);
       return;
     }
-    if (!value.access_token?.startsWith('wpd.') || !(Date.parse(value.expires_at) > now)) throw new Error('凭据无效');
+    if ((typeof value.access_token !== 'string' || !/^wpd\.[a-zA-Z0-9_.-]+$/.test(value.access_token)) || !(Date.parse(value.expires_at) > now)) throw new Error('凭据无效');
     const encrypted = this.vault.encryptString(JSON.stringify({ binding, union_id: unionId, access_token: value.access_token, expires_at: value.expires_at }));
     writeFileSync(this.file + '.tmp', encrypted, { mode: 0o600 });
     renameSync(this.file + '.tmp', this.file);
     this.nextCheck = now + Math.min(day, (Date.parse(value.expires_at) - now) / 2);
-    this.status('已登录（已获取桌面凭据）');
+    const changed = this.current !== value.access_token;
+    if (!this.current) this.status('已登录（已获取桌面凭据）');
+    this.current = value.access_token;
+    if (changed) this.changed('available');
   }
 }

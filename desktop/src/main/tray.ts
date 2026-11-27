@@ -16,7 +16,7 @@ function trayImage() {
   return image;
 }
 
-export function createTray(brand: Brand, show: () => void, logout: () => void) {
+export function createTray(brand: Brand, show: () => void, logout: () => void, logoutAll: () => void) {
   const tray = new Tray(trayImage());
   const args = process.platform === 'win32' ? ['--hidden'] : [];
   let status = '尚未登录';
@@ -26,7 +26,7 @@ export function createTray(brand: Brand, show: () => void, logout: () => void) {
       { label: '打开工作伙伴', click: show }, { label: status, enabled: false }, { type: 'separator' },
       { label: '开机启动', type: 'checkbox', checked: app.getLoginItemSettings({ args }).openAtLogin,
         click: item => app.setLoginItemSettings({ openAtLogin: item.checked, args }) },
-      { label: '退出登录', click: logout }, { type: 'separator' }, { label: '完全退出', click: () => app.quit() }
+      { label: '退出登录', click: logout }, { label: '退出所有桌面设备', click: logoutAll }, { type: 'separator' }, { label: '完全退出', click: () => app.quit() }
     ]));
   }
   render();
