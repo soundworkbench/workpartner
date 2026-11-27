@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { win32 } from 'node:path';
+import { holdHandle } from './helper-handles.js';
 import { fail } from './helper-errors.js';
 
 // libuv lstat recognizes junctions and symlinks, but other reparse tags can look
@@ -33,20 +34,24 @@ export function checkWindowsAttributes(path: string) {
   requirePlainAttributes(api.attributes(extended(path)));
 }
 
-export function pinWindowsPath(path: string, kernel = api ??= loadApi()) {
-  const handles: Handle[] = [];
-  function close() { for (const handle of handles.reverse()) kernel.close(handle); }
+export function pinWindowsPath(path: string, kernel = api ??= loadApi(), parentPinned = false) {
+  const handles: (() => void)[] = [];
+  function close() { for (const release of handles.reverse()) release(); }
   try {
     let current = win32.parse(path).root;
-    for (const name of ['', ...path.slice(current.length).split('\\').filter(Boolean)]) {
-      current = win32.join(current, name);
+    const parts = parentPinned ? [path] : ['', ...path.slice(current.length).split('\\').filter(Boolean)];
+    for (const part of parts) {
+      current = parentPinned ? path : win32.join(current, part);
       // FILE_READ_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING,
       // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
-      const handle = kernel.open(extended(current), 0x80, 1, null, 3, 0x02200000, 0);
-      if (BigInt(handle) === -1n) fail('PATH_NOT_ALLOWED');
-      handles.push(handle);
+      const handle = holdHandle(() => {
+        const value = kernel.open(extended(current), 0x80, 1, null, 3, 0x02200000, 0);
+        if (BigInt(value) === -1n) fail('PATH_NOT_ALLOWED');
+        return value;
+      }, value => kernel.close(value));
+      handles.push(handle.close);
       const info = Buffer.alloc(8); // FILE_ATTRIBUTE_TAG_INFO
-      if (!kernel.info(handle, 9, info, info.length)) fail('PATH_NOT_ALLOWED');
+      if (!kernel.info(handle.value, 9, info, info.length)) fail('PATH_NOT_ALLOWED');
       requirePlainAttributes(info.readUInt32LE());
     }
     return close;

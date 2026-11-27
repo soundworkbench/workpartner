@@ -1,3 +1,4 @@
+import { handleSlots, releaseWorkerSlots } from './helper-handles.js';
 import { Worker } from 'node:worker_threads';
 import { fail, ToolError, type ErrorCode } from './helper-errors.js';
 import type { SearchProgress, ToolData } from './helper-tools.js';
@@ -18,7 +19,8 @@ export function createToolRunner(): RunTool {
     const entry = new URL('./helper-worker.js', import.meta.url);
     // Node workers load their entry directly from disk in packaged Electron builds.
     entry.pathname = entry.pathname.replace(/\/app\.asar\/(dist(?:-test)?\/main\/helper-worker\.js)$/, '/app.asar.unpacked/$1');
-    const worker = new Worker(entry, { workerData: { ...job, deadline, scanCount, cancelFlag } });
+    const worker = new Worker(entry, { workerData: { ...job, deadline, scanCount, cancelFlag, handleSlots } });
+    const id = worker.threadId;
     workers++;
     const matches: SearchProgress['match'][] = [];
     let latest: SearchProgress | undefined, finished = false;
@@ -49,6 +51,7 @@ export function createToolRunner(): RunTool {
     });
     worker.on('error', () => { if (finish()) reject(new ToolError('INTERNAL_ERROR')); });
     worker.once('exit', () => {
+      releaseWorkerSlots(id);
       workers--;
       if (finish()) reject(new ToolError('INTERNAL_ERROR'));
     });

@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, opendirSync, readSync, type Dir, type Dirent } from 'node:fs';
 import { isUtf8 } from 'node:buffer';
 import { join, relative } from 'node:path';
+import { holdHandle } from './helper-handles.js';
 import { errorCode, fail } from './helper-errors.js';
 import { PathPolicy, type CheckedPath, type RootGrant } from './helper-paths.js';
 import { pinWindowsPath } from './helper-windows.js';
@@ -23,16 +24,11 @@ function boolean(args: Args, key: string) {
   if (args[key] !== undefined && typeof args[key] !== 'boolean') fail('INVALID_PARAMS');
   return args[key] === true;
 }
-function withDirectory(policy: PathPolicy, input: unknown, visit: (dir: CheckedPath, handle: Dir) => void) {
-  policy.withResolved(input, false, dir => {
-    if (!dir.stat.isDirectory()) fail('NOT_A_DIRECTORY');
-    const unpin = process.platform === 'win32' ? pinWindowsPath(dir.path) : undefined;
-    try {
-      dir.verify();
-      const handle = opendirSync(dir.name);
-      try { visit(dir, handle); } finally { handle.closeSync(); }
-    } finally { unpin?.(); }
-  });
+function withDirectory(dir: CheckedPath, visit: (handle: Dir) => void) {
+  if (!dir.stat.isDirectory()) fail('NOT_A_DIRECTORY');
+  dir.verify();
+  const handle = holdHandle(() => opendirSync(dir.name), dir => dir.closeSync());
+  try { visit(handle.value); } finally { handle.close(); }
 }
 function ignoreEntry(e: unknown) {
   if (!['PATH_NOT_ALLOWED','SENSITIVE_PATH_BLOCKED','PATH_NOT_FOUND','NOT_A_DIRECTORY','NOT_A_REGULAR_FILE',
@@ -45,9 +41,9 @@ function list(policy: PathPolicy, args: Args, check: () => void) {
   type Entry = { name: string; path: string; kind: string; mtime: string; size_bytes?: number };
   const entries: Entry[] = [];
   let skipped = 0, visited = 0, truncated = false;
-  function walk(input: unknown, level: number) {
+  function walk(dir: CheckedPath, level: number) {
     const children: Entry[] = [];
-    withDirectory(policy, input, (dir, handle) => {
+    withDirectory(dir, handle => {
       if (level === 1) root = dir.path;
       for (let d: Dirent | null; (d = handle.readSync());) {
         check();
@@ -62,7 +58,7 @@ function list(policy: PathPolicy, args: Args, check: () => void) {
             if (!st.isSymbolicLink() && !st.isFile() && !st.isDirectory()) return;
             const kind = st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'dir' : 'file';
             return { name, path, kind, mtime: st.mtime.toISOString(), ...(kind === 'file' && { size_bytes: Number(st.size) }) };
-          });
+          }, dir);
           if (entry) children.push(entry); else skipped++;
         } catch (e) { ignoreEntry(e); skipped++; }
       }
@@ -74,11 +70,11 @@ function list(policy: PathPolicy, args: Args, check: () => void) {
       entries.push(item);
       if (item.kind === 'dir' && level < depth) {
         if (visited >= 2000) { truncated = true; continue; }
-        try { walk(item.path, level + 1); } catch (e) { ignoreEntry(e); skipped++; }
+        try { policy.withResolved(item.path, false, child => walk(child, level + 1), dir); } catch (e) { ignoreEntry(e); skipped++; }
       }
     }
   }
-  walk(args.path, 1);
+  policy.withResolved(args.path, false, dir => walk(dir, 1));
   return { path: root, entries, skipped_count: skipped, truncated };
 }
 
@@ -86,11 +82,11 @@ const MiB = 1024 * 1024;
 function readText(target: CheckedPath, limit: number, check: () => void, onRead?: (n: number) => void) {
   const path = target.path;
   if (!target.stat.isFile()) fail('NOT_A_REGULAR_FILE');
-  const unpin = process.platform === 'win32' ? pinWindowsPath(path) : undefined;
-  let fd: number | undefined;
+  const unpin = process.platform === 'win32' ? pinWindowsPath(path, undefined, true) : undefined;
+  let handle: { value: number; close(): void } | undefined;
   try {
-    const opened = openSync(target.name, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
-    fd = opened;
+    handle = holdHandle(() => openSync(target.name, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0)), closeSync);
+    const opened = handle.value;
     const verify = () => {
       const st = fstatSync(opened, { bigint: true });
       if (!st.isFile()) fail('NOT_A_REGULAR_FILE');
@@ -104,7 +100,7 @@ function readText(target: CheckedPath, limit: number, check: () => void, onRead?
     let count = 0;
     while (count < buf.length) {
       check();
-      const n = readSync(fd, buf, count, Math.min(64 * 1024, buf.length - count), count);
+      const n = readSync(opened, buf, count, Math.min(64 * 1024, buf.length - count), count);
       if (!n) break;
       count += n;
       onRead?.(n);
@@ -114,7 +110,7 @@ function readText(target: CheckedPath, limit: number, check: () => void, onRead?
     if (bytes.subarray(0, 8192).includes(0) || !isUtf8(bytes)) fail('BINARY_FILE_UNSUPPORTED');
     return { path, bytes };
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    handle?.close();
     unpin?.();
   }
 }
@@ -199,9 +195,8 @@ function search(policy: PathPolicy, args: Args, check: () => void, progress?: (p
       line++;
     }
   }
-  function walk(input: unknown, level: number, base?: string) {
-    withDirectory(policy, input, (dir, handle) => {
-      const root = base ?? dir.path;
+  function walk(dir: CheckedPath, level: number, root: string) {
+    withDirectory(dir, handle => {
       for (let d: Dirent | null; !truncated && (d = handle.readSync());) {
         check();
         if (d.isSymbolicLink() || d.name === '.git' || d.name === 'node_modules') continue;
@@ -209,7 +204,6 @@ function search(policy: PathPolicy, args: Args, check: () => void, progress?: (p
         const path = join(dir.path, name);
         try {
           policy.withResolved(path, false, target => {
-            dir.verify();
             const st = target.stat;
             if (!st.isDirectory() && !st.isFile()) return;
             if (st.isFile()) {
@@ -220,8 +214,8 @@ function search(policy: PathPolicy, args: Args, check: () => void, progress?: (p
               hit({ path, kind: st.isDirectory() ? 'dir' : 'file' });
             }
             if (mode === 'content' && st.isFile()) scanContent(target);
-            if (st.isDirectory() && level < depth && !truncated) walk(path, level + 1, root);
-          });
+            if (st.isDirectory() && level < depth && !truncated) walk(target, level + 1, root);
+          }, dir);
         } catch (e) { ignoreEntry(e); }
         if (scanned >= 5000 || bytesRead >= 50 * MiB) truncated = true;
       }
@@ -229,7 +223,7 @@ function search(policy: PathPolicy, args: Args, check: () => void, progress?: (p
   }
   try {
     for (const input of args.path === undefined ? policy.grants.map(g => g.path) : [args.path]) {
-      walk(input, 1);
+      policy.withResolved(input, false, dir => walk(dir, 1, dir.path));
       if (truncated) break;
     }
   } catch (e) {

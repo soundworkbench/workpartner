@@ -12,6 +12,7 @@ const messages = {
   TOOL_NOT_SUPPORTED: '此设备不支持该工具。',
   TOOL_TIMEOUT: '本机响应超时，请缩小范围后重试。',
   CONCURRENCY_LIMIT_EXCEEDED: '本机并发请求已达上限。',
+  LIMIT_EXCEEDED: '本机打开的文件数量已达上限。',
   INTERNAL_ERROR: '执行过程中发生内部错误。'
 };
 export type ErrorCode = keyof typeof messages;
@@ -20,11 +21,12 @@ export class ToolError extends Error {
 }
 export function fail(code: ErrorCode): never { throw new ToolError(code); }
 export function wireError(code: ErrorCode) {
-  return { code, message: messages[code], retryable: ['TOOL_TIMEOUT', 'CONCURRENCY_LIMIT_EXCEEDED', 'INTERNAL_ERROR'].includes(code) };
+  return { code, message: messages[code], retryable: ['TOOL_TIMEOUT', 'LIMIT_EXCEEDED', 'CONCURRENCY_LIMIT_EXCEEDED', 'INTERNAL_ERROR'].includes(code) };
 }
 export function errorCode(e: unknown): ErrorCode {
   if (e instanceof ToolError) return e.code;
   switch ((e as NodeJS.ErrnoException)?.code) {
+    case 'EMFILE': case 'ENFILE': return 'LIMIT_EXCEEDED';
     case 'ENOTDIR': return 'NOT_A_DIRECTORY';
     case 'ENOENT': return 'PATH_NOT_FOUND';
     case 'EPERM': case 'EACCES': case 'ELOOP': return 'PATH_NOT_ALLOWED';

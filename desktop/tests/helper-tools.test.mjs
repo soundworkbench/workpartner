@@ -387,3 +387,62 @@ test('Windows rejects reparse attributes on pinned handles and releases the enti
     assert.deepEqual(closed, [3, 2, 1]);
   }
 });
+
+test('four simultaneous depth-eight searches share a bounded set of handles', async t => {
+  const { Worker } = await import('node:worker_threads');
+  const { handleLimit } = await import('../dist/main/helper-handles.js');
+  const { root, store, config } = fixture(t);
+  await config.addDirectory();
+  const deepest = path.join(root, ...Array(7).fill('child'));
+  fs.mkdirSync(deepest, { recursive: true });
+  const file = path.join(deepest, 'match');
+  fs.writeFileSync(file, 'needle');
+  const handleSlots = new Int32Array(new SharedArrayBuffer(4 * handleLimit));
+  const barrier = new Int32Array(new SharedArrayBuffer(8));
+  // Hold all four reads at their deepest point to measure overlapping live
+  // pins, directory streams and file handles independently of worker timing.
+  const source = `
+    const { workerData, parentPort } = require('node:worker_threads');
+    const fs = require('node:fs');
+    const { root, store, roots, url, handleSlots, barrier } = workerData;
+    const read = fs.readSync;
+    fs.readSync = (...args) => {
+      if (Atomics.add(barrier, 0, 1) === 3) {
+        Atomics.store(barrier, 1, handleSlots.filter(Boolean).length);
+        Atomics.notify(barrier, 0);
+      }
+      for (let n; (n = Atomics.load(barrier, 0)) < 4;) {
+        if (Atomics.wait(barrier, 0, n, 5000) === 'timed-out') throw Error('workers did not overlap');
+      }
+      return read(...args);
+    };
+    require('node:module').syncBuiltinESMExports();
+    import(url).then(({ executeTool }) => parentPort.postMessage(executeTool('desktop_search_files',
+      { path: root, query: 'needle', mode: 'content', max_depth: 8 }, roots, store, Date.now() + 10000)));
+  `;
+  const url = new URL('../dist/main/helper-tools.js', import.meta.url).href;
+  const results = await Promise.all(Array.from({ length: 4 }, () => new Promise((resolve, reject) => {
+    const worker = new Worker(source, { eval: true, workerData: { root, store, roots: config.grants(), url, handleSlots, barrier } });
+    let data;
+    worker.on('message', result => { data = result; });
+    worker.on('error', reject);
+    worker.on('exit', code => code === 0 ? resolve(data) : reject(Error('worker exited ' + code)));
+  })));
+  for (const result of results) assert.deepEqual(result.matches.map(match => match.path), [file]);
+  const peak = Atomics.load(barrier, 1);
+  assert.ok(peak >= 4 * 17 && peak <= handleLimit, 'peak ' + peak);
+  t.diagnostic('peak ' + peak + ' of ' + handleLimit + ' helper handles');
+  assert.ok(handleSlots.every(owner => owner === 0));
+});
+
+test('running out of handle slots returns a limit error and releases partial acquisitions', async t => {
+  const { handleSlots } = await import('../dist/main/helper-handles.js');
+  const { root, config, run } = fixture(t);
+  await config.addDirectory();
+  fs.mkdirSync(path.join(root, 'child'));
+  handleSlots.fill(-1, 2);
+  try {
+    assert.throws(() => run('search_files', { query: '*' }), code('LIMIT_EXCEEDED'));
+    assert.deepEqual([...handleSlots.slice(0, 2)], [0, 0]);
+  } finally { handleSlots.fill(0); }
+});
